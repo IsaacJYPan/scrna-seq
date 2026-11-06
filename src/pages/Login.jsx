@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
+import { Shield, Lock, Mail, User, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
 import auth from '../auth';
 import passwordPolicy from '../../shared/passwordPolicyContract.json';
+import TraceMark from '../components/TraceMark';
 import { buildPublicExampleUrl } from '../examples/publicExampleRoute';
 
 export default function Login({ onLogin, notice = '', theme = 'light', setTheme, allowDemo = true, submitLabel = 'Open Workbench', pendingLabel = 'Opening workbench…' }) {
@@ -113,46 +114,66 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
   };
 
   const inputBase =
-    'w-full rounded-xl border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
+    'w-full rounded-md border bg-surface py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
   const tabBase =
-    'py-2 rounded-lg text-sm font-medium transition-colors';
+    'py-2 rounded text-sm font-medium transition-colors';
 
   return (
-    <div className="login-bg h-dvh w-full flex items-start justify-center p-4 sm:p-6 relative overflow-y-auto custom-scrollbar">
-      {/* Theme toggle — lets users pick the previous dark theme before signing in */}
+    <div className="login-bg h-dvh w-full flex flex-col lg:flex-row relative overflow-y-auto custom-scrollbar">
+      {/* Theme toggle — lets users pick the dark theme before signing in */}
       <button
         type="button"
         aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         onClick={() => setTheme?.(isDark ? 'light' : 'dark')}
-        className="absolute top-5 right-5 z-20 w-10 h-10 rounded-full border border-border bg-surface/80 backdrop-blur text-textMuted hover:text-text hover:border-primary/40 transition-colors flex items-center justify-center"
+        className="absolute top-4 right-4 z-20 w-10 h-10 rounded-md border border-border bg-surface text-textMuted hover:text-text transition-colors flex items-center justify-center"
       >
         {isDark ? <Sun size={18} /> : <Moon size={18} />}
       </button>
 
-      <div className="w-full max-w-sm relative z-10 my-auto shrink-0">
-        {/* Brand */}
-        <div className="flex flex-col items-center text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 border border-primary/20 mb-4">
-            <Microscope size={30} className="text-primary" />
-          </div>
-          <h1 className="text-2xl font-bold text-text tracking-tight">TraceOmics</h1>
-          <p className="text-textMuted text-sm mt-1.5">Reproducible Single-Cell Analysis Workbench</p>
+      {/* Plate: the wordmark and the analysis trace every result keeps */}
+      <section className="login-plate shrink-0 px-6 py-8 sm:px-10 lg:flex lg:w-[46%] lg:max-w-[44rem] lg:flex-col lg:justify-between lg:px-14 lg:py-14">
+        <div className="flex items-center gap-3">
+          <TraceMark size={36} className="text-[#eceaff]" />
+          <h1 className="wordmark text-[2rem] leading-none sm:text-[2.5rem]">TraceOmics</h1>
         </div>
+        <div className="hidden lg:block">
+          <p className="wordmark max-w-[20ch] text-[2.75rem] leading-[1.1]">Every cluster, traced back to its counts.</p>
+          <p className="mt-5 max-w-[46ch] text-[0.9375rem] leading-relaxed text-[#c9c6ef]">
+            Run Seurat analyses of single-cell and spatial data. Each saved result keeps the settings and the earlier steps it came from.
+          </p>
+          <svg className="trace-figure mt-12 w-full max-w-[34rem]" viewBox="0 0 520 96" role="img" aria-label="Analysis stages: counts, quality control, normalization, PCA, clusters, UMAP">
+            <line x1="14" y1="30" x2="506" y2="30" strokeWidth="1.5" />
+            {['Counts', 'QC', 'Normalize', 'PCA', 'Clusters', 'UMAP'].map((stage, index) => {
+              const x = 14 + index * 98.4;
+              return <g key={stage}>
+                <circle cx={x} cy="30" r={index === 5 ? 8 : 6.5} strokeWidth="1.5" className={index === 5 ? 'now' : 'done'} />
+                <text x={x} y="66" textAnchor={index === 0 ? 'start' : index === 5 ? 'end' : 'middle'}>{stage}</text>
+              </g>;
+            })}
+          </svg>
+        </div>
+        <p className="mt-2 text-sm text-[#c9c6ef] lg:mt-0">Reproducible single-cell analysis workbench</p>
+      </section>
 
+      <div className="flex flex-1 items-start justify-center p-4 sm:p-8 lg:items-center">
+      <div className="w-full max-w-sm relative z-10 shrink-0 py-6 lg:my-auto">
+        <h2 className="mb-6 font-[family-name:var(--font-display)] text-[1.75rem] font-normal leading-tight text-text">
+          {mode === 'signup' ? 'Create your account' : 'Sign in to your workbench'}
+        </h2>
         {/* Card */}
-        <div className="bg-surface border border-border rounded-2xl shadow-xl shadow-slate-900/5 p-6 sm:p-7">
+        <div>
           {/* Mode Toggle — segmented control */}
-          {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-xl">
+          {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-surface border border-border rounded-md">
             <button
               onClick={() => { setMode('login'); setPasswordConfirmation(''); setError(''); setSuccess(''); }}
-              className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
+              className={`${tabBase} ${mode === 'login' ? 'bg-primary/10 text-text' : 'text-textMuted hover:text-text'}`}
             >
               Log In
             </button>
               <button
                 onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
-                className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
+                className={`${tabBase} ${mode === 'signup' ? 'bg-primary/10 text-text' : 'text-textMuted hover:text-text'}`}
               >
                 Sign Up
               </button>
@@ -165,7 +186,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           )}
 
           {demoMode && allowDemo && (
-            <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 p-4 text-center">
+            <div className="mb-5 rounded-md border border-primary/25 bg-primary/5 p-4">
               <p className="text-xs text-textMuted">Explore a curated, temporary single-cell project. Uploads and Expert R are disabled.</p>
               <button
                 type="button"
@@ -297,14 +318,14 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             <button
               type="submit"
               disabled={loading || !emailValid || !password || (mode === 'signup' && (!passwordMeetsLength || !passwordsMatch))}
-              className="w-full bg-primary hover:bg-[#0077ed] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold py-3.5 rounded-xl transition-colors flex items-center justify-center gap-2.5"
+              className="btn btn-primary w-full py-3"
             >
               {loading ? <>
                 <div aria-hidden="true" className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                 {mode === 'signup' ? 'Creating account…' : pendingLabel}
               </> : (
                 <>
-                  {mode === 'login' ? submitLabel : 'Create Account'} <Shield size={17} />
+                  {mode === 'login' ? submitLabel : 'Create Account'}
                 </>
               )}
             </button>
@@ -315,6 +336,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           </div>}
 
         </div>
+      </div>
       </div>
     </div>
   );

@@ -127,7 +127,7 @@ function badgeClass(tone = 'slate') {
 
 function StatusBadge({ children, tone = 'slate' }) {
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${badgeClass(tone)}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold ${badgeClass(tone)}`}>
       {children}
     </span>
   );
@@ -137,7 +137,7 @@ function SummaryMetric({ label, value, detail }) {
   return (
     <div className="rounded border border-border bg-surface/70 p-4">
       <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-textMuted">{label}</div>
+      <div className="mt-1 text-[10px] font-bold text-textMuted">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
@@ -192,7 +192,7 @@ function TopMarkersTable({ markers }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[680px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold text-textMuted">
           <tr>
             <th className="p-3">Group</th>
             <th className="p-3">Gene</th>
@@ -462,7 +462,7 @@ export default function DifferentialExpression({
             <button
               onClick={launchDegJob}
               disabled={!canLaunch}
-              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
+              className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
             >
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
               Run marker analysis
@@ -559,7 +559,7 @@ export default function DifferentialExpression({
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group by</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Group by</span>
               <select
                 value={params.groupBy}
                 onChange={event => setParam('groupBy', event.target.value)}
@@ -571,7 +571,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Assay</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Assay</span>
               <select
                 value={params.assay}
                 onChange={event => setParam('assay', event.target.value)}
@@ -583,7 +583,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">min.pct</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">min.pct</span>
               <input
                 type="number"
                 min="0"
@@ -596,7 +596,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">logfc threshold</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">logfc threshold</span>
               <input
                 type="number"
                 min="0"
@@ -609,7 +609,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Top markers / group</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Top markers / group</span>
               <input
                 type="number"
                 min="5"
@@ -622,7 +622,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Max cells / ident</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Max cells / ident</span>
               <input
                 type="number"
                 min="1"
@@ -636,7 +636,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Random seed</span>
               <input
                 type="number"
                 min="0"
@@ -698,11 +698,11 @@ export default function DifferentialExpression({
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
                 <div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Outcome</div>
+                  <div className="text-[10px] font-bold text-textMuted">Outcome</div>
                   <div className="mt-1 text-text">{displayRunStatus(job.status)}</div>
                 </div>
                 <div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div>
+                  <div className="text-[10px] font-bold text-textMuted">Last refreshed</div>
                   <div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div>
                 </div>
               </div>

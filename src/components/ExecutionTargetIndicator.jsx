@@ -23,7 +23,7 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projec
   const runtime = R_STATUS[deploymentPolicy.expertRStatus?.state]
     || (deploymentPolicy.demoMode ? 'Guided demo' : deploymentPolicy.expertREnabled ? 'Custom R available' : 'Custom R status unavailable');
   const disconnected = target?.sshTunnel?.state && target.sshTunnel.state !== 'connected';
-  return <><div aria-label="Execution target" className="shrink-0 h-12 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
+  return <><div aria-label="Execution target" className="shrink-0 min-h-12 py-1.5 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
     <div className="min-w-0 flex-1">
       <span className="block truncate font-medium">{target?.name || 'Analysis server'}</span>
       {target?.sshTunnel && <span role="status" className={`block truncate ${disconnected ? 'text-amber-800 dark:text-amber-200' : 'text-textMuted'}`}>

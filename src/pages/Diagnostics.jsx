@@ -73,18 +73,18 @@ export default function Diagnostics({ apiStatus }) {
 
           <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="p-4 bg-background rounded-lg border border-border">
-              <div className="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">Compute status</div>
+              <div className="text-xs text-slate-400 font-bold mb-1">Compute status</div>
               <div className="font-medium text-text flex items-center gap-2">
                 <CheckCircle2 size={16} className={computeAvailable ? 'text-success' : 'text-textMuted'} />
                 {isChecking ? 'Checking…' : computeAvailable ? 'Compute available' : 'Compute unavailable'}
               </div>
             </div>
             <div className="p-4 bg-background rounded-lg border border-border">
-              <div className="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">Detected R version</div>
+              <div className="text-xs text-slate-400 font-bold mb-1">Detected R version</div>
               <div className="font-medium text-text">{isChecking ? 'Checking…' : rVersion}</div>
             </div>
             <div className="p-4 bg-background rounded-lg border border-border">
-              <div className="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">Supported target</div>
+              <div className="text-xs text-slate-400 font-bold mb-1">Supported target</div>
               <div className="font-medium text-text">{SUPPORTED_R_TARGET}</div>
             </div>
           </div>

@@ -14,7 +14,7 @@ export default function AnalysisStatusBar({ datasetInfo, unsavedLiveChanges, che
   const savedButNotOpened = phase === 'error' && checkpointSaveState.durableSaved;
   const status = savedButNotOpened ? 'Saved; opening failed' : PHASE_LABEL[phase] || (unsavedLiveChanges ? 'Unsaved live changes.' : liveAttached ? 'Live analysis' : 'Saved object selected');
   const attention = unsavedLiveChanges || phase === 'error' || phase === 'pending';
-  return <section aria-label="Analysis status" className={`shrink-0 h-16 border-b border-border px-4 flex items-center justify-between gap-3 ${attention ? 'bg-amber-500/10' : 'bg-surface'}`}>
+  return <section aria-label="Analysis status" className={`shrink-0 min-h-14 py-2 border-b border-border px-4 flex items-center justify-between gap-3 ${attention ? 'bg-amber-500/10' : 'bg-surface'}`}>
     <div className="min-w-0 flex-1">
       <p role="status" className="truncate text-sm font-semibold text-text" title={status}>{status}</p>
       <p className="truncate text-xs text-textMuted" title={datasetInfo.displayName || datasetInfo.name}>{datasetInfo.displayName || datasetInfo.name || 'Selected analysis'}</p>

@@ -104,7 +104,7 @@ export default function SharedSnapshotLanding({ state, onRefresh, onReadFailure,
 
       {snapshot && <>
         <section aria-label="Saved research question" className="space-y-4">
-          <div><p className="mb-1 text-xs font-medium uppercase tracking-wide text-textMuted">Saved analysis {snapshot.analysis.version}</p>
+          <div><p className="mb-1 text-xs font-medium text-textMuted">Saved analysis {snapshot.analysis.version}</p>
             <h1 className="whitespace-pre-wrap break-words text-2xl font-semibold">{snapshot.analysis.name}</h1></div>
           <div><h2 className="text-sm font-semibold">Research question</h2><p className="mt-1 whitespace-pre-wrap break-words text-sm text-textMuted">{snapshot.analysis.description || 'No research question was supplied in this saved analysis.'}</p></div>
           <p className="break-words text-sm text-textMuted">Published by {record.publisherLabel} · <time dateTime={record.publishedAt}>{new Date(record.publishedAt).toLocaleString()}</time></p>

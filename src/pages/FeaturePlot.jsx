@@ -132,7 +132,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
     font: {
       color: palette.text,
       size: 12,
-      family: 'Inter, system-ui',
+      family: '"Instrument Sans Variable", system-ui, sans-serif',
     },
     hoverlabel: getPlotHoverStyle(lightMode ? 'light' : 'dark'),
     margin: { l: 44, r: 12, t: 24, b: 120 },

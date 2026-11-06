@@ -3,16 +3,19 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  --color-primary: #0071e3;
-  --color-background: #f5f5f7;
-  --color-surface: #ffffff;
-  --color-border: #d2d2d7;
-  --color-text: #1d1d1f;
-  /* Keep supporting copy and compact status labels comfortably above AA on
-     both white and lightly tinted surfaces. */
-  --color-textMuted: #5c5c62;
-  --color-success: #1f6f35;
-  --color-danger: #b91c1c;
+  /* Stained-slide palette: slide glass, coverslip, ink, hematoxylin, eosin. */
+  --color-primary: #3e3a92;
+  --color-background: #edefec;
+  --color-surface: #fafbf9;
+  --color-border: #cfd5d0;
+  --color-text: #18201e;
+  /* Supporting copy stays comfortably above AA on glass and coverslip. */
+  --color-textMuted: #56605c;
+  --color-success: #1f6b43;
+  --color-danger: #b4232f;
+  --color-trace: #c23b6b;
+  --font-sans: "Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif;
+  --font-display: "Newsreader Variable", "Newsreader", Georgia, serif;
 }
 
 @layer base {
@@ -21,33 +24,42 @@
      --color-surfaceRaised is a slightly lifted panel for nested cards. */
   :root {
     --color-surfaceRaised: #ffffff;
-    --accent-soft: rgba(0, 113, 227, 0.08);
-    --elev-1: 0 1px 2px rgba(0, 0, 0, 0.04);
-    --elev-2: 0 10px 28px rgba(0, 0, 0, 0.08);
-    --ring: 0 0 0 3px rgba(0, 113, 227, 0.24);
+    --accent-soft: rgba(62, 58, 146, 0.08);
+    --rail: #25234f;
+    --rail-ink: #c9c6ef;
+    --rail-active: rgba(255, 255, 255, 0.12);
+    --elev-1: none;
+    --elev-2: 0 18px 40px -16px rgba(24, 32, 30, 0.28), 0 2px 6px rgba(24, 32, 30, 0.06);
+    --ring: 0 0 0 3px rgba(62, 58, 146, 0.28);
   }
 
+  /* Darkfield: the same stains seen against an unlit field. */
   :root[data-theme="dark"] {
-    --color-background: #0e1626;
-    --color-surface: #182236;
-    --color-surfaceRaised: #1f2b43;
-    --color-border: #30405c;
-    --color-text: #f1f5f9;
-    --color-textMuted: #9fb0c9;
-    --color-success: #4ade80;
-    --color-danger: #f2565b;
-    /* Brand blue is legible as a large fill, but too dark for small accent
-       text/icons on the dark canvas. Accent text is lightened separately. */
-    --accent-soft: rgba(96, 160, 255, 0.14);
-    --elev-1: 0 1px 2px rgba(0, 0, 0, 0.40), 0 2px 6px rgba(0, 0, 0, 0.28);
-    --elev-2: 0 10px 28px -8px rgba(0, 0, 0, 0.55), 0 4px 10px -4px rgba(0, 0, 0, 0.4);
-    --ring: 0 0 0 3px rgba(96, 160, 255, 0.30);
+    --color-primary: #5d58c9;
+    --color-background: #0f1312;
+    --color-surface: #161c1b;
+    --color-surfaceRaised: #1d2524;
+    --color-border: #2c3735;
+    --color-text: #e7ecea;
+    --color-textMuted: #9ba7a3;
+    --color-success: #5fd39a;
+    --color-danger: #f2626c;
+    --color-trace: #f07ba3;
+    --accent-soft: rgba(160, 155, 255, 0.12);
+    --rail: #17162f;
+    --rail-ink: #b7b3e6;
+    --rail-active: rgba(160, 155, 255, 0.16);
+    --elev-1: none;
+    --elev-2: 0 18px 40px -12px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.4);
+    --ring: 0 0 0 3px rgba(160, 155, 255, 0.35);
   }
 
   body {
     @apply bg-background text-text font-sans antialiased m-0 p-0 h-screen w-screen overflow-hidden;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 1, "cv11" 1;
   }
+  ::selection { background: color-mix(in srgb, var(--color-trace) 22%, transparent); }
 }
 
 @layer components {
@@ -67,15 +79,22 @@
     .pipeline-parameter .input, .pipeline-qc-toggle { min-height: 44px; }
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
     min-height: 40px;
+    border-radius: 6px;
     font-size: 0.875rem;
     line-height: 1.25rem;
+    letter-spacing: 0.005em;
   }
   .page-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem 1.5rem; flex-shrink: 0; }
   .page-header-content { flex: 1 1 20rem; min-width: 0; }
-  .page-title { display: flex; align-items: center; gap: 0.625rem; font-size: 1.5rem; line-height: 2rem; font-weight: 700; letter-spacing: -0.025em; color: var(--color-text); overflow-wrap: anywhere; }
-  .page-description { margin-top: 0.375rem; font-size: 0.875rem; line-height: 1.5rem; color: var(--color-textMuted); }
+  /* Page titles are set like a journal figure title: optical-size serif,
+     regular weight, tight leading. The icon is dropped to keep the title
+     as type alone. */
+  .page-title { display: flex; align-items: baseline; gap: 0.625rem; font-family: var(--font-display); font-size: 2rem; line-height: 2.375rem; font-weight: 450; font-variation-settings: "opsz" 72; letter-spacing: -0.012em; color: var(--color-text); overflow-wrap: anywhere; }
+  .page-title > svg { display: none; }
+  .page-description { margin-top: 0.5rem; max-width: 68ch; font-size: 0.9375rem; line-height: 1.5rem; color: var(--color-textMuted); }
+  @media (max-width: 639px) { .page-title { font-size: 1.625rem; line-height: 2rem; } }
   .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; flex: 0 1 auto; }
   .page-header-actions > button { white-space: nowrap; }
   .page-header-actions svg { flex-shrink: 0; }
@@ -93,25 +112,24 @@
   }
   .btn-primary:hover {
     /* White text stays above 4.5:1 through the transition and at rest. */
-    background-color: #006edb;
+    background-color: color-mix(in srgb, var(--color-primary) 84%, #000);
     color: #ffffff !important;
     box-shadow: none;
   }
   .btn-secondary {
     @apply bg-surface border border-border text-text focus-visible:ring-primary;
   }
-  .btn-secondary:hover { background-color: var(--accent-soft); border-color: var(--color-primary); }
+  .btn-secondary:hover { background-color: var(--accent-soft); border-color: color-mix(in srgb, var(--color-primary) 55%, var(--color-border)); }
   .btn-ghost {
     @apply bg-transparent text-textMuted focus-visible:ring-primary;
   }
   .btn-ghost:hover { background-color: var(--accent-soft); color: var(--color-text); }
   .card {
     @apply bg-surface border border-border overflow-hidden flex flex-col;
-    border-radius: 12px;
-    box-shadow: var(--elev-1);
+    border-radius: 10px;
   }
   .card-header {
-    @apply px-4 py-3 border-b border-border flex items-center justify-between bg-black/5 dark:bg-white/5;
+    @apply px-4 py-3 border-b border-border flex items-center justify-between;
   }
 
   /* Shared form controls used by the study design and branch forms. */
@@ -123,7 +141,7 @@
     color: var(--color-text);
     background-color: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 0.5rem;
+    border-radius: 6px;
     font: inherit;
   }
   .input::placeholder { color: var(--color-textMuted); opacity: 1; }
@@ -133,11 +151,12 @@
     align-items: center;
     max-width: 100%;
     padding: 0.25rem 0.625rem;
-    border: 1px solid var(--color-border);
-    border-radius: 9999px;
+    border: 1px solid color-mix(in srgb, var(--color-primary) 22%, var(--color-border));
+    border-radius: 4px;
     background-color: var(--accent-soft);
     color: var(--color-text);
     font-size: 0.75rem;
+    font-weight: 500;
     line-height: 1.25rem;
     overflow-wrap: anywhere;
   }
@@ -257,7 +276,7 @@
   }
 
   :root[data-theme="dark"] .btn-secondary:hover {
-    background-color: #334155 !important;
+    background-color: var(--color-surfaceRaised) !important;
   }
 
   /* text-slate-100/50 are near-white "emphasis" text authored for dark
@@ -301,7 +320,7 @@
      title therefore needs a dark blue foreground in light mode rather than
      the generic near-white fallback authored for the older dark dashboard. */
   :root:not([data-theme="dark"]) .bg-primary\/10.text-white {
-    color: #1e3a8a !important;
+    color: #2b2870 !important;
   }
 
   /* Accent text/icons: the brand blue (#3371e3) only reaches ~3.9:1 on the
@@ -309,7 +328,7 @@
      in dark mode (this does NOT touch bg-primary fills, which keep the brand
      blue with white text). Applies to text-primary spans and icon fills. */
   :root[data-theme="dark"] .text-primary {
-    color: #93c5fd !important;
+    color: #b9b5ff !important;
   }
   /* Error text needs contrast against its tinted alert surface. Keep solid
      danger fills independent so their button foregrounds are unchanged. */
@@ -332,7 +351,7 @@
     background: var(--color-surface) !important;
     color: var(--color-text) !important;
     box-shadow: var(--elev-2);
-    font: 0.875rem/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    font: 0.875rem/1.5 var(--font-sans) !important;
     hyphens: none !important;
     overflow-wrap: anywhere !important;
   }
@@ -391,24 +410,27 @@
      accent text in light mode so even the small chips clear AA; the button
      fill (.bg-primary) is untouched and keeps the brand blue. */
   :root:not([data-theme="dark"]) .text-primary {
-    color: #1e3a8a !important;
+    color: #34307f !important;
   }
 }
 
-/* ── Login screen background ───────────────────────────────────────────
-   Theme-aware, token-driven surface with soft radial accents. Light-mode
-   first; a deeper, cooler wash renders under [data-theme="dark"]. */
-.login-bg {
-  background-color: var(--color-background);
+/* ── Login screen ──────────────────────────────────────────────────────
+   Two panes: a hematoxylin plate carrying the wordmark and the analysis
+   trace, and a plain slide-glass pane for the form. */
+.login-bg { background-color: var(--color-background); }
+.login-plate {
+  background-color: var(--rail);
+  color: #eceaff;
   background-image:
-    radial-gradient(48rem 48rem at 12% -12%, rgba(51, 113, 227, 0.10), transparent 60%),
-    radial-gradient(42rem 42rem at 108% 112%, rgba(51, 113, 227, 0.07), transparent 58%);
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.07) 1px, transparent 0);
+  background-size: 18px 18px;
 }
-:root[data-theme="dark"] .login-bg {
-  background-image:
-    radial-gradient(48rem 48rem at 12% -12%, rgba(51, 113, 227, 0.22), transparent 60%),
-    radial-gradient(42rem 42rem at 108% 112%, rgba(139, 92, 246, 0.18), transparent 58%);
-}
+.login-plate .wordmark { font-family: var(--font-display); font-weight: 400; font-variation-settings: "opsz" 72; letter-spacing: -0.02em; }
+.trace-figure line, .trace-figure path { stroke: rgba(236, 234, 255, 0.35); }
+.trace-figure circle { fill: var(--rail); stroke: #eceaff; }
+.trace-figure circle.done { fill: #eceaff; }
+.trace-figure circle.now { fill: var(--color-trace); stroke: var(--color-trace); }
+.trace-figure text { fill: rgba(236, 234, 255, 0.78); font: 500 12px var(--font-sans); }
 
 /* React Flow Controls & MiniMap Styling for Dark/Light Mode compatibility */
 .react-flow__controls {
@@ -428,7 +450,7 @@
 }
 
 .react-flow__controls-button:hover {
-  background-color: rgba(51, 113, 227, 0.08) !important;
+  background-color: var(--accent-soft) !important;
   color: var(--color-text) !important;
 }
 
@@ -462,3 +484,68 @@
 .notebook-narrative blockquote { border-left: 3px solid var(--color-border); padding-left: 1rem; color: var(--color-textMuted); }
 .notebook-narrative pre { max-height: 20rem; overflow: auto; border: 1px solid var(--color-border); border-radius: 0.5rem; padding: 0.75rem; background: var(--color-background); }
 .notebook-narrative code { font: 0.85em/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }
+
+/* ── Workbench shell ───────────────────────────────────────────────────── */
+@layer components {
+  .app-rail { background-color: var(--rail); color: var(--rail-ink); }
+  .app-rail .rail-mark { color: #eceaff; }
+  .app-rail .rail-title { color: #eceaff; }
+  .rail-button { color: var(--rail-ink); background: transparent; }
+  .rail-button:hover { color: #ffffff; background-color: var(--rail-active); }
+  .rail-button[aria-current="page"] { color: #ffffff; background-color: var(--rail-active); box-shadow: inset 2px 0 0 var(--color-trace); }
+  .rail-button-danger:hover { background-color: color-mix(in srgb, var(--color-danger) 70%, transparent); }
+  .rail-button:focus-visible { outline: 2px solid #eceaff; outline-offset: 2px; }
+
+  .workspace-name {
+    font-family: var(--font-display);
+    font-size: 1.1875rem;
+    font-weight: 500;
+    font-variation-settings: "opsz" 36;
+    line-height: 1.2;
+    letter-spacing: -0.005em;
+    color: var(--color-text);
+  }
+
+  /* Workflow stages are a real sequence, so they are drawn as one trace:
+     a hairline joins every stage, a filled node marks completed stages and
+     the eosin node marks where you are. */
+  .trace-list { position: relative; display: flex; flex-direction: column; gap: 1px; }
+  .trace-list::before {
+    content: "";
+    position: absolute;
+    left: calc(1.0625rem - 1px);
+    top: 1.25rem;
+    bottom: 1.25rem;
+    width: 2px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
+  }
+  .trace-item { padding-left: 0.625rem; }
+  .trace-node {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    width: 0.6875rem;
+    height: 0.6875rem;
+    border-radius: 9999px;
+    border: 1.5px solid color-mix(in srgb, var(--color-textMuted) 70%, transparent);
+    background: var(--color-surface);
+  }
+  .trace-item[data-trace-state="done"] .trace-node { background: var(--color-primary); border-color: var(--color-primary); }
+  .trace-item[data-trace-state="current"] .trace-node {
+    background: var(--color-trace);
+    border-color: var(--color-trace);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-trace) 22%, var(--color-surface));
+  }
+  :root[data-theme="dark"] .trace-item[data-trace-state="done"] .trace-node { background: #a9a5ff; border-color: #a9a5ff; }
+
+  /* One status band across the workbench: server on the left, the open
+     analysis and its save control on the right. */
+  .workbench-band { display: flex; flex-wrap: wrap; align-items: stretch; flex-shrink: 0; border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+  .workbench-band > [aria-label="Execution target"] { border-bottom: 0; background: transparent; flex: 0 1 18rem; min-width: 0; }
+  .workbench-band > [aria-label="Analysis status"] { border-bottom: 0; flex: 1 1 22rem; min-width: 0; border-left: 1px solid var(--color-border); }
+  @media (max-width: 639px) {
+    .workbench-band > [aria-label="Execution target"] { flex-basis: 100%; }
+    .workbench-band > [aria-label="Analysis status"] { flex-basis: 100%; border-left: 0; border-top: 1px solid var(--color-border); }
+  }
+}

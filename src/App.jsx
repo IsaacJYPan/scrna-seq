@@ -3,8 +3,9 @@ import ExecutionTargetIndicator from './components/ExecutionTargetIndicator';
 import AnalysisStatusBar from './components/AnalysisStatusBar';
 import { SubmissionRecoveryNotice } from './components/SubmissionRecovery';
 import { clearSubmissionRecovery } from './executions/submissionRecovery';
-import { Loader2, Microscope } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import Sidebar from './components/Sidebar';
+import TraceMark from './components/TraceMark';
 import Login from './pages/Login';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
@@ -1315,10 +1316,8 @@ export default function App() {
   if (!isLoggedIn && authResolution !== 'resolved') return (
     <div className="login-bg flex min-h-dvh items-center justify-center p-6 text-text">
       <div className="w-full max-w-sm text-center">
-        <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary">
-          <Microscope size={30} aria-hidden="true" />
-        </div>
-        <h1 className="text-2xl font-bold tracking-tight">TraceOmics</h1>
+        <TraceMark size={40} className="mx-auto mb-4 text-primary" />
+        <h1 className="font-[family-name:var(--font-display)] text-3xl font-normal">TraceOmics</h1>
         {authResolution === 'checking' ? (
           <div role="status" className="mt-4 flex items-center justify-center gap-2 text-sm text-textMuted">
             <Loader2 size={18} className="animate-spin" aria-hidden="true" />
@@ -1511,7 +1510,12 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col relative overflow-hidden min-h-0 min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
+        <div className="workbench-band">
         <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} userId={user?.id} projectId={activeProjectIdForPipeline} />
+        {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
+          checkpointSaveState={checkpointSaveState} checkpointSaveBusy={checkpointSaveBusy}
+          onSave={() => void handleSaveLiveAnalysis()} onOpenHistory={() => setActiveTab('history')} />}
+        </div>
         <SubmissionRecoveryNotice userId={user?.id} projectId={activeProjectIdForPipeline} onOpen={() => setActiveTab('history')} />
         {savedWorkflowNotice && activeTab.startsWith('workflow:') && <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
           {savedWorkflowNotice}<button type="button" className="ml-2 underline" onClick={() => setSavedWorkflowNotice('')}>Dismiss workflow notice</button>
@@ -1528,9 +1532,6 @@ export default function App() {
             <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
           </div>
         )}
-        {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
-          checkpointSaveState={checkpointSaveState} checkpointSaveBusy={checkpointSaveBusy}
-          onSave={() => void handleSaveLiveAnalysis()} onOpenHistory={() => setActiveTab('history')} />}
         <div className="min-h-0 flex-1">{renderContent()}</div>
       </main>
 

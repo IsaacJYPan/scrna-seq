@@ -10,7 +10,7 @@ const COLORS = ['#387b87', '#e5a253', '#8b7db3', '#d77283', '#69a48e', '#6a9ccd'
 const GENES = ['CD3D', 'MS4A1', 'LYZ', 'NKG7', 'PPBP'];
 const number = value => Number(value).toLocaleString('en-US');
 const PLOT_LAYOUT = { autosize: true, paper_bgcolor: '#fff', plot_bgcolor: '#fff',
-  font: { family: 'Inter, ui-sans-serif, system-ui, sans-serif', color: '#6b7885', size: 11 },
+  font: { family: '"Instrument Sans Variable", system-ui, sans-serif', color: '#56605c', size: 11 },
   margin: { l: 54, r: 22, t: 16, b: 46 }, hovermode: 'closest' };
 const PLOT_CONFIG = { responsive: true, displaylogo: false, displayModeBar: true, scrollZoom: false,
   modeBarButtonsToRemove: ['select2d', 'lasso2d', 'zoom2d', 'pan2d'], toImageButtonOptions: { format: 'png', scale: 2 } };
@@ -58,19 +58,19 @@ function EmptyPlot({ title, children }) {
 const QCDistribution = memo(function QCDistribution({ values, title, lower, upper }) {
   return <div><h3>{title}</h3><Chart compact label={title + ' distribution'} height={340}
     data={[{ type: 'violin', y: values, name: 'Cells', points: false, box: { visible: true }, meanline: { visible: false },
-      line: { color: '#397e79', width: 1.5 }, fillcolor: '#bcd7d2', hovertemplate: '%{y}<extra></extra>' }]}
+      line: { color: '#3e3a92', width: 1.5 }, fillcolor: '#cfcdea', hovertemplate: '%{y}<extra></extra>' }]}
     layout={{ margin: { l: 45, r: 12, t: 18, b: 20 }, xaxis: { showticklabels: false, showgrid: false },
       yaxis: { zeroline: false, gridcolor: '#eef1f4' }, shapes: [lower, upper].filter(Number.isFinite).map(y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y,
-        line: { color: '#bd6974', dash: 'dot', width: 1 } })) }} /></div>;
+        line: { color: '#c23b6b', dash: 'dot', width: 1 } })) }} /></div>;
 });
 const QCPlots = memo(function QCPlots({ metrics, parameters, view }) {
   if (view === 'scatter') return <Chart label="QC scatter plot" height={440} data={[{ type: 'scatter', mode: 'markers',
     x: metrics.nCount_RNA, y: metrics.nFeature_RNA, marker: { size: 4, opacity: 0.65, color: metrics.percent_mt,
-      colorscale: [[0, '#8cb9b1'], [1, '#bc6170']], colorbar: { title: { text: '% MT' }, thickness: 10 } },
+      colorscale: [[0, '#b9b6e3'], [1, '#c23b6b']], colorbar: { title: { text: '% MT' }, thickness: 10 } },
     hovertemplate: 'Counts: %{x}<br>Genes: %{y}<br>MT: %{marker.color:.2f}%<extra></extra>' }]} layout={{
       margin: { l: 65, r: 60, t: 20, b: 50 }, xaxis: { title: { text: 'RNA counts per cell' }, zeroline: false },
       yaxis: { title: { text: 'Detected genes per cell' }, zeroline: false },
-      shapes: [parameters.min_features, parameters.max_features].filter(Number.isFinite).map(y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y, line: { color: '#bd6974', dash: 'dot', width: 1 } })),
+      shapes: [parameters.min_features, parameters.max_features].filter(Number.isFinite).map(y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y, line: { color: '#c23b6b', dash: 'dot', width: 1 } })),
     }} />;
   const series = [
     { key: 'nFeature_RNA', title: 'Detected genes', lower: parameters.min_features, upper: parameters.max_features },
@@ -121,7 +121,7 @@ export default function DemoExperience() {
   const traces = useMemo(() => {
     if (!result?.map) return [];
     if (view === 'gene' && geneData) return [{ type: 'scatter', mode: 'markers', x: geneData.u1, y: geneData.u2,
-      marker: { size: 5, color: geneData.expression, colorscale: [[0, '#e6e9ed'], [0.2, '#abc8c2'], [0.55, '#4d998c'], [1, '#155f56']],
+      marker: { size: 5, color: geneData.expression, colorscale: [[0, '#e6e8e5'], [0.2, '#c3c0ea'], [0.55, '#6d67c4'], [1, '#25234f']],
         colorbar: { title: { text: 'Expression', font: { size: 11 } }, thickness: 10, len: 0.55 }, cmin: 0 },
       hovertemplate: `${gene}: %{marker.color:.2f}<extra></extra>`, showlegend: false }];
     return result.map.trace_data.map((trace, i) => ({ ...trace, type: 'scatter', mode: 'markers',
@@ -274,7 +274,7 @@ export default function DemoExperience() {
             <p className="demo-plot-caption">QC uses detected genes, total RNA counts, and the fraction of counts from genes beginning with MT-.</p></section></>}
           {step === 'pca' && <><section className="demo-plot-card"><div className="demo-plot-header"><div><h2>PCA elbow plot</h2><p>Standard deviation of each computed principal component</p></div></div>
             {pca ? <Chart label="PCA elbow plot" height={360} data={[{ type: 'scatter', mode: 'lines+markers', x: pca.stdevs.map((_, i) => i + 1), y: pca.stdevs,
-              line: { color: '#397e79', width: 2 }, marker: { size: 6 }, hovertemplate: 'PC %{x}<br>SD %{y:.3f}<extra></extra>' }]}
+              line: { color: '#3e3a92', width: 2 }, marker: { size: 6 }, hovertemplate: 'PC %{x}<br>SD %{y:.3f}<extra></extra>' }]}
               layout={{ xaxis: { title: { text: 'Principal component' }, dtick: 5, gridcolor: '#eef1f4', zeroline: false }, yaxis: { title: { text: 'Standard deviation' }, gridcolor: '#eef1f4', zeroline: false } }} />
               : <EmptyPlot title="PCA has not been computed">Run normalization and PCA to inspect component variance before clustering.</EmptyPlot>}
             <p className="demo-plot-caption">The elbow can help select the number of PCs to use in clustering and UMAP.</p></section>

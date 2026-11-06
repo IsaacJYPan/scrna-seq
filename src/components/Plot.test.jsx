@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { getPlotHoverStyle, isWebGLFailure, preparePlotData, supportsWebGL } from './Plot';
+import { PLOT_FONT_FAMILY, getPlotHoverStyle, isWebGLFailure, preparePlotData, supportsWebGL } from './Plot';
 
 describe('shared Plot hover style', () => {
   it('uses readable neutral palettes for both themes', () => {
     expect(getPlotHoverStyle('light')).toEqual({
-      bgcolor: '#ffffff', bordercolor: '#cbd5e1',
-      font: { color: '#334155', family: 'Inter, system-ui', size: 12 },
+      bgcolor: '#ffffff', bordercolor: '#cfd5d0',
+      font: { color: '#18201e', family: PLOT_FONT_FAMILY, size: 12 },
     });
     expect(getPlotHoverStyle('dark')).toEqual({
-      bgcolor: '#182236', bordercolor: '#34445d',
-      font: { color: '#f1f5f9', family: 'Inter, system-ui', size: 12 },
+      bgcolor: '#1d2524', bordercolor: '#3a4745',
+      font: { color: '#e7ecea', family: PLOT_FONT_FAMILY, size: 12 },
     });
   });
 });

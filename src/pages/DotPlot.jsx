@@ -144,7 +144,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    font: { color: plotText, size: 12, family: 'Inter, system-ui' },
+    font: { color: plotText, size: 12, family: '"Instrument Sans Variable", system-ui, sans-serif' },
     hoverlabel: getPlotHoverStyle(theme),
     margin: { l: 58, r: 12, t: 24, b: 120 },
     xaxis: { 

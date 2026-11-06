@@ -91,14 +91,16 @@ export function isWebGLFailure(error) {
 // Keep Plotly's generated hover cards legible and visually consistent across
 // the analysis pages. Individual pages can still supply a more specific
 // label font or border when needed.
+export const PLOT_FONT_FAMILY = '"Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif';
+
 export function getPlotHoverStyle(theme = 'light') {
   const isDark = theme === 'dark';
   return {
-    bgcolor: isDark ? '#182236' : '#ffffff',
-    bordercolor: isDark ? '#34445d' : '#cbd5e1',
+    bgcolor: isDark ? '#1d2524' : '#ffffff',
+    bordercolor: isDark ? '#3a4745' : '#cfd5d0',
     font: {
-      color: isDark ? '#f1f5f9' : '#334155',
-      family: 'Inter, system-ui',
+      color: isDark ? '#e7ecea' : '#18201e',
+      family: PLOT_FONT_FAMILY,
       size: 12,
     },
   };
