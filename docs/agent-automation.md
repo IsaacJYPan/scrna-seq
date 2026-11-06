@@ -276,16 +276,22 @@ admin) reads each run's steps, figures, tables, and console, and promotes or
 discards it, once. Promoting publishes the result as a project branch named
 after the run, which makes it visible to the rest of the project.
 
-**Readable steps.** Scripts are shown as numbered steps split at section
-comments (`# ---- Normalize ----` or `# Normalize ----`). The default view hides
-defensive code: `stopifnot`, `stop`, `warning`, and `message` calls, guard
-clauses whose only effect is to stop or return, and `tryCatch`, `try`, and
+**Notebook view.** Each run is shown the way the app shows notebooks:
+numbered, read-only Markdown and R cells. Each step of the script (split at
+`# ---- Normalize ----` or `# Normalize ----` comments) becomes a Markdown cell
+with the step's title and leading comments, followed by its R code, and each
+output file appears under the step whose code names it. The default *Readable*
+view hides defensive code: `stopifnot`, `stop`, `warning`, and `message` calls,
+guard clauses whose only effect is to stop or return, and `tryCatch`, `try`, and
 `suppressWarnings`-style wrappers, which are reduced to the expression they
-protect. *Exact code* shows what ran. The same view is available for an approved
-release's analysis source (*Read the analysis steps*), which for
-`seurat-qc-cluster` is `r-backend/lib/seuratPipelineCore.R`. That file is now
-part of the release digest, so approvals of the earlier `seurat-qc-cluster`
-release must be given again.
+protect. *Exact code* shows what ran. *Save as notebook* copies the run into a
+notebook in one of the project's analyses (with the run id and script SHA-256 in
+its first cell), where it can be read, edited, and versioned like any other
+notebook. The same view is available for an approved release's analysis source
+(*Read the analysis steps*), which for `seurat-qc-cluster` is
+`r-backend/lib/seuratPipelineCore.R`. That file is now part of the release
+digest, so approvals of the earlier `seurat-qc-cluster` release must be given
+again.
 
 ### Sandboxes on Slurm
 
@@ -558,7 +564,7 @@ sessions.
   job scripts for real (passing, failing checks, settings changes), and sandbox
   runs on the cluster including reservations, console capture, and rejected
   outputs.
-- `backend/readable-r.test.js`: the readable step view.
+- `backend/readable-r.test.js`: the readable step view and the notebook form of a run.
 - `cli/traceomics.test.mjs`, `cli/traceomics-mcp.test.mjs`,
   `src/pages/AgentAccess.test.jsx`, `src/pages/AgentWorkflows.test.jsx`,
   `src/pages/AgentSandboxes.test.jsx`, `src/pages/AgentReports.test.jsx`.

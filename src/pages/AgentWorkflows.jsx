@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, FlaskConical, Loader2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
-import ReadableSteps from '../components/ReadableSteps';
+import AgentRunNotebook from '../components/AgentRunNotebook';
 
 // Human side of approved agent execution (docs/spec.md phase 2): approve exact
 // workflow releases, define studies agents may work in, and accept results.
@@ -206,7 +206,8 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
             {steps[r.id] && (
               <div className="mt-3">
                 <p className="mb-1 text-xs text-textMuted">{steps[r.id].source?.path} · SHA-256 {steps[r.id].source?.sha256?.slice(0, 12)}…</p>
-                <ReadableSteps steps={steps[r.id].steps} label={`Analysis steps of ${r.title}`} />
+                <AgentRunNotebook run={{ id: r.id, runNumber: 0, title: r.title, steps: steps[r.id].steps, files: [], scriptSha256: steps[r.id].source?.sha256 }}
+                  projectId={projectId} label={`Analysis steps of ${r.title}`} />
               </div>
             )}
           </article>

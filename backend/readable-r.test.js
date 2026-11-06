@@ -74,3 +74,31 @@ describe('readableSteps', () => {
     expect(qc.readable).toContain('obj <- subset(obj, cells = colnames(obj)[keep])');
   });
 });
+
+describe('agent run as a notebook', () => {
+  const { agentRunCells, agentRunNotebookContent } = require('../shared/agentRunNotebook.mjs');
+  const { normalizeNotebookCreate } = require('../shared/notebookDocument.mjs');
+  const run = {
+    id: 'sbr_1', runNumber: 2, title: 'Markers', agent: { displayName: 'Agent' }, sandboxName: 'Atlas', scriptSha256: 'a'.repeat(64),
+    script: '# ---- Find markers ----\n# Wilcoxon test per cluster.\nstopifnot(TRUE)\nm <- FindAllMarkers(obj)\nwrite_table(m, "markers.csv")\n# ---- Plot ----\nsave_figure(DimPlot(obj), "umap.png")\n',
+    files: [{ name: 'markers.csv', kind: 'text' }, { name: 'umap.png', kind: 'image' }, { name: 'extra.txt', kind: 'text' }],
+  };
+
+  it('pairs each step\'s explanation with its code and attaches outputs to the step that wrote them', () => {
+    const cells = agentRunCells(run);
+    expect(cells.map((c) => c.kind)).toEqual(['markdown', 'code', 'markdown', 'code']);
+    expect(cells[0].source).toBe('## 1. Find markers\n\nWilcoxon test per cluster.');
+    expect(cells[1]).toMatchObject({ source: 'm <- FindAllMarkers(obj)\nwrite_table(m, "markers.csv")', hiddenLines: 1 });
+    expect(cells[1].outputs.map((f) => f.name)).toEqual(['markers.csv']);
+    expect(cells[3].outputs.map((f) => f.name)).toEqual(['umap.png', 'extra.txt']);
+    expect(agentRunCells(run, { exact: true })[1].source).toContain('stopifnot(TRUE)');
+  });
+
+  it('produces content the notebook service accepts', () => {
+    const { title, content } = agentRunNotebookContent(run);
+    const parsed = normalizeNotebookCreate({ requestId: '0f8a7c1e-2b3d-4e5f-8a9b-0c1d2e3f4a5b', title, content });
+    expect(parsed.title).toBe('Agent run 2: Markers');
+    expect(parsed.content.cells.map((c) => c.type)).toEqual(['markdown', 'markdown', 'code', 'markdown', 'markdown', 'code', 'markdown']);
+    expect(parsed.content.cells[0].source).toContain(`script SHA-256 \`${'a'.repeat(64)}\``);
+  });
+});

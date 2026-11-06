@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Boxes, CheckCircle2, Download, Loader2, XCircle } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
-import ReadableSteps from '../components/ReadableSteps';
+import AgentRunNotebook from '../components/AgentRunNotebook';
 
 // Human side of isolated agent development (docs/spec.md phase 4). A person
 // picks which of their saved analyses an agent may read and how many runs it
@@ -69,7 +69,7 @@ function RunOutputs({ api, projectId, run }) {
   );
 }
 
-export default function AgentSandboxes({ projectId, role, userId, onChanged, onOpenResult }) {
+export default function AgentSandboxes({ projectId, role, userId, theme, onChanged, onOpenResult }) {
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
@@ -235,13 +235,15 @@ export default function AgentSandboxes({ projectId, role, userId, onChanged, onO
                         <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[run.state] || 'border-border text-textMuted'}`}>{STATE_LABEL[run.state] || run.state}</span>
                       </div>
                       {run.error && <p className="text-xs text-danger">{run.error.message}</p>}
-                      {run.steps && <ReadableSteps steps={run.steps} label={`Code for run ${run.runNumber}`} />}
+                      {run.steps && <AgentRunNotebook run={{ ...run, sandboxName: detail.name }} projectId={projectId} theme={theme} canSave={canWrite}
+                        fileUrl={(name, options) => api.agentSandboxFileUrl?.(projectId, run.id, name, options)}
+                        readText={api.readAgentSandboxText ? (name) => api.readAgentSandboxText(projectId, run.id, name) : null} />}
                       {run.console?.length > 0 && (
                         <details className="text-xs"><summary className="cursor-pointer text-textMuted">R console</summary>
                           <pre className="mt-1 max-h-48 overflow-auto rounded border border-border bg-background p-2 text-[11px] text-text">{run.console.join('\n')}</pre>
                         </details>
                       )}
-                      <RunOutputs api={api} projectId={projectId} run={run} />
+                      {!run.steps && <RunOutputs api={api} projectId={projectId} run={run} />}
                       {run.review.state !== 'draft' ? (
                         <p className={`inline-flex items-center gap-1 text-xs font-bold ${run.review.state === 'promoted' ? 'text-success' : 'text-textMuted'}`}>
                           {run.review.state === 'promoted' ? <CheckCircle2 size={14} /> : <XCircle size={14} />}

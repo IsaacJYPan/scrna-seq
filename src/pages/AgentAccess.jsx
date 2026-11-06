@@ -50,7 +50,7 @@ export default function AgentAccess(props) {
   return <AgentAccessProject key={projectId || 'no-project'} {...props} projectId={projectId} />;
 }
 
-function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjects, onSelectAnalysisObject, setActiveTab }) {
+function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjects, onSelectAnalysisObject, setActiveTab, theme }) {
   const project = currentWs?.projects?.find(p => p.id === projectId) || null;
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
@@ -338,7 +338,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
             setActiveTab?.('workspace');
           } : undefined} />
 
-        <AgentSandboxes projectId={projectId} role={role} userId={userId} onChanged={load}
+        <AgentSandboxes projectId={projectId} role={role} userId={userId} theme={theme} onChanged={load}
           onOpenResult={onSelectAnalysisObject ? async (objectId) => {
             if (typeof refreshAnalysisObjects === 'function') await refreshAnalysisObjects(projectId);
             await onSelectAnalysisObject(projectId, objectId);
