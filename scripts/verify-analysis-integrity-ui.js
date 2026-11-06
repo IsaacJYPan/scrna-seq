@@ -40,13 +40,18 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
   fs.mkdirSync(output, { recursive: true });
   const pageErrors = [];
   const serverErrors = [];
+  // While the R container restarts on purpose, its proxy answers 502/503 until
+  // the app reports the lost runtime. Those are expected, not server faults.
+  let runtimeRestarting = false;
   const checks = [];
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   page.on('pageerror', error => pageErrors.push(error.message));
   page.on('response', response => {
-    if (response.status() >= 500) serverErrors.push(response.status() + ' ' + new URL(response.url()).pathname);
+    const pathname = new URL(response.url()).pathname;
+    if (runtimeRestarting && [502, 503].includes(response.status()) && pathname.startsWith('/api/r/')) return;
+    if (response.status() >= 500) serverErrors.push(response.status() + ' ' + pathname);
   });
   page.on('dialog', dialog => dialog.accept());
   try {
@@ -173,9 +178,11 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
       'A clean saved version became dirty after reload.');
     checks.push('save opens a clean child version across reload');
 
+    runtimeRestarting = true;
     await restartInteractiveRuntime();
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText(/Live analysis is unavailable. Restore a saved version/).waitFor({ timeout: 60_000 });
+    runtimeRestarting = false;
     assert(await page.getByText('Unsaved live changes.', { exact: true }).count() === 0,
       'A lost R session retained a misleading dirty flag.');
     await navigate(page, 'UMAP');
