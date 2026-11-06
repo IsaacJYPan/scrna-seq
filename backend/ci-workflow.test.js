@@ -23,9 +23,13 @@ describe('continuous-integration workflow contracts', () => {
   it('keeps signed and unsigned Windows packaging paths distinct', () => {
     const release = workflowFiles.find(({ name }) => name === 'release-certification.yml')?.text || '';
     expect(release).toContain('WINDOWS_CSC_LINK');
-    expect(release).toContain('npm run desktop:dist');
-    expect(release).not.toContain('npm run desktop:dist:unsigned');
     expect(release).toContain('verify-windows-installer.ps1');
+    // The signed build runs only with signing credentials; otherwise an unsigned
+    // build is made, labelled as such, and only that path may skip the signature check.
+    expect(release).toMatch(/if: steps\.signing\.outputs\.signed == 'true'\n\s+run: npm run desktop:dist\n/);
+    expect(release).toMatch(/if: steps\.signing\.outputs\.signed != 'true'\n\s+run: npm run desktop:dist:unsigned\n/);
+    expect(release.match(/-AllowUnsigned/g)).toHaveLength(1);
+    expect(release).toContain("'signed' || 'unsigned'");
   });
 
   it('configures bounded dependency-update queues for npm and workflow actions', () => {
