@@ -115,6 +115,9 @@ export default function usePrivateRSession({
   const liveContext = useRef(null);
   liveContext.current = { scopeKey, epoch: connection.epoch, blocked, enabled };
   const currentSession = useRef(null);
+  // Counts explicit journal selections so an inspection that finishes later
+  // does not replace the command the user just opened.
+  const entrySelection = useRef(0);
   currentSession.current = session;
   const selectedEntry = useRef(null);
   selectedEntry.current = entry;
@@ -176,7 +179,7 @@ export default function usePrivateRSession({
         { code: 'PRIVATE_SUBMISSION_UNCONFIRMED' }
       );
   }
-  async function runRequest(action, { publication = false, control = false } = {}) {
+  async function runRequest(action, { publication = false, control = false, acceptKernelChange } = {}) {
     if (blocked) {
       setError(TARGET_DISCONNECTED_MESSAGE);
       return undefined;
@@ -189,11 +192,11 @@ export default function usePrivateRSession({
     setError('');
     const targetEpoch = connection.epoch;
     const authority = recovery.getPrivateRecoverySnapshot();
-    const currentRequest = () => {
+    const currentRequest = (result) => {
       const latest = recovery.getPrivateRecoverySnapshot();
       return (
         epoch === requestEpoch.current &&
-        generationEpoch === kernelEpoch.current &&
+        (generationEpoch === kernelEpoch.current || Boolean(result && acceptKernelChange?.(result))) &&
         scope === currentScope.current &&
         targetEpoch === liveContext.current.epoch &&
         !liveContext.current.blocked &&
@@ -207,7 +210,7 @@ export default function usePrivateRSession({
     };
     try {
       const result = await action();
-      if (currentRequest()) return result;
+      if (currentRequest(result)) return result;
     } catch (failure) {
       if (currentRequest()) {
         setError(failure.message);
@@ -250,6 +253,7 @@ export default function usePrivateRSession({
     const controller = new AbortController();
     inspectionController.current = controller;
     const sequence = ++inspectionEpoch.current;
+    const selectionMark = entrySelection.current;
     const epoch = requestEpoch.current;
     const context = liveContext.current;
     let recoveryInspection = null;
@@ -616,7 +620,7 @@ export default function usePrivateRSession({
       setSession(kernel);
       setJournal(history.items.slice(0, journalLimit));
       setJournalCursor(history.nextCursor || null);
-      setEntry(detail);
+      if (entrySelection.current === selectionMark) setEntry(detail);
       setPublications(saved.items);
       setVersions(artifacts.items);
       setPublicationUncertain(
@@ -684,7 +688,17 @@ export default function usePrivateRSession({
       inspectionController.current?.abort();
       clearTimeout(inspectionTimer.current);
     };
-  }, [scopeKey, enabled, publicationSupported, connection.epoch, blocked]);
+  }, [scopeKey, enabled, connection.epoch, blocked]);
+  // Runtime status polling can flip publication support at any time, including
+  // while a restart or command is in flight. Recheck readiness without
+  // invalidating those requests, or their confirmed replies would be dropped.
+  const publicationChecked = useRef(publicationSupported);
+  useEffect(() => {
+    if (publicationChecked.current === publicationSupported) return;
+    publicationChecked.current = publicationSupported;
+    setInspection(null);
+    if (enabled && !blocked) void refreshRef.current();
+  }, [publicationSupported, enabled, blocked]);
   useEffect(() => {
     if (
       enabled &&
@@ -962,7 +976,18 @@ export default function usePrivateRSession({
           throw error;
         }
       },
-      { control: true }
+      {
+        control: true,
+        // A concurrent inspection may already have followed this restart's
+        // receipt to its replacement session. That move must not discard the
+        // restart's own confirmed reply.
+        acceptKernelChange: (result) =>
+          Boolean(
+            result?.session?.id &&
+              result.previousKernelId === request.kernelId &&
+              [request.kernelId, result.session.id].includes(currentSession.current?.id)
+          ),
+      }
     );
     if (!value) {
       if (
@@ -1056,7 +1081,10 @@ export default function usePrivateRSession({
         await saveRecoveredSelection({ projectId, workspaceId, kernelId, executionId: result.id });
       return result;
     });
-    if (value) setEntry(value);
+    if (value) {
+      entrySelection.current += 1;
+      setEntry(value);
+    }
   };
   const loadOlder = async () => {
     if (!session || !journalCursor || busy || controlBusy || inspecting) return;

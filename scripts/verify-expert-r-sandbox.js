@@ -160,6 +160,10 @@ async function main() {
       dir.create(dirname('/storage/data/${checkpointKey}'), recursive=TRUE, showWarnings=FALSE)
       saveRDS(list(global=obj, raw=obj), '/storage/data/${checkpointKey}', compress=FALSE)
     `;
+    // Create the project tree as the runner user before the root container
+    // writes into it; otherwise R creates projects/<id>/ owned by root and the
+    // later private-input directories under it cannot be created.
+    fs.mkdirSync(path.dirname(path.join(storageRoot, 'data', ...checkpointKey.split('/'))), { recursive: true });
     run(['run', '--rm', '--user', '0:0', '-v', `${storageRoot}:/storage`, '--entrypoint', 'Rscript', rImage, '-e', checkpointExpression]);
     const checkpointDigest = run([
       'run', '--rm', '-v', `${storageRoot}:/storage:ro`, 'alpine:3.21',
@@ -254,6 +258,7 @@ async function main() {
 
     const rdsInputId = `eri_${crypto.randomBytes(12).toString('hex')}`;
     const rdsInputKey = `projects/${projectId}/artifacts/${rdsInputId}/private-input.rds`;
+    fs.mkdirSync(path.dirname(path.join(storageRoot, 'data', ...rdsInputKey.split('/'))), { recursive: true });
     run([
       'run', '--rm', '--user', '0:0', '-v', `${storageRoot}:/storage`,
       '--entrypoint', 'Rscript', rImage, '-e',

@@ -3,7 +3,7 @@ import http from 'node:http';
 
 const { EXPERT_R_PROFILE, EXPERT_R_RESOURCE_POLICY_VERSION, expertRSandboxEnabled } = require('./expertR');
 const { expertRAccessPolicy, expertRAccessSql, probeExpertRRuntime, expertRStatus } = require('./expertRAccess');
-const { assertExpertRuntimeImage } = require('./expertSandboxBroker');
+const { assertExpertRuntimeImage, removeJobDirectory } = require('./expertSandboxBroker');
 const { environmentFixture } = require('./_r-environment-test-utils');
 const servers = [];
 afterEach(async () => {
@@ -70,4 +70,27 @@ describe('private R access policy and runtime readiness', () => {
     const wrongProfile = await runtimeServer((_req, res) => res.end(JSON.stringify({ status: 'ok', profileId: 'other' })));
     expect(await probeExpertRRuntime(wrongProfile)).toEqual({ state: 'incompatible' });
   });
+});
+
+describe('Expert R job directory cleanup', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  // Root ignores permission bits, so this only proves anything as an ordinary user.
+  it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+    'removes read-only staged private inputs as a non-root broker', async () => {
+      const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'expert-cleanup-'));
+      const job = path.join(workRoot, 'job_1');
+      const files = path.join(job, 'input', 'files');
+      fs.mkdirSync(files, { recursive: true });
+      fs.mkdirSync(path.join(job, 'output'));
+      fs.writeFileSync(path.join(files, 'covariates.csv'), 'x\n');
+      fs.writeFileSync(path.join(job, 'input', 'checkpoint.rds'), 'x');
+      fs.chmodSync(path.join(files, 'covariates.csv'), 0o444);
+      fs.chmodSync(files, 0o555);
+      fs.chmodSync(path.join(job, 'input'), 0o555);
+      await removeJobDirectory(job, workRoot);
+      expect(fs.existsSync(job)).toBe(false);
+      fs.rmSync(workRoot, { recursive: true, force: true });
+    });
 });

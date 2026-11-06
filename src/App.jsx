@@ -1398,9 +1398,13 @@ export default function App() {
     return (
       <div className="relative w-full h-full bg-background">
         {activeWorkflow && activeTab.startsWith('workflow:') && <div className="h-full overflow-auto"><ErrorBoundary key={activeWorkflow.id}>
-          <WorkflowWorkbench instance={activeWorkflow} projectId={activeWorkflow.projectId} userId={user?.id} activeTab={activeTab}
-            onUpdate={updateWorkflow} enabled={deploymentPolicy.expertREnabled === true}
-            onExit={() => { setActiveWorkflow(null); setActiveTab('pipeline-manager'); }} />
+          {/* Its own boundary: without it the first lazy load suspends to the
+              app-level boundary, which remounts the app and drops the workflow. */}
+          <React.Suspense fallback={<div role="status" className="flex h-full items-center justify-center text-sm text-textMuted">Opening workflow…</div>}>
+            <WorkflowWorkbench instance={activeWorkflow} projectId={activeWorkflow.projectId} userId={user?.id} activeTab={activeTab}
+              onUpdate={updateWorkflow} enabled={deploymentPolicy.expertREnabled === true}
+              onExit={() => { setActiveWorkflow(null); setActiveTab('pipeline-manager'); }} />
+          </React.Suspense>
         </ErrorBoundary></div>}
         <ErrorBoundary key="workspace"><TabContent id="workspace" activeTab={activeTab}>
           <Workspace

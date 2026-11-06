@@ -40,13 +40,18 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
   fs.mkdirSync(output, { recursive: true });
   const pageErrors = [];
   const serverErrors = [];
+  // While the R container restarts on purpose, its proxy answers 502/503 until
+  // the app reports the lost runtime. Those are expected, not server faults.
+  let runtimeRestarting = false;
   const checks = [];
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   page.on('pageerror', error => pageErrors.push(error.message));
   page.on('response', response => {
-    if (response.status() >= 500) serverErrors.push(response.status() + ' ' + new URL(response.url()).pathname);
+    const pathname = new URL(response.url()).pathname;
+    if (runtimeRestarting && [502, 503].includes(response.status()) && pathname.startsWith('/api/r/')) return;
+    if (response.status() >= 500) serverErrors.push(response.status() + ' ' + pathname);
   });
   page.on('dialog', dialog => dialog.accept());
   try {
@@ -85,11 +90,11 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     const mappedValues = await (await mappingResponse).json();
     assert(mappedValues.n_unique === (pbmc ? 1 : 4), 'Unexpected biological sample group count.');
     if (pbmc) {
-      await page.getByText('10x PBMC3k: sample_id = PBMC3k', { exact: true }).waitFor();
+      await page.getByRole('listitem').filter({ hasText: '10x PBMC3k' }).filter({ hasText: 'sample_id = PBMC3k' }).first().waitFor();
       await page.getByText(/This analysis contains one sample_id group/).waitFor();
       checks.push('PBMC3k correctly identifies one biological sample');
     } else {
-      await page.getByText('Control replicate 1: sample_id = C1', { exact: true }).waitFor();
+      await page.getByRole('listitem').filter({ hasText: 'Control replicate 1' }).filter({ hasText: 'sample_id = C1' }).first().waitFor();
       assert(await page.getByText(/This analysis contains one/).count() === 0,
         'The multi-sample cohort displayed a single-sample warning.');
       checks.push('sample_id mappings avoid false orig.ident warning');
@@ -122,6 +127,10 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     'The saved history did not retain actual R generation, execution order and result revision.');
     assert(executionDetail.replay.complete === false, 'Live memory was incorrectly presented as a replayable immutable input.');
     await navigate(page, 'Runs & Results');
+    // Execution history mounts only after its Runs & Results toggle is expanded.
+    const historyToggle = page.locator('button[aria-controls="execution-history-panel"]');
+    await historyToggle.waitFor();
+    if ((await historyToggle.getAttribute('aria-expanded')) !== 'true') await historyToggle.click();
     const executionRegion = page.getByRole('region', { name: 'Execution history', exact: true });
     await executionRegion.getByLabel('Execution category', { exact: true }).selectOption('live-r');
     await executionRegion.getByRole('button').filter({ hasText: umapExecution.execution_history.id }).click();
@@ -134,15 +143,24 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText('Unsaved live changes.', { exact: true }).waitFor();
-    const inputNotice = await page.getByRole('status').filter({ hasText: 'Unsaved live changes.' }).innerText();
+    // The status bar names the saved version; the queued-work explanation is in its details popover.
+    const statusBar = page.getByRole('region', { name: 'Analysis status', exact: true });
+    const statusDetails = statusBar.getByRole('button', { name: 'Status details', exact: true });
+    await statusDetails.click();
+    const detailsPanel = page.locator(`[id="${await statusDetails.getAttribute('aria-controls')}"]`);
+    await detailsPanel.waitFor();
+    const inputNotice = `${await statusBar.innerText()}\n${await detailsPanel.innerText()}`;
+    await statusDetails.click();
     assert(inputNotice.includes('Queued analyses use the saved version') && identity.savedName && inputNotice.includes(identity.savedName),
       'The warning did not identify the saved input used by queued analysis.');
     await page.screenshot({ path: path.join(output, 'dirty-after-reload.png') });
     checks.push('unsaved warning survives browser reload');
 
     await page.getByRole('button', { name: 'Save current analysis', exact: true }).click();
-    await page.getByText('Saved and opened as a durable analysis version.', { exact: true })
-      .waitFor({ timeout: 180_000 });
+    await statusBar.getByRole('status').filter({ hasText: 'Analysis saved' }).waitFor({ timeout: 180_000 });
+    await statusDetails.click();
+    await detailsPanel.getByText('Saved and opened as a durable analysis version.', { exact: true }).waitFor();
+    await statusDetails.click();
     const savedId = await page.evaluate(async projectId => {
       const objects = await window.electronAPI.listProjectAnalysisObjects(projectId);
       return objects[0].id;
@@ -160,9 +178,11 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
       'A clean saved version became dirty after reload.');
     checks.push('save opens a clean child version across reload');
 
+    runtimeRestarting = true;
     await restartInteractiveRuntime();
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText(/Live analysis is unavailable. Restore a saved version/).waitFor({ timeout: 60_000 });
+    runtimeRestarting = false;
     assert(await page.getByText('Unsaved live changes.', { exact: true }).count() === 0,
       'A lost R session retained a misleading dirty flag.');
     await navigate(page, 'UMAP');

@@ -62,6 +62,10 @@ function observePage(page, diagnostics) {
     else if (response.status() >= 400) diagnostics.clientErrors.push(`${response.status()} ${response.url()}`);
   });
   page.on('requestfailed', request => {
+    // The app cancels superseded reads (polls, identity checks) with an
+    // AbortController; a cancelled GET is not a failed request.
+    if (request.method() === 'GET' && request.failure()?.errorText === 'net::ERR_ABORTED'
+      && /^\/api\/(run-monitoring|auth\/installation)([/?]|$)/.test(new URL(request.url()).pathname)) return;
     diagnostics.requestFailures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || 'failed'}`);
   });
 }
@@ -213,7 +217,7 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     }), 180_000, 'The public demo exploratory job did not reach a terminal state.');
     assert(explorationJob.status === 'completed',
       `The public demo exploratory job ${explorationJob.status}: ${explorationJob.error?.message || 'unknown error'}`);
-    await page.getByText('Cells', { exact: true }).first().waitFor({ state: 'visible', timeout: 30_000 });
+    await page.getByText('Cells', { exact: true }).filter({ visible: true }).first().waitFor({ state: 'visible', timeout: 30_000 });
     await page.locator('.js-plotly-plot').filter({ visible: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });
     const explorationPath = path.join(runDirectory, 'public-demo-exploration.png');

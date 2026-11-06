@@ -363,6 +363,10 @@ async function main() {
     const clientErrors = [];
     page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
     page.on('pageerror', (error) => pageErrors.push(error.message));
+    const workflowResponses = [];
+    page.on('response', (response) => {
+      if (response.url().includes('/api/workflows/')) workflowResponses.push(`${response.request().method()} ${new URL(response.url()).pathname} ${response.status()}`);
+    });
     page.on('response', (response) => {
       if (response.status() >= 500) serverErrors.push(`${response.status()} ${response.url()}`);
       else if (response.status() >= 400) clientErrors.push(`${response.status()} ${response.url()}`);
@@ -373,7 +377,8 @@ async function main() {
     await login(page, email, password);
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
-    await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
+    await page.locator('summary', { hasText: 'Runtime, packages, and privacy' }).click();
     await page.getByRole('heading', { name: 'Exact R environment',exact:true }).waitFor();
     await page.getByRole('button', { name: 'Inspect package lock',exact:true }).click();
     await page.getByRole('button', { name: 'Download environment manifest',exact:true }).waitFor();
@@ -389,6 +394,7 @@ async function main() {
     fs.mkdirSync(rStatusScreenshots, { recursive: true });
     await page.screenshot({ path: path.join(rStatusScreenshots, 'runtime-ready.png'), fullPage: true });
     console.log('[r-environment-browser] PASS actual package-lock inspection and manifest download',expectedEnvironment.id);
+    await page.locator('summary', { hasText: /^Private input files/ }).click();
     await page.getByLabel('Choose private input').setInputFiles(inputPath);
     await page.getByRole('button', { name: 'Import file' }).click();
     await page.getByText('covariates.csv', { exact: true }).waitFor({ state: 'visible' });
@@ -403,7 +409,7 @@ summary_table <- data.frame(
 )
 write_table(summary_table, "object-summary.csv")
 `;
-    await page.getByLabel('R script').fill(successScript);
+    await page.getByRole('textbox', { name: 'R script', exact: true }).fill(successScript);
     await page.getByRole('button', { name: 'Run R analysis' }).click();
     await page.getByText('Run submitted. Results will remain private until you choose to share them.', { exact: true })
       .waitFor({ state: 'visible' });
@@ -447,7 +453,7 @@ write_table(summary_table, "object-summary.csv")
     finally {secondBroker.kill('SIGTERM');await waitForExit(secondBroker).catch(()=>secondBroker.kill('SIGKILL'));}
 
     await page.getByRole('button', { name: /View in Runs & Results/ }).click();
-    await page.getByRole('heading', { name: 'Runs & Results' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Runs & Results', exact: true }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: 'Refresh',exact:true }).click();
     await page.getByText('Complete', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByText('R analysis output', { exact: true }).waitFor({ state: 'visible' });
@@ -518,8 +524,39 @@ write_table(summary_table, "object-summary.csv")
     await packWorkflow(path.join(ROOT, 'examples/pipelines/scrna-workflow'), workflowPath);
     await page.getByLabel('Workflow package file').setInputFiles(workflowPath);
     await page.getByRole('button', { name: 'Install Single-cell workflow', exact: true }).click();
+    const openTrace = [];
+    const traceResponse = (response) => {
+      if (response.url().includes('/api/')) openTrace.push(`${Date.now()} ${response.request().method()} ${new URL(response.url()).pathname} ${response.status()}`);
+    };
+    page.on('response', traceResponse);
+    await page.evaluate(() => {
+      window.__titleTrace = [document.title];
+      new MutationObserver(() => window.__titleTrace.push(`${Date.now()} ${document.title}`))
+        .observe(document.querySelector('title'), { childList: true, characterData: true, subtree: true });
+    });
     await page.getByRole('button', { name: 'Open Single-cell workflow', exact: true }).click();
-    await page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 }).waitFor();
+    // Surface the library's error instead of a bare timeout if opening is refused.
+    const workflowHeading = page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 });
+    const workflowError = page.getByRole('alert');
+    try {
+      await workflowHeading.or(workflowError).first().waitFor();
+    } catch { /* reported below */ }
+    if (!(await workflowHeading.isVisible())) {
+      const headings = await page.getByRole('heading').allInnerTexts();
+      const statuses = await page.getByRole('status').allInnerTexts();
+      throw new Error(['Opening the workflow did not show the workbench.',
+        `alerts: ${(await workflowError.allInnerTexts()).join(' | ')}`,
+        `workflow requests: ${workflowResponses.join(' | ')}`,
+        `headings: ${headings.slice(0, 8).join(' | ')}`,
+        `status: ${statuses.slice(0, 8).join(' | ')}`,
+        `console errors: ${consoleErrors.slice(-5).join(' | ')}`,
+        `page errors: ${pageErrors.slice(-5).join(' | ')}`,
+        `server errors: ${serverErrors.join(' | ')}`, `client errors: ${clientErrors.slice(-5).join(' | ')}`,
+        `api after open: ${openTrace.slice(0, 40).join(' | ')}`,
+        `titles: ${(await page.evaluate(() => window.__titleTrace || [])).join(' | ')}`,
+        `stored selection: ${await page.evaluate(() => Object.entries(localStorage).filter(([k]) => /select/i.test(k)).map(([k, v]) => `${k}=${String(v).slice(0, 120)}`).join(' ; '))}`].join('\n'));
+    }
+    page.off('response', traceResponse);
     const pcaNavigation = page.getByRole('button', { name: 'PCA', exact: true });
     assert(await pcaNavigation.getAttribute('aria-disabled') === 'true', 'PCA must start locked');
     await pcaNavigation.focus();
@@ -546,12 +583,12 @@ write_table(summary_table, "object-summary.csv")
       await runWorkflowStep(label, id);
       console.log(`[workflow-browser] PASS ${label}`);
     }
-    await page.getByRole('img', { name: 'UMAP by cluster', exact: true }).waitFor({ state: 'visible' });
+    await page.locator('section', { has: page.getByRole('heading', { name: 'UMAP by cluster', exact: true }) }).getByRole('img').first().waitFor({ state: 'visible' });
     await waitFor(async () => await page.locator('.scatterlayer .point').count() === 80, 15000, 100);
     const screenshotDirectory = path.join(ROOT, 'playwright/report/release-acceptance/workflow');
     fs.mkdirSync(screenshotDirectory, { recursive: true });
     await page.screenshot({ path: path.join(screenshotDirectory, 'workflow-umap.png'), fullPage: true });
-    const figure = page.getByRole('img', { name: 'UMAP by cluster', exact: true });
+    const figure = page.locator('section', { has: page.getByRole('heading', { name: 'UMAP by cluster', exact: true }) }).getByRole('img').first();
     await waitFor(async () => figure.evaluate(image => image.complete && image.naturalWidth > 0), 15000, 100);
     await figure.screenshot({ path: path.join(screenshotDirectory, 'workflow-custom-figure.png') });
     await page.getByLabel('Snapshot name').fill('Completed workflow');
@@ -563,19 +600,21 @@ write_table(summary_table, "object-summary.csv")
     await runWorkflowStep('PCA', 'pca');
     const resetState = (await appClient.query('SELECT state_json FROM workflow_instances WHERE owner_user_id=$1', [user.id])).rows[0].state_json;
     assert(!resetState.results.umap && !resetState.results.neighbors && !resetState.results.clusters && !resetState.results['umap-figure'], 'Changed PCA must clear both branches and their figures.');
-    await page.getByText('Saved workflows for this analysis', { exact: true }).click();
-    page.once('dialog', dialog => dialog.accept());
+    await page.getByText('Recent saved workflows for this analysis', { exact: true }).click();
     await page.getByRole('button', { name: 'Open', exact: true }).click();
-    await page.getByText('Opened Completed workflow.', { exact: true }).waitFor();
+    const retained = page.getByRole('region', { name: 'Open retained workflow' });
+    await retained.getByLabel('Replace this identified working workflow').check();
+    await retained.getByRole('button', { name: 'Open saved workflow', exact: true }).click();
+    await retained.getByText('The exact saved workflow is open. No analysis step was run.', { exact: true }).waitFor();
     assert(await page.getByLabel('Components', { exact: true }).inputValue() === '15', 'Snapshot restore must restore the applied form settings.');
     await page.getByRole('button', { name: 'UMAP', exact: true }).click();
     await figure.waitFor({ state: 'visible' });
     console.log('[workflow-browser] PASS import, locks, figures, rerun invalidation, and snapshot restoration');
 
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
-    await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
     const privateMarker = `${tempRoot}\\private-marker.txt`;
-    await page.getByLabel('R script').fill(`stop("${privateMarker.replace(/\\/g, '\\\\')}")`);
+    await page.getByRole('textbox', { name: 'R script', exact: true }).fill(`stop("${privateMarker.replace(/\\/g, '\\\\')}")`);
     await page.getByRole('button', { name: 'Run R analysis' }).click();
     await page.getByText('Run submitted. Results will remain private until you choose to share them.', { exact: true })
       .waitFor({ state: 'visible' });

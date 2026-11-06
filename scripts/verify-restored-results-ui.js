@@ -44,7 +44,7 @@ async function assertRestoredAnalysisResults({ page, objectId, artifactDirectory
     assert(!pca.provenance && !umap.provenance, 'Inspecting a reduction created new provenance.');
 
     await navigate(page, 'PCA');
-    await page.getByText(/Showing the existing PCA from this analysis/).waitFor();
+    await page.getByText(/Showing the saved PCA result/).waitFor();
     await page.getByRole('button', { name: 'PC1 vs PC2', exact: true }).click();
     const pcaPlot = await plottedCoordinates(page);
     assert(JSON.stringify(pcaPlot) === JSON.stringify(pca.result.trace_data.map(trace => ({ x: trace.x, y: trace.y }))),
@@ -52,7 +52,7 @@ async function assertRestoredAnalysisResults({ page, objectId, artifactDirectory
     await page.screenshot({ path: path.join(output, 'restored-pca.png') });
 
     await navigate(page, 'UMAP');
-    await page.getByText(/Showing the existing UMAP from this analysis/).waitFor();
+    await page.getByText(/Showing the saved UMAP result/).waitFor();
     const initialUmapPlot = await plottedCoordinates(page);
     assert(JSON.stringify(initialUmapPlot) === JSON.stringify(umap.result.trace_data.map(trace => ({ x: trace.x, y: trace.y }))),
       'The UMAP viewer changed the existing coordinates.');
@@ -69,7 +69,7 @@ async function assertRestoredAnalysisResults({ page, objectId, artifactDirectory
       .forEach(key => localStorage.removeItem(key)));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await navigate(page, 'UMAP');
-    await page.getByText(/Showing the existing UMAP from this analysis/).waitFor();
+    await page.getByText(/Showing the saved UMAP result/).waitFor();
     const reopened = await plottedCoordinates(page);
     assert(JSON.stringify(reopened) === JSON.stringify(initialUmapPlot), 'Reload replaced the saved UMAP coordinates.');
     const after = await read(page, objectId, '/pipeline-state');

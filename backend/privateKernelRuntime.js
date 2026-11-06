@@ -249,7 +249,16 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
         ||labels[`${LABEL}.kernel`]!==record.kernelId||labels[`${LABEL}.generation`]!==record.generation) {
       throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private kernel container ownership could not be verified.');
     }
-    await docker(['rm','-f',inspected.id]);
+    try{await docker(['rm','-f',inspected.id]);}
+    catch(error){
+      // Kernels run with --rm, so after a crash Docker may already be removing
+      // the container and rm fails. Treat it as removed once it is gone.
+      for(let attempt=0;attempt<20;attempt+=1){
+        if(!await inspectContainer(record.containerName).catch(()=>inspected)){record.containerRemoved=true;return;}
+        await new Promise(resolve=>setTimeout(resolve,250));
+      }
+      throw error;
+    }
     record.containerRemoved=true;
   }
   async function removeDirectory(record) {
@@ -273,7 +282,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   async function terminate(record,reason='stopped') {
     record.stopRequested=true;
     record.publicationAbort?.abort();
-    if(record.transport){await removeOwned(record);record.transport.close();}
+    if(record.transport){await removeOwned(record);record.transport?.close();}
     if(record.creation)await record.creation.catch(()=>{});
     if(record.pendingPublication)await record.pendingPublication.catch(()=>{});
     for(const entry of record.executions?.values()||[])if(entry.status==='executing')entry.status='unknown';
@@ -291,7 +300,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     record.lossCleanup=(async()=>{try{await writeEnded(record,'unknown');await removeOwned(record);record.transport?.close();
       if(record.pendingPublication)await record.pendingPublication.catch(()=>{});
       for(const entry of record.executions?.values()||[])if(entry.status==='executing')entry.status='unknown';
-      await removeDirectory(record);releaseEnded(record);}catch{/* Retry through explicit stop or lifetime sweep. */}})();
+      await removeDirectory(record);releaseEnded(record);}catch(error){/* Retry through explicit stop or lifetime sweep. */console.warn(`[private-kernel] cleanup after a lost kernel failed (${error?.code||error?.name||'error'}): ${String(error?.message||'').slice(0,200)}; container removed: ${Boolean(record.containerRemoved)}`);}})();
     return record.lossCleanup;
   }
   async function reconcile() {
@@ -382,6 +391,10 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     if(existing){requireRecord(scope,spec.kernelId);if(existing.stopRequested||existing.status==='stopped'||existing.status==='unknown')throw failure('PRIVATE_KERNEL_STOPPED','This kernel generation has ended. Start a new workspace kernel.');if(existing.fingerprint!==fingerprint)throw failure('PRIVATE_KERNEL_CONFLICT','This kernel ID already belongs to another input snapshot.');await existing.creation;return publicRecord(existing);}
     if(!initialized||closed)throw failure('PRIVATE_KERNEL_UNAVAILABLE','The persistent private R runtime is not ready.');
     const ended=await readEnded(spec.kernelId);
+    // A crashed kernel's container is removed asynchronously; until then it
+    // still counts against capacity. Wait for in-flight loss cleanup so an
+    // immediate restart after a crash is not refused as "capacity is full".
+    await Promise.all([...records.values()].filter(record=>record.lossCleanup).map(record=>record.lossCleanup.catch(()=>{})));
     if(ended){if(ended.scope&&['ownerUserId','projectId','workspaceId'].some(key=>ended.scope[key]!==scope[key]))throw failure('PRIVATE_KERNEL_NOT_FOUND','The private kernel is unavailable.');throw failure('PRIVATE_KERNEL_STOPPED','This kernel generation has ended. Start a new workspace kernel.');}
     // Reading the durable tombstone yields to the event loop. A concurrent stop
     // or start may have reserved this ID in that interval; check again before
@@ -650,7 +663,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
       }
     }
     if(!record.stopRequested||record.creation){requireRecord(scope,kernelId);record.stopRequested=true;
-      if(record.transport){await removeOwned(record);record.transport.close();}
+      if(record.transport){await removeOwned(record);record.transport?.close();}
       if(record.creation)await record.creation.catch(()=>{});await terminate(record);}
     return {ok:true,kernelId,generation:record.generation,status:'stopped',stoppedAt:utc(record.stoppedAt)};
   }

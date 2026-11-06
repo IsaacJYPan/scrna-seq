@@ -41,6 +41,7 @@ async function fixture(options={}) {
     }
     if(args[0]==='ps')return{stdout:[...containers.keys()].join('\n')};
     if(args[0]==='inspect') {const value=containers.get(args[1]);if(!value)throw Object.assign(new Error('missing'),{exitCode:1});return{stdout:JSON.stringify(value)};}
+    if(args[0]==='rm'&&options.autoRemoveRace) {const entry=[...containers].find(([,value])=>value.id===args[2]);setTimeout(()=>{if(entry)containers.delete(entry[0]);},300);throw Object.assign(new Error('removal in progress'),{exitCode:1});}
     if(args[0]==='rm') {for(const [name,value]of containers){if(value.id===args[2])containers.delete(name);}return{stdout:''};}
     throw new Error('Unexpected Docker operation');
   };
@@ -253,6 +254,18 @@ describe('private execution order and transport',()=>{
     await expect(f.runtime.execute(scoped,kernelId,{...command,source:'x <- 43'})).rejects.toMatchObject({code:'PRIVATE_KERNEL_CONFLICT'});
     await expect(f.runtime.execute(scoped,kernelId,{...command,executionId:`pex_${'2'.repeat(24)}`,order:3})).rejects.toMatchObject({code:'PRIVATE_KERNEL_ORDER_INVALID'});
     await expect(f.runtime.execute(scoped,kernelId,{...command,executionId:`pex_${'3'.repeat(24)}`,order:2,source:'x'.repeat(32769)})).rejects.toMatchObject({code:'PRIVATE_KERNEL_INVALID'});
+  });
+  it('frees capacity when a crashed --rm container is already being removed by Docker',async()=>{
+    const f=await fixture({autoRemoveRace:true});await f.runtime.initialize();await f.start();
+    f.transports[0].lose();
+    const started=await f.start(secondId);
+    expect(started.kernelId).toBe(secondId);expect((await f.runtime.inspect(scope,kernelId)).status).toBe('unknown');
+  });
+  it('overlapping idle sweeps survive while Docker is still auto-removing the container',async()=>{
+    const f=await fixture({autoRemoveRace:true,env:{PRIVATE_R_KERNEL_IDLE_SECONDS:'10'}});await f.runtime.initialize();await f.start();
+    f.advance(10001);const first=f.runtime.sweep();
+    await new Promise(resolve=>setTimeout(resolve,50));const second=f.runtime.sweep();
+    await Promise.all([first,second]);expect((await f.runtime.inspect(scope,kernelId)).reason).toBe('idle-expired');
   });
   it('reports in-flight repeats, blocks concurrent source, and marks transport loss unknown without retry',async()=>{
     const pending=deferred();const f=await fixture({result:()=>pending.promise});await f.runtime.initialize();await f.start();
