@@ -154,30 +154,45 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - name: Require release signing credentials
+      - name: Choose signed or unsigned build
+        id: signing
         shell: pwsh
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK)) {
-            throw 'WINDOWS_CSC_LINK is required for a release installer.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) {
-            throw 'WINDOWS_CSC_KEY_PASSWORD is required for a release installer.'
+          # Signing needs a code-signing certificate. Without one, build and check an
+          # unsigned installer so the packaging is still tested.
+          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK) -or [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) {
+            "signed=false" >> $env:GITHUB_OUTPUT
+            Write-Output '::warning title=Unsigned installer::WINDOWS_CSC_LINK and WINDOWS_CSC_KEY_PASSWORD are not set, so this installer is unsigned. Windows will warn users who run it.'
+          } else {
+            "signed=true" >> $env:GITHUB_OUTPUT
           }
       - name: Build signed Windows installer
+        if: steps.signing.outputs.signed == 'true'
         run: npm run desktop:dist
-      - name: Verify publisher, metadata, and release hash
+      - name: Build unsigned Windows installer
+        if: steps.signing.outputs.signed != 'true'
+        run: npm run desktop:dist:unsigned
+        env:
+          CSC_LINK: ''
+          CSC_KEY_PASSWORD: ''
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify installer, metadata, and release hash
         shell: pwsh
         run: |
           $installer = Get-ChildItem -LiteralPath release/desktop -Filter 'TraceOmics-Setup-*-x64.exe'
           if ($installer.Count -ne 1) {
             throw "Expected one x64 installer, found $($installer.Count)."
           }
-          ./scripts/verify-windows-installer.ps1 -InstallerPath $installer.FullName
+          if ('${{ steps.signing.outputs.signed }}' -eq 'true') {
+            ./scripts/verify-windows-installer.ps1 -InstallerPath $installer.FullName
+          } else {
+            ./scripts/verify-windows-installer.ps1 -InstallerPath $installer.FullName -AllowUnsigned
+          }
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
           "$hash  $($installer.Name)" | Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding ascii
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: traceomics-windows-installer-${{ github.sha }}
+          name: traceomics-windows-installer-${{ steps.signing.outputs.signed == 'true' && 'signed' || 'unsigned' }}-${{ github.sha }}
           path: |
             release/desktop/TraceOmics-Setup-*-x64.exe
             release/desktop/TraceOmics-Setup-*-x64.exe.sha256

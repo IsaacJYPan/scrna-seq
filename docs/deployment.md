@@ -777,7 +777,11 @@ electron-builder signing credential variables and refuses to produce an unsigned
 release artifact. Output uses the stable
 `TraceOmics-Setup-<version>-x64.exe` name. The manual Release Certification
 workflow verifies the Authenticode publisher, product/company metadata, and
-SHA-256 before uploading the installer and checksum sidecar.
+SHA-256 before uploading the installer and checksum sidecar. If the
+`WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD` secrets are not set, it builds
+and checks an unsigned installer instead (everything except the signature),
+labels the artifact `unsigned`, and shows a warning. Unsigned installers are for
+testing; Windows warns users who run them.
 
 The installed application is a sandboxed Electron client for the same HTTPS
 deployment; it does not bundle or start Postgres, R, or Docker. Operators can
