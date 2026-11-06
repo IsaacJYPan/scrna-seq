@@ -1,8 +1,9 @@
 'use strict';
 
-// Slurm execution target (docs/spec.md phase 3). Runs the Seurat pipeline on a
-// cluster through a login node over SSH using a fixed command set: mkdir, sbatch,
-// sacct/squeue, scancel, cat. Commands are built from validated tokens only; no
+// Slurm execution target (docs/spec.md phases 3-4). Runs the Seurat pipeline,
+// and agent sandbox runs on a qualified cluster, through a login node over SSH
+// with a fixed command set (mkdir, chmod, sbatch, sacct, squeue, scancel, sinfo,
+// tail, tar, rm) plus scp. Commands are built from validated tokens only; no
 // caller-supplied text reaches the remote shell.
 //
 // Each job gets <SLURM_REMOTE_ROOT>/<jobId>/ with the exact runner code, its
@@ -55,12 +56,20 @@ function slurmConfig(env = process.env) {
     modules: tokens(env.SLURM_MODULES),
     pollSeconds: Math.min(600, Math.max(1, Number(env.SLURM_POLL_SECONDS) || 30)),
     name: env.SLURM_TARGET_NAME || 'slurm',
+    // Agent sandbox runs on the cluster: the container command that isolates
+    // the R process (for example "apptainer exec --containall --cleanenv
+    // --no-home --network none --bind {work}:/work /path/traceomics-r.sif"), and
+    // that image's digest. {work} is replaced with the run's work directory.
+    sandboxExec: tokens(env.SLURM_SANDBOX_EXEC),
+    sandboxImageDigest: /^sha256:[0-9a-f]{64}$/.test(env.SLURM_SANDBOX_IMAGE_DIGEST || '') ? env.SLURM_SANDBOX_IMAGE_DIGEST : null,
   };
   for (const [key, value] of Object.entries({ partition: config.partition, account: config.account, qos: config.qos })) {
     if (value && !SAFE_TOKEN.test(value)) config.enabled = false, config.invalid = key;
   }
   if (!config.rscript.length || !config.rscript.every((t) => SAFE_TOKEN.test(t))) config.enabled = false, config.invalid = 'rscript';
   if (!config.modules.every((t) => SAFE_TOKEN.test(t))) config.enabled = false, config.invalid = 'modules';
+  config.sandboxConfigured = config.enabled && config.sandboxExec.length > 0 && Boolean(config.sandboxImageDigest)
+    && config.sandboxExec.every((t) => SAFE_TOKEN.test(t.replace('{work}', '/w')));
   return config;
 }
 
@@ -135,6 +144,30 @@ function jobScript(config, { jobId, runDir, resources }) {
   return `${lines.join('\n')}\n`;
 }
 
+// Job script for an agent sandbox run. The R process runs inside the
+// operator's container command; the tarball of its output directory is made
+// outside the container, after R exits successfully.
+function sandboxJobScript(config, { jobId, runDir, work, containerWork, resources }) {
+  const exec = config.sandboxExec.map((t) => t.split('{work}').join(work));
+  const lines = [
+    '#!/bin/bash',
+    `#SBATCH --job-name=tro-${jobId}`,
+    `#SBATCH --output=${runDir}/slurm.out`,
+    `#SBATCH --cpus-per-task=${Math.max(1, Math.floor(resources.cpus))}`,
+    `#SBATCH --mem=${Math.max(256, Math.floor(resources.memoryMiB))}M`,
+    `#SBATCH --time=${wallTime(resources.maxWallSeconds)}`,
+  ];
+  if (config.partition) lines.push(`#SBATCH --partition=${config.partition}`);
+  if (config.account) lines.push(`#SBATCH --account=${config.account}`);
+  if (config.qos) lines.push(`#SBATCH --qos=${config.qos}`);
+  lines.push('set -euo pipefail');
+  if (config.modules.length) lines.push(`module load ${config.modules.join(' ')}`);
+  lines.push(`cd ${runDir}`);
+  lines.push(`${exec.join(' ')} Rscript --vanilla ${containerWork}/expert-runner.R ${containerWork}`);
+  lines.push(`tar -czf ${runDir}/outputs.tar.gz -C ${work}/output .`);
+  return `${lines.join('\n')}\n`;
+}
+
 function sha256File(file) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -206,12 +239,9 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
     try { return (await transport.exec(['tail', '-n', '40', `${runDir}/slurm.out`])).slice(-4000); } catch { return ''; }
   }
 
-  // Runs the Seurat pipeline on the cluster and returns the R result body, after
-  // copying the checkpoint to `checkpointPath` and verifying its checksum.
-  async function runSeurat({ jobId, inputs, params, resources, checkpointPath, heartbeat, log, isCanceled }) {
-    if (!config.enabled) throw codedError('SLURM_UNAVAILABLE', 'Slurm is not configured for this installation.');
-    if (!JOB_ID.test(jobId)) throw codedError('INVALID_JOB_ID', 'Invalid job id.');
-    const runDir = `${config.remoteRoot.replace(/\/+$/, '')}/${jobId}`;
+  // Stages a run directory (once), submits it, and waits for a terminal state.
+  // `stage(write)` copies the run's files; it is skipped when re-attaching.
+  async function submitAndWait({ jobId, runDir, stage, heartbeat, log, isCanceled, failureLabel = 'Slurm output (tail)' }) {
     let dispatch = await getDispatch(jobId);
     let slurmJobId = dispatch?.slurm_job_id || null;
     if (!slurmJobId && dispatch) {
@@ -221,19 +251,8 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
     if (!slurmJobId) {
       const staging = await fs.promises.mkdtemp(path.join(require('os').tmpdir(), 'tro-slurm-'));
       try {
-        await transport.exec(['mkdir', '-p', `${runDir}/input`, `${runDir}/output`, `${runDir}/lib`]);
-        for (const file of RUNNER_FILES) await transport.put(path.join(ROOT, file.local), `${runDir}/${file.remote}`);
-        const manifest = [];
-        for (const [index, input] of inputs.entries()) {
-          const name = `input/input-${index}.h5`;
-          await transport.put(input.localPath, `${runDir}/${name}`);
-          manifest.push({ file: name, sample_name: input.sampleName, condition_name: input.conditionName,
-            donor_code: input.donorCode, batch: input.batch });
-        }
-        const write = async (name, text) => { const local = path.join(staging, name); await fs.promises.writeFile(local, text); await transport.put(local, `${runDir}/${name}`); };
-        await write('params.json', JSON.stringify(params));
-        await write('inputs.json', JSON.stringify(manifest));
-        await write('job.sh', jobScript(config, { jobId, runDir, resources }));
+        const write = async (name, text) => { const local = path.join(staging, name.replace(/\//g, '_')); await fs.promises.writeFile(local, text); await transport.put(local, `${runDir}/${name}`); };
+        await stage(write);
       } finally {
         await fs.promises.rm(staging, { recursive: true, force: true });
       }
@@ -275,11 +294,38 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
         break;
       } else if (!ACTIVE_STATES.has(state)) {
         const detail = await tail(runDir);
-        if (detail) await log({ level: 'error', message: `Slurm output (tail): ${detail.slice(-1500)}` });
+        if (detail) await log({ level: 'error', message: `${failureLabel}:\n${detail.slice(-1500)}` });
         throw codedError(canceled ? 'JOB_CANCELED' : 'SLURM_JOB_FAILED', `Slurm job ${slurmJobId} ended ${state}.`);
       }
       await sleep(config.pollSeconds * 1000);
     }
+    return slurmJobId;
+  }
+
+  function runDirFor(jobId) {
+    if (!config.enabled) throw codedError('SLURM_UNAVAILABLE', 'Slurm is not configured for this installation.');
+    if (!JOB_ID.test(jobId)) throw codedError('INVALID_JOB_ID', 'Invalid job id.');
+    return `${config.remoteRoot.replace(/\/+$/, '')}/${jobId}`;
+  }
+
+  // Runs the Seurat pipeline on the cluster and returns the R result body, after
+  // copying the checkpoint to `checkpointPath` and verifying its checksum.
+  async function runSeurat({ jobId, inputs, params, resources, checkpointPath, heartbeat, log, isCanceled }) {
+    const runDir = runDirFor(jobId);
+    const slurmJobId = await submitAndWait({ jobId, runDir, heartbeat, log, isCanceled, stage: async (write) => {
+      await transport.exec(['mkdir', '-p', `${runDir}/input`, `${runDir}/output`, `${runDir}/lib`]);
+      for (const file of RUNNER_FILES) await transport.put(path.join(ROOT, file.local), `${runDir}/${file.remote}`);
+      const manifest = [];
+      for (const [index, input] of inputs.entries()) {
+        const name = `input/input-${index}.h5`;
+        await transport.put(input.localPath, `${runDir}/${name}`);
+        manifest.push({ file: name, sample_name: input.sampleName, condition_name: input.conditionName,
+          donor_code: input.donorCode, batch: input.batch });
+      }
+      await write('params.json', JSON.stringify(params));
+      await write('inputs.json', JSON.stringify(manifest));
+      await write('job.sh', jobScript(config, { jobId, runDir, resources }));
+    } });
 
     const resultLocal = `${checkpointPath}.result.json`;
     await transport.get(`${runDir}/output/result.json`, resultLocal);
@@ -296,12 +342,81 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
     return { body, slurmJobId };
   }
 
+  // Agent sandbox run (docs/spec.md phase 4) on the cluster. The R process runs
+  // inside the operator's container command (SLURM_SANDBOX_EXEC) with the same
+  // runner and helpers as the local Expert R container. Outputs come back as a
+  // tarball that is listed, bounded, and re-validated here before anything is
+  // stored; nothing on the cluster is trusted to have enforced the limits.
+  async function runExpertR({ jobId, script, checkpointStorageKey, checkpointChecksumSha256, checkpointSizeBytes,
+    privateInputs = [], outputStorageKey, resources, provider, heartbeat, log, isCanceled }) {
+    if (!config.sandboxConfigured) throw codedError('SLURM_UNAVAILABLE', 'The cluster sandbox is not configured for this installation.');
+    if (privateInputs.length) throw codedError('SLURM_UNAVAILABLE', 'Private input files are not staged to the cluster.');
+    const { validateExpertRParams, EXPERT_R_PROFILE, SLURM_SANDBOX_POLICY_VERSION } = require('../expertR');
+    const { collectOutputs, MAX_OUTPUT_BYTES, MAX_ARCHIVE_BYTES } = require('../expertSandboxBroker');
+    const { scriptSha256 } = validateExpertRParams({ profileId: EXPERT_R_PROFILE.id, script, inputIds: [] });
+    const runDir = runDirFor(jobId);
+    const work = `${runDir}/work`;
+    const containerWork = config.sandboxExec.some((t) => t.includes('{work}')) ? '/work' : work;
+    const opened = await provider.openVerifiedRead(checkpointStorageKey, { sizeBytes: checkpointSizeBytes, checksumSha256: checkpointChecksumSha256 });
+    await opened.handle.close();
+    await submitAndWait({ jobId, runDir, heartbeat, log, isCanceled, failureLabel: 'R console (last lines)', stage: async (write) => {
+      await transport.exec(['mkdir', '-p', `${work}/input`, `${work}/output`]);
+      await transport.put(path.join(ROOT, 'r-backend/expert-runner.R'), `${work}/expert-runner.R`);
+      await transport.put(provider.resolveKey(checkpointStorageKey), `${work}/input/checkpoint.rds`);
+      await write('work/input/analysis.R', script);
+      await write('work/input/input-manifest.json', '[]');
+      await transport.exec(['chmod', '-R', 'a-w', `${work}/input`, `${work}/expert-runner.R`]);
+      await write('job.sh', sandboxJobScript(config, { jobId, runDir, work, containerWork, resources }));
+    } });
+
+    const listing = await transport.exec(['tar', '-tvzf', `${runDir}/outputs.tar.gz`], { timeoutMs: 300000 });
+    let listed = 0;
+    let declared = 0;
+    for (const line of listing.split('\n').filter(Boolean)) {
+      const fields = line.trim().split(/\s+/);
+      if (!['-', 'd'].includes(line[0])) throw codedError('EXPERT_R_RESULT_INVALID', 'The cluster outputs contain a link or special file.');
+      if (line[0] === '-') { listed += 1; declared += Number(fields[2]) || 0; }
+    }
+    if (listed > 50 || declared > MAX_OUTPUT_BYTES) throw codedError('EXPERT_R_RESULT_INVALID', 'The cluster outputs exceed the sandbox limits.');
+    const local = await fs.promises.mkdtemp(path.join(require('os').tmpdir(), 'tro-slurm-out-'));
+    try {
+      const fetched = path.join(local, 'fetched.tar.gz');
+      await transport.get(`${runDir}/outputs.tar.gz`, fetched);
+      if ((await fs.promises.stat(fetched)).size > MAX_ARCHIVE_BYTES) throw codedError('EXPERT_R_RESULT_INVALID', 'The cluster outputs exceed the sandbox limits.');
+      const outputDir = path.join(local, 'output');
+      await fs.promises.mkdir(outputDir);
+      await run('tar', ['-xzf', fetched, '-C', outputDir, '--no-same-owner', '--no-same-permissions'], { timeoutMs: 300000 });
+      let outputs;
+      try { outputs = await collectOutputs(outputDir); } catch (error) {
+        throw codedError('EXPERT_R_RESULT_INVALID', `The cluster outputs were rejected: ${error.message}`);
+      }
+      const archive = path.join(local, 'expert-r-outputs.tar.gz');
+      await run('tar', ['-czf', archive, '-C', outputDir, '.'], { timeoutMs: 300000 });
+      const stored = await provider.putFileFromPath(archive, outputStorageKey);
+      const consoleTail = (await tail(runDir)).slice(-4000);
+      await saveDispatch(jobId, { remoteDir: runDir, state: 'collected' });
+      return {
+        ok: true, saved: true, checksumSha256: stored.checksumSha256, sizeBytes: stored.sizeBytes,
+        nFiles: outputs.files.length, outputBytes: outputs.totalBytes,
+        files: outputs.files.map((file) => ({ name: file.relative, sizeBytes: file.sizeBytes, checksumSha256: file.checksumSha256 })),
+        scriptSha256, profileId: EXPERT_R_PROFILE.id, checkpointChecksumSha256, privateInputs: [],
+        sandboxImageDigest: config.sandboxImageDigest, resourcePolicyVersion: SLURM_SANDBOX_POLICY_VERSION,
+        ...(consoleTail ? { consoleTail } : {}),
+      };
+    } finally {
+      await fs.promises.rm(local, { recursive: true, force: true });
+    }
+  }
+
   async function cancel(jobId) {
     const dispatch = await getDispatch(jobId);
     if (dispatch?.slurm_job_id) await transport.exec(['scancel', dispatch.slurm_job_id]).catch(() => {});
   }
 
-  return { config, status, runSeurat, cancel, jobScript: (args) => jobScript(config, args) };
+  return {
+    config, status, runSeurat, runExpertR, cancel, transport, jobState, submitAndWait, runDirFor,
+    jobScript: (args) => jobScript(config, args),
+  };
 }
 
-module.exports = { createSlurmExecutor, slurmConfig, jobScript, wallTime, shellQuote };
+module.exports = { createSlurmExecutor, slurmConfig, jobScript, sandboxJobScript, wallTime, shellQuote };

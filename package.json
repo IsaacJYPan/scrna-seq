@@ -26,6 +26,7 @@
     "workflow:pack": "node scripts/pack-workflow.mjs",
     "platform-developer": "node scripts/manage-platform-developer.js",
     "expert-r-access": "node scripts/manage-expert-r-access.js",
+    "slurm:qualify": "node scripts/qualify-slurm.js",
     "expert-r:restore-environment": "node scripts/restore-r-environment.js",
     "account-admin": "node scripts/account-admin.js",
     "ops:backup": "node scripts/backup-runtime.js",

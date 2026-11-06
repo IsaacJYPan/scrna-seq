@@ -140,6 +140,10 @@ function publicRun(row, { includeScript = true } = {}) {
   };
 }
 
+function runCpuSeconds(row) {
+  return row.execution_target === 'slurm' ? row.run_cpus * row.run_wall_seconds : RUN_CPU_SECONDS;
+}
+
 function publicSandbox(row, runs = null) {
   return {
     id: row.id,
@@ -151,7 +155,11 @@ function publicSandbox(row, runs = null) {
     maxRuns: row.max_runs,
     maxOutstandingRuns: row.max_outstanding_runs,
     maxCpuSeconds: Number(row.max_cpu_seconds),
-    cpuSecondsPerRun: RUN_CPU_SECONDS,
+    executionTarget: row.execution_target || 'local',
+    perRun: row.execution_target === 'slurm'
+      ? { cpus: row.run_cpus, memoryMiB: row.run_memory_mib, maxWallSeconds: row.run_wall_seconds }
+      : { cpus: 2, memoryMiB: 8192, maxWallSeconds: 900 },
+    cpuSecondsPerRun: runCpuSeconds(row),
     status: row.status,
     closedAt: row.closed_at,
     createdAt: row.created_at,
@@ -169,12 +177,18 @@ function publicSandbox(row, runs = null) {
   };
 }
 
-function createSandboxService({ db, withTransaction, provider, getEnvironment }) {
+function createSandboxService({ db, withTransaction, provider, getEnvironment, clusterReadiness }) {
   const resolveEnvironment = getEnvironment || (() => require('../expertSandboxClient').getExpertREnvironment());
+  // Whether the Slurm target is qualified for sandbox runs right now.
+  const slurmReady = clusterReadiness || (async () => {
+    const { slurmConfig } = require('../executors/slurm');
+    return require('../executors/slurmQualification').sandboxReadiness(db, slurmConfig());
+  });
 
   async function create(actor, projectId, body = {}) {
     requireHuman(actor);
-    rejectUnknown(body, ['name', 'objective', 'analysisObjectIds', 'maxRuns', 'maxOutstandingRuns', 'maxCpuSeconds']);
+    rejectUnknown(body, ['name', 'objective', 'analysisObjectIds', 'maxRuns', 'maxOutstandingRuns', 'maxCpuSeconds',
+      'executionTarget', 'cpusPerRun', 'memoryGiBPerRun', 'hoursPerRun']);
     await db.requireProjectRole(actor.userId, projectId, WRITE_ROLES);
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name || name.length > 200) throw codedError('INVALID_INPUT', 'name must be 1-200 characters.', 400);
@@ -184,9 +198,22 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment })
         || !ids.every((id) => typeof id === 'string' && OBJECT_ID.test(id))) {
       throw codedError('INVALID_INPUT', `Choose 1-${MAX_INPUTS} distinct analyses for the sandbox.`, 400);
     }
+    const executionTarget = body.executionTarget === undefined ? 'local' : body.executionTarget;
+    if (!['local', 'slurm'].includes(executionTarget)) throw codedError('INVALID_INPUT', 'executionTarget must be local or slurm.', 400);
+    const perRun = { cpus: 2, memoryMiB: 8192, wallSeconds: 900 };
+    if (executionTarget === 'slurm') {
+      const readiness = await slurmReady();
+      if (!readiness.ready) throw codedError('TARGET_UNQUALIFIED', readiness.reason || 'The cluster is not qualified for sandbox runs.', 409);
+      perRun.cpus = intInRange(body.cpusPerRun, 'cpusPerRun', 1, 64, 4);
+      perRun.memoryMiB = intInRange(body.memoryGiBPerRun, 'memoryGiBPerRun', 1, 1024, 32) * 1024;
+      perRun.wallSeconds = intInRange(body.hoursPerRun, 'hoursPerRun', 1, 48, 4) * 3600;
+    } else if (body.cpusPerRun !== undefined || body.memoryGiBPerRun !== undefined || body.hoursPerRun !== undefined) {
+      throw codedError('INVALID_INPUT', 'Per-run resources can be set only for cluster sandboxes.', 400);
+    }
+    const cpuPerRun = perRun.cpus * perRun.wallSeconds;
     const maxRuns = intInRange(body.maxRuns, 'maxRuns', 1, 500, 20);
     const maxOutstandingRuns = intInRange(body.maxOutstandingRuns, 'maxOutstandingRuns', 1, 5, 1);
-    const maxCpuSeconds = intInRange(body.maxCpuSeconds, 'maxCpuSeconds', RUN_CPU_SECONDS, 100000000, maxRuns * RUN_CPU_SECONDS);
+    const maxCpuSeconds = intInRange(body.maxCpuSeconds, 'maxCpuSeconds', cpuPerRun, 100000000, maxRuns * cpuPerRun);
     const inputs = [];
     for (const id of ids) {
       const { rows } = await db.query(
@@ -211,8 +238,10 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment })
     await withTransaction(async (client) => {
       await client.query(
         `INSERT INTO agent_sandboxes (id, project_id, created_by_user_id, name, objective, inputs_json, max_runs,
-           max_outstanding_runs, max_cpu_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [id, String(projectId), actor.userId, name, objective, JSON.stringify(inputs), maxRuns, maxOutstandingRuns, maxCpuSeconds]);
+           max_outstanding_runs, max_cpu_seconds, execution_target, run_cpus, run_memory_mib, run_wall_seconds)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [id, String(projectId), actor.userId, name, objective, JSON.stringify(inputs), maxRuns, maxOutstandingRuns, maxCpuSeconds,
+          executionTarget, perRun.cpus, perRun.memoryMiB, perRun.wallSeconds]);
       await recordAutomationEvent(client, {
         projectId, actor, action: 'sandbox.created', decision: 'allowed', targetType: 'sandbox', targetId: id,
       });
@@ -400,15 +429,24 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment })
       return { run: publicRun(rows[0]), replayed: true };
     }
 
-    if (!expertRSandboxEnabled() || require('../config').demoMode()) {
-      throw codedError('TARGET_UNQUALIFIED', 'The isolated R sandbox is not enabled on this installation.', 409);
-    }
-    let parameters;
-    try {
-      const manifest = await resolveEnvironment();
-      parameters = require('../rEnvironment').pinExpertREnvironment(validated.params, manifest);
-    } catch {
-      throw codedError('SERVICE_UNAVAILABLE', 'The isolated R environment could not be verified. Retry later.', 503);
+    if (require('../config').demoMode()) throw codedError('TARGET_UNQUALIFIED', 'Sandboxes are not available in the demo.', 409);
+    const target = await sandboxRow(db, actor.delegation.projectId, sandboxId);
+    let parameters = validated.params;
+    if (target?.execution_target === 'slurm') {
+      // The cluster image is identified by its configured digest; the local
+      // package lock does not describe it, so no environment is pinned.
+      const readiness = await slurmReady();
+      if (!readiness.ready) throw codedError('TARGET_UNQUALIFIED', readiness.reason || 'The cluster is not qualified for sandbox runs.', 409);
+    } else {
+      if (!expertRSandboxEnabled()) {
+        throw codedError('TARGET_UNQUALIFIED', 'The isolated R sandbox is not enabled on this installation.', 409);
+      }
+      try {
+        const manifest = await resolveEnvironment();
+        parameters = require('../rEnvironment').pinExpertREnvironment(validated.params, manifest);
+      } catch {
+        throw codedError('SERVICE_UNAVAILABLE', 'The isolated R environment could not be verified. Retry later.', 503);
+      }
     }
     const stored = { ...parameters, scriptSha256: validated.scriptSha256 };
 
@@ -431,6 +469,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment })
       }
       const sandbox = await agentSandboxRow(client, actor, sandboxId, { lock: true });
       if (sandbox.status !== 'open') throw codedError('SANDBOX_CLOSED', 'This sandbox is closed.', 409);
+      const cpuPerRun = runCpuSeconds(sandbox);
       const inputs = sandbox.inputs_json;
       const inputId = body.inputAnalysisObjectId === undefined ? inputs[0].analysisObjectId : body.inputAnalysisObjectId;
       const input = inputs.find((entry) => entry.analysisObjectId === inputId);
@@ -480,16 +519,17 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment })
       if (counts.installation_outstanding >= limits.maxOutstandingRuns) throw over('installation', 'The installation is at its limit of active agent runs.');
       if (counts.sponsor_outstanding >= limits.maxOutstandingRunsPerSponsor) throw over('sponsor', "The sponsor's agents are at their limit of active runs.");
       if (counts.delegation_outstanding >= policy.maxOutstandingRuns) throw over('delegation', 'This agent is at its limit of active runs.');
-      if (Number(counts.delegation_cpu) + RUN_CPU_SECONDS > policy.maxReservedCpuSeconds) throw over('delegation-compute', "This agent's compute budget is exhausted.");
+      if (Number(counts.delegation_cpu) + cpuPerRun > policy.maxReservedCpuSeconds) throw over('delegation-compute', "This agent's compute budget is exhausted.");
       if (counts.sandbox_runs >= sandbox.max_runs) throw over('sandbox-runs', 'This sandbox has used all of its runs.');
       if (counts.sandbox_outstanding >= sandbox.max_outstanding_runs) throw over('sandbox-outstanding', 'This sandbox is at its limit of active runs.');
-      if (Number(counts.sandbox_cpu) + RUN_CPU_SECONDS > Number(sandbox.max_cpu_seconds)) throw over('sandbox-compute', "This sandbox's compute budget is exhausted.");
+      if (Number(counts.sandbox_cpu) + cpuPerRun > Number(sandbox.max_cpu_seconds)) throw over('sandbox-compute', "This sandbox's compute budget is exhausted.");
 
       const jobId = db.genId('job');
       await client.query(
-        `INSERT INTO jobs (id, owner_user_id, project_id, analysis_object_id, job_type, status, parameters_json, max_attempts)
-         VALUES ($1, $2, $3, $4, 'expert.r.v1', $5, $6, 1)`,
-        [jobId, actor.sponsorUserId, sandbox.project_id, input.analysisObjectId, db.INITIAL_JOB_STATUS, JSON.stringify(stored)]);
+        `INSERT INTO jobs (id, owner_user_id, project_id, analysis_object_id, job_type, status, parameters_json, max_attempts,
+           execution_target) VALUES ($1, $2, $3, $4, 'expert.r.v1', $5, $6, 1, $7)`,
+        [jobId, actor.sponsorUserId, sandbox.project_id, input.analysisObjectId, db.INITIAL_JOB_STATUS, JSON.stringify(stored),
+          sandbox.execution_target]);
       await client.query(
         `INSERT INTO execution_source_versions (id, project_id, owner_user_id, job_id, language, source_code, source_sha256)
          VALUES ($1, $2, $3, $4, 'R', $5, $6)`,
@@ -501,7 +541,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment })
            reserved_cpu_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
         [runId, sandbox.project_id, sandbox.id, actor.delegation.id, actor.principalId, actor.sponsorUserId,
           actor.credentialId, body.requestId, requestSha256, jobId, counts.sandbox_runs + 1, title,
-          stored.scriptSha256, input.analysisObjectId, RUN_CPU_SECONDS]);
+          stored.scriptSha256, input.analysisObjectId, cpuPerRun]);
       await recordAutomationEvent(client, {
         projectId: sandbox.project_id, actor, action: 'sandbox-run.admitted', decision: 'allowed',
         targetType: 'sandbox_run', targetId: runId, requestId: body.requestId,

@@ -6,6 +6,7 @@ const {
   MAX_EXPERT_R_OUTPUT_BYTES,
   MAX_EXPERT_R_BUNDLE_BYTES,
   EXPERT_R_RESOURCE_POLICY_VERSION,
+  SLURM_SANDBOX_POLICY_VERSION,
 } = require('../expertR');
 const { assertEnvironmentMatches, MAX_ENVIRONMENT_BYTES } = require('../rEnvironment');
 const { codedHandlerError } = require('./jobErrors');
@@ -126,7 +127,7 @@ async function expertRHandler(ctx) {
     sandbox.checkpointChecksumSha256 === checkpoint.checksumSha256 &&
     JSON.stringify(sandbox.privateInputs || []) === JSON.stringify(privateInputProvenance) &&
     /^sha256:[0-9a-f]{64}$/.test(String(sandbox.sandboxImageDigest || '')) &&
-    sandbox.resourcePolicyVersion === EXPERT_R_RESOURCE_POLICY_VERSION;
+    sandbox.resourcePolicyVersion === (job.executionTarget === 'slurm' ? SLURM_SANDBOX_POLICY_VERSION : EXPERT_R_RESOURCE_POLICY_VERSION);
   if (!validSandbox || !validEnvironment) {
     if (typeof ctx.removeDurableObject === 'function') {
       try {

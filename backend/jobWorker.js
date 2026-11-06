@@ -162,13 +162,17 @@ function createJobWorker(options = {}) {
   const slurmExecutor = options.slurmExecutor || createSlurmExecutor({ db });
   async function slurmResourcesForJob(jobId) {
     const { rows } = await db.query(
-      'SELECT reserved_cpus, reserved_memory_mib, max_wall_seconds FROM agent_runs WHERE job_id = $1', [jobId]);
+      `SELECT reserved_cpus, reserved_memory_mib, max_wall_seconds FROM agent_runs WHERE job_id = $1
+       UNION ALL
+       SELECT sb.run_cpus, sb.run_memory_mib, sb.run_wall_seconds FROM agent_sandbox_runs sr
+         JOIN agent_sandboxes sb ON sb.id = sr.sandbox_id WHERE sr.job_id = $1`, [jobId]);
     return rows[0] ? { cpus: rows[0].reserved_cpus, memoryMiB: rows[0].reserved_memory_mib, maxWallSeconds: rows[0].max_wall_seconds } : null;
   }
   async function slurmCancelRequested(jobId) {
     const { rows } = await db.query(
-      `SELECT (j.status = 'canceled' OR ar.cancel_requested_at IS NOT NULL) AS canceled
-         FROM jobs j LEFT JOIN agent_runs ar ON ar.job_id = j.id WHERE j.id = $1`, [jobId]);
+      `SELECT (j.status = 'canceled' OR ar.cancel_requested_at IS NOT NULL OR sr.cancel_requested_at IS NOT NULL) AS canceled
+         FROM jobs j LEFT JOIN agent_runs ar ON ar.job_id = j.id LEFT JOIN agent_sandbox_runs sr ON sr.job_id = j.id
+        WHERE j.id = $1`, [jobId]);
     return rows[0]?.canceled === true;
   }
 
@@ -439,8 +443,21 @@ function createJobWorker(options = {}) {
         }
         return descriptor;
       }
-      const runClaimedSandbox =
-        typeof runExpertSandbox === 'function'
+      // A sandbox run routed to the qualified Slurm target runs its R there.
+      const slurmSandbox = jobType === 'expert.r.v1' && job.executionTarget === 'slurm'
+        ? async (input) => {
+            const resources = await slurmResourcesForJob(jobId);
+            if (!resources) throw codedHandlerError('SLURM_UNAVAILABLE', 'This run has no cluster reservation.');
+            return slurmExecutor.runExpertR({
+              ...input, resources, provider: storageProvider,
+              heartbeat: () => db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())),
+              log: (entry) => safeWorkerLog(jobId, claimToken, entry, resolveNowTs()),
+              isCanceled: () => slurmCancelRequested(jobId),
+            });
+          }
+        : null;
+      const runClaimedSandbox = slurmSandbox ||
+        (typeof runExpertSandbox === 'function'
           ? async (input) => {
               const receipt = await recordExecutionDispatch(jobType, 'sandbox-r');
               return runExpertSandbox(
@@ -457,7 +474,7 @@ function createJobWorker(options = {}) {
                   : input
               );
             }
-          : undefined;
+          : undefined);
       const makeClaimContext = (overrides = {}) => ({
         job,
         workerId,

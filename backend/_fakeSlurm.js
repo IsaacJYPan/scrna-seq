@@ -18,7 +18,14 @@ n=$(( $(cat "$FAKE_SLURM_STATE/counter" 2>/dev/null || echo 1000) + 1 )); echo "
 echo "$@" >> "$FAKE_SLURM_STATE/sbatch.log"
 name=$(grep -m1 -- '--job-name=' "$script" | sed 's/.*--job-name=//'); echo "$name $n" >> "$FAKE_SLURM_STATE/names"
 mode="\${FAKE_SLURM_MODE:-complete}"
-if [ "$mode" = fail ]; then echo "Error in Read10X_h5: boom" > "$run_dir/slurm.out"; echo FAILED > "$FAKE_SLURM_STATE/$n"
+if [ "$mode" = exec ]; then
+  # Runs the job script for real; a hold.R job just stays RUNNING.
+  if grep -q 'hold.R' "$script"; then echo RUNNING > "$FAKE_SLURM_STATE/$n"
+  else
+    set +e; bash "$script" > "$run_dir/slurm.out" 2>&1; code=$?; set -e
+    if [ "$code" = 0 ]; then echo COMPLETED; elif [ "$code" = 137 ]; then echo OUT_OF_MEMORY; else echo FAILED; fi > "$FAKE_SLURM_STATE/$n"
+  fi
+elif [ "$mode" = fail ]; then echo "Error in Read10X_h5: boom" > "$run_dir/slurm.out"; echo FAILED > "$FAKE_SLURM_STATE/$n"
 elif [ "$mode" = hold ]; then echo RUNNING > "$FAKE_SLURM_STATE/$n"
 else
   printf 'checkpoint-bytes-%s' "$n" > "$run_dir/output/checkpoint.rds"
@@ -46,6 +53,22 @@ exit 0
 `,
   scancel: `#!/bin/bash
 echo CANCELLED > "$FAKE_SLURM_STATE/$1"; echo "$1" >> "$FAKE_SLURM_STATE/scancel.log"
+`,
+  // Stand-in for the sandbox container command: "fake-sandbox Rscript --vanilla <dir>/<file>.R <dir>".
+  'fake-sandbox': `#!/bin/bash
+file="$3"; dir="$4"; name=$(basename "$file")
+case "$name" in
+  expert-runner.R)
+    if grep -q 'stop(' "$dir/input/analysis.R"; then echo "Error in eval(ei, envir): boom" >&2; exit 1; fi
+    echo "Running the agent script"
+    printf 'cluster,n\n0,40\n1,80\n' > "$dir/output/clusters.csv"
+    printf 'PNGDATA' > "$dir/output/umap.png" ;;
+  probe.R)
+    json="$FAKE_PROBE_JSON"
+    [ -z "$json" ] && json='{"network_blocked":true,"submission_blocked":true,"credentials_hidden":true,"input_read_only":true,"cpus_visible":2}'
+    printf '%s' "$json" > "$dir/output/probe.json" ;;
+  memory.R) exit 137 ;;
+esac
 `,
   sinfo: `#!/bin/bash
 echo "normal* up 4"; echo "gpu up 2"

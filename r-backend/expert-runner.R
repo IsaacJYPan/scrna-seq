@@ -7,7 +7,9 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
-work_dir <- "/work"
+# The work directory is /work in the local container; a cluster run may pass it.
+runner_args <- commandArgs(trailingOnly = TRUE)
+work_dir <- if (length(runner_args) == 1L && nzchar(runner_args[[1L]])) runner_args[[1L]] else "/work"
 input_path <- file.path(work_dir, "input", "checkpoint.rds")
 script_path <- file.path(work_dir, "input", "analysis.R")
 output_dir <- file.path(work_dir, "output")

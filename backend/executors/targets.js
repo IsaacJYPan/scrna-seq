@@ -5,6 +5,7 @@
 // cached briefly so status reads do not open an SSH connection every time.
 
 const { createSlurmExecutor } = require('./slurm');
+const { sandboxReadiness } = require('./slurmQualification');
 
 function createTargetDirectory({ db, ttlMs = Number(process.env.COMPUTE_TARGET_STATUS_TTL_MS) || 60000, executor } = {}) {
   let cached = null;
@@ -13,7 +14,12 @@ function createTargetDirectory({ db, ttlMs = Number(process.env.COMPUTE_TARGET_S
     if (!cached || Date.now() - cached.at > ttlMs) {
       // Re-read the target configuration on each refresh.
       const slurm = executor || createSlurmExecutor({ db });
-      cached = { at: Date.now(), slurm: await slurm.status() };
+      const slurmStatus = await slurm.status();
+      // Agent sandboxes may use the cluster only with a passing qualification.
+      slurmStatus.sandbox = slurmStatus.configured
+        ? await sandboxReadiness(db, slurm.config).catch(() => ({ ready: false, reason: 'Qualification status is unavailable.' }))
+        : { ready: false, reason: slurmStatus.reason };
+      cached = { at: Date.now(), slurm: slurmStatus };
     }
     return {
       schema: 'traceomics.compute-targets.v1',

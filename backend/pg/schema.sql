@@ -2578,3 +2578,26 @@ DROP TRIGGER IF EXISTS trg_agent_report_protect ON agent_reports;
 CREATE TRIGGER trg_agent_report_protect
   BEFORE UPDATE OR DELETE ON agent_reports
   FOR EACH ROW EXECUTE FUNCTION protect_agent_report();
+
+-- ── Cluster sandboxes and target qualification (docs/spec.md phases 3-4) ─────
+-- A sandbox may send its runs to the Slurm target, with a per-run reservation.
+-- That is allowed only while the target has a passing qualification record:
+-- evidence from real jobs on the cluster that a sandboxed R process has no
+-- network, cannot submit jobs, and is held to its memory and CPU allocation.
+ALTER TABLE agent_sandboxes ADD COLUMN IF NOT EXISTS execution_target TEXT NOT NULL DEFAULT 'local';
+DO $$ BEGIN
+  ALTER TABLE agent_sandboxes ADD CONSTRAINT agent_sandboxes_execution_target_check CHECK (execution_target IN ('local', 'slurm'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE agent_sandboxes ADD COLUMN IF NOT EXISTS run_cpus INTEGER NOT NULL DEFAULT 2 CHECK (run_cpus BETWEEN 1 AND 64);
+ALTER TABLE agent_sandboxes ADD COLUMN IF NOT EXISTS run_memory_mib INTEGER NOT NULL DEFAULT 8192 CHECK (run_memory_mib BETWEEN 512 AND 1048576);
+ALTER TABLE agent_sandboxes ADD COLUMN IF NOT EXISTS run_wall_seconds INTEGER NOT NULL DEFAULT 900 CHECK (run_wall_seconds BETWEEN 60 AND 172800);
+
+CREATE TABLE IF NOT EXISTS hpc_qualifications (
+  id                  TEXT PRIMARY KEY CHECK (id ~ '^hq_[0-9a-f]{24}$'),
+  target              TEXT NOT NULL,
+  config_fingerprint  TEXT NOT NULL CHECK (config_fingerprint ~ '^[0-9a-f]{64}$'),
+  checks_json         JSONB NOT NULL CHECK (jsonb_typeof(checks_json) = 'array'),
+  passed              BOOLEAN NOT NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_hpc_qualifications_target ON hpc_qualifications(target, created_at DESC);

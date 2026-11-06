@@ -56,6 +56,26 @@ describe('AgentSandboxes', () => {
     await waitFor(() => expect(window.electronAPI.reviewAgentSandboxRun).toHaveBeenCalledWith('proj_1', 'sbr_1', 'promoted', 'Looks right'));
   });
 
+  it('offers the cluster with per-run resources once it is qualified', async () => {
+    window.electronAPI.listComputeTargets = vi.fn(async () => ({ targets: [{ name: 'slurm', configured: true, sandbox: { ready: true } }] }));
+    render(<AgentSandboxes projectId="proj_1" role="analyst" userId={7} />);
+    const form = await screen.findByRole('form', { name: /create a sandbox/i });
+    fireEvent.change(await within(form).findByLabelText(/runs on/i), { target: { value: 'slurm' } });
+    fireEvent.change(within(form).getByLabelText(/cpus per run/i), { target: { value: '8' } });
+    fireEvent.change(within(form).getByLabelText(/^name/i), { target: { value: 'Big' } });
+    fireEvent.click(within(form).getByLabelText('Clustered PBMC'));
+    fireEvent.click(within(form).getByRole('button', { name: /create sandbox/i }));
+    await waitFor(() => expect(window.electronAPI.createAgentSandbox).toHaveBeenCalledWith('proj_1', expect.objectContaining({
+      executionTarget: 'slurm', cpusPerRun: 8, memoryGiBPerRun: 32, hoursPerRun: 4 })));
+  });
+
+  it('explains why an unqualified cluster cannot be chosen', async () => {
+    window.electronAPI.listComputeTargets = vi.fn(async () => ({ targets: [{ name: 'slurm', configured: true, sandbox: { ready: false, reason: 'The cluster has not been qualified. Run npm run slurm:qualify.' } }] }));
+    render(<AgentSandboxes projectId="proj_1" role="analyst" userId={7} />);
+    expect(await screen.findByText(/has not been qualified/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/runs on/i)).toBeDisabled();
+  });
+
   it('does not offer review actions to viewers', async () => {
     render(<AgentSandboxes projectId="proj_1" role="viewer" userId={7} />);
     expect(screen.queryByRole('form', { name: /create a sandbox/i })).not.toBeInTheDocument();

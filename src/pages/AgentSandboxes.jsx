@@ -80,7 +80,8 @@ export default function AgentSandboxes({ projectId, role, userId, onChanged, onO
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [notes, setNotes] = useState({});
-  const [form, setForm] = useState({ name: '', objective: '', objectIds: [], maxRuns: 20 });
+  const [form, setForm] = useState({ name: '', objective: '', objectIds: [], maxRuns: 20, target: 'local', cpus: 4, memoryGiB: 32, hours: 4 });
+  const [cluster, setCluster] = useState(null);
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
 
   const load = useCallback(async () => {
@@ -94,6 +95,10 @@ export default function AgentSandboxes({ projectId, role, userId, onChanged, onO
       setSandboxes(list?.sandboxes || []);
       const all = Array.isArray(objs) ? objs : objs?.analysisObjects || objs?.objects || [];
       setObjects(all.filter((o) => userId === undefined || o.ownerUserId === undefined || Number(o.ownerUserId) === Number(userId)));
+      if (api.listComputeTargets) {
+        const targets = await api.listComputeTargets(projectId).catch(() => null);
+        if (mounted.current) setCluster((targets?.targets || []).find((t) => t.name === 'slurm' && t.configured) || null);
+      }
     } catch (err) {
       if (mounted.current) setError(publicErrorMessage(err?.message, 'Agent sandboxes are unavailable.'));
     }
@@ -130,10 +135,12 @@ export default function AgentSandboxes({ projectId, role, userId, onChanged, onO
   const create = (event) => {
     event.preventDefault();
     act('create', async () => {
+      const onCluster = form.target === 'slurm' && cluster?.sandbox?.ready;
       const res = await api.createAgentSandbox(projectId, {
         name: form.name, objective: form.objective, analysisObjectIds: form.objectIds, maxRuns: Number(form.maxRuns),
+        ...(onCluster ? { executionTarget: 'slurm', cpusPerRun: Number(form.cpus), memoryGiBPerRun: Number(form.memoryGiB), hoursPerRun: Number(form.hours) } : {}),
       });
-      setForm({ name: '', objective: '', objectIds: [], maxRuns: 20 });
+      setForm((f) => ({ ...f, name: '', objective: '', objectIds: [] }));
       if (res?.sandbox?.id) setOpenId(res.sandbox.id);
     });
   };
@@ -157,6 +164,28 @@ export default function AgentSandboxes({ projectId, role, userId, onChanged, onO
             <label className="space-y-1 text-xs font-bold text-textMuted">Max runs
               <input type="number" min={1} max={500} value={form.maxRuns} onChange={(e) => setForm((f) => ({ ...f, maxRuns: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
+            {cluster && (
+              <label className="space-y-1 text-xs font-bold text-textMuted">Runs on
+                <select value={form.target} disabled={!cluster.sandbox?.ready} onChange={(e) => setForm((f) => ({ ...f, target: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
+                  <option value="local">This installation (2 CPUs, 8 GiB, 15 min per run)</option>
+                  <option value="slurm">Slurm cluster</option>
+                </select>
+                {!cluster.sandbox?.ready && <span className="block font-normal">{cluster.sandbox?.reason || 'The cluster is not qualified for sandbox runs.'}</span>}
+              </label>
+            )}
+            {form.target === 'slurm' && cluster?.sandbox?.ready && (
+              <div className="grid grid-cols-3 gap-2">
+                <label className="space-y-1 text-xs font-bold text-textMuted">CPUs per run
+                  <input type="number" min={1} max={64} value={form.cpus} onChange={(e) => setForm((f) => ({ ...f, cpus: e.target.value }))} className="w-full rounded border border-border bg-background px-2 py-2 text-sm font-normal text-text" />
+                </label>
+                <label className="space-y-1 text-xs font-bold text-textMuted">Memory (GiB)
+                  <input type="number" min={1} max={1024} value={form.memoryGiB} onChange={(e) => setForm((f) => ({ ...f, memoryGiB: e.target.value }))} className="w-full rounded border border-border bg-background px-2 py-2 text-sm font-normal text-text" />
+                </label>
+                <label className="space-y-1 text-xs font-bold text-textMuted">Hours
+                  <input type="number" min={1} max={48} value={form.hours} onChange={(e) => setForm((f) => ({ ...f, hours: e.target.value }))} className="w-full rounded border border-border bg-background px-2 py-2 text-sm font-normal text-text" />
+                </label>
+              </div>
+            )}
             <label className="space-y-1 text-xs font-bold text-textMuted md:col-span-2">What should the agent investigate?
               <textarea maxLength={4000} rows={2} value={form.objective} onChange={(e) => setForm((f) => ({ ...f, objective: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
@@ -195,7 +224,7 @@ export default function AgentSandboxes({ projectId, role, userId, onChanged, onO
               {s.objective && <p className="mt-1 text-xs text-textMuted">{s.objective}</p>}
               {openId === s.id && detail?.id === s.id && (
                 <div className="mt-3 space-y-3">
-                  <p className="text-xs text-textMuted">Reads: {detail.inputs.map((i) => i.displayName || i.analysisObjectId).join(', ')} · {detail.runtime.network === 'none' ? 'no network' : detail.runtime.network}</p>
+                  <p className="text-xs text-textMuted">Reads: {detail.inputs.map((i) => i.displayName || i.analysisObjectId).join(', ')} · {detail.runtime.network === 'none' ? 'no network' : detail.runtime.network} · {detail.executionTarget === 'slurm' ? `Slurm, ${detail.perRun.cpus} CPUs, ${Math.round(detail.perRun.memoryMiB / 1024)} GiB, ${detail.perRun.maxWallSeconds / 3600} h per run` : 'this installation'}</p>
                   {s.status === 'open' && canWrite && (
                     <button type="button" disabled={Boolean(busy)} onClick={() => act(`close:${s.id}`, () => api.closeAgentSandbox(projectId, s.id))} className="btn btn-secondary text-xs">Close sandbox</button>
                   )}
