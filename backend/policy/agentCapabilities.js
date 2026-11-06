@@ -24,7 +24,10 @@ const CAPABILITIES = Object.freeze({
     description: 'Submit planned runs of approved workflows, within study and compute budgets.' },
   'run.cancelOwn': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
     description: "Cancel this agent's own runs." },
-  'development.executeCandidate': { availability: 'planned', phase: 4 },
+  'development.executeCandidate': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
+    description: "Run the agent's own R scripts in the sponsor's sandboxes: no network, read-only inputs, draft outputs." },
+  'report.write': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
+    description: 'Draft report sections and attach figures from sandbox runs, for people to review.' },
   'artifact.export': { availability: 'planned', phase: 5 },
   // Human-only governance. Agent credentials are rejected even when the sponsor
   // holds the corresponding project role.
@@ -51,6 +54,9 @@ const POLICY_LIMITS = Object.freeze({
 
 // Switches fixed off until the corresponding phase has a tested enforcement
 // path. Approved-workflow execution is governed by capabilities and studies.
+// Candidate code runs only through development.executeCandidate inside a
+// sandbox a person defined; allowCandidateCodeExecution stays false because no
+// other route runs agent code.
 const FIXED_POLICY = Object.freeze({
   mode: 'approved-workflows',
   allowArbitraryCode: false,

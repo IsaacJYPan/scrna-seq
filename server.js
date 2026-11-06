@@ -1900,7 +1900,13 @@ const agentServices = {
   db, delegations: agentDelegations, proposals: agentProposals,
   approvals: agentApprovals, studies: agentStudies, admission: agentAdmission,
   targets: require('./backend/executors/targets').createTargetDirectory({ db }),
+  sandboxes: require('./backend/agentSandbox/sandboxes').createSandboxService({
+    db, withTransaction: agentDelegations.withTransaction, provider: durableStorage,
+  }),
 };
+agentServices.reports = require('./backend/agentReports/reports').createReportService({
+  db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes,
+});
 app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
 app.use('/api/automation/v1', automationRoutes({
   ...agentServices,

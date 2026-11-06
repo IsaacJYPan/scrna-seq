@@ -2352,3 +2352,229 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- Optional comparison rule a study declares up front: which summary metric
 -- ranks its candidates and in which direction. It recommends; it never accepts.
 ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS selection_rule_json JSONB;
+
+-- ── Agent sandboxes (docs/spec.md phase 4) ───────────────────────────────────
+-- A person defines a sandbox: the exact analysis objects (pinned by checkpoint
+-- digest) an agent may read and a run and compute budget. The agent submits
+-- its own R scripts; each runs once in the ephemeral no-network Expert R
+-- container with a read-only copy of the input, and its outputs are new draft
+-- objects. Nothing existing is modified. A person promotes or discards drafts.
+CREATE TABLE IF NOT EXISTS agent_sandboxes (
+  id                    TEXT PRIMARY KEY CHECK (id ~ '^sbx_[0-9a-f]{24}$'),
+  project_id            TEXT NOT NULL REFERENCES projects(id),
+  created_by_user_id    BIGINT NOT NULL REFERENCES users(id),
+  name                  TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
+  objective             TEXT NOT NULL DEFAULT '' CHECK (char_length(objective) <= 4000),
+  inputs_json           JSONB NOT NULL CHECK (jsonb_typeof(inputs_json) = 'array'),
+  max_runs              INTEGER NOT NULL CHECK (max_runs BETWEEN 1 AND 500),
+  max_outstanding_runs  INTEGER NOT NULL CHECK (max_outstanding_runs BETWEEN 1 AND 5),
+  max_cpu_seconds       BIGINT NOT NULL CHECK (max_cpu_seconds BETWEEN 1 AND 100000000),
+  status                TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+  closed_at             TIMESTAMPTZ,
+  closed_by_user_id     BIGINT REFERENCES users(id),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((status = 'closed') = (closed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_sandboxes_project ON agent_sandboxes(project_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION protect_agent_sandbox()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'agent sandboxes are retained evidence' USING ERRCODE = '55000';
+  END IF;
+  IF (to_jsonb(NEW) - ARRAY['status','closed_at','closed_by_user_id'])
+     IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','closed_at','closed_by_user_id']) THEN
+    RAISE EXCEPTION 'agent sandbox content is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.status = 'closed' AND NEW.status <> 'closed' THEN
+    RAISE EXCEPTION 'a closed sandbox cannot be reopened' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_agent_sandbox_protect ON agent_sandboxes;
+CREATE TRIGGER trg_agent_sandbox_protect
+  BEFORE UPDATE OR DELETE ON agent_sandboxes
+  FOR EACH ROW EXECUTE FUNCTION protect_agent_sandbox();
+
+CREATE TABLE IF NOT EXISTS agent_sandbox_runs (
+  id                        TEXT PRIMARY KEY CHECK (id ~ '^sbr_[0-9a-f]{24}$'),
+  project_id                TEXT NOT NULL REFERENCES projects(id),
+  sandbox_id                TEXT NOT NULL REFERENCES agent_sandboxes(id),
+  delegation_id             TEXT NOT NULL REFERENCES agent_delegations(id),
+  agent_principal_id        TEXT NOT NULL REFERENCES agent_principals(id),
+  sponsor_user_id           BIGINT NOT NULL REFERENCES users(id),
+  credential_id             TEXT NOT NULL REFERENCES agent_credentials(id),
+  request_id                TEXT NOT NULL CHECK (request_id ~ '^[A-Za-z0-9_-]{8,80}$'),
+  request_sha256            TEXT NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+  job_id                    TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+  run_number                INTEGER NOT NULL CHECK (run_number >= 1),
+  title                     TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 200),
+  script_sha256             TEXT NOT NULL CHECK (script_sha256 ~ '^[0-9a-f]{64}$'),
+  input_analysis_object_id  TEXT NOT NULL REFERENCES analysis_objects(id),
+  reserved_cpu_seconds      BIGINT NOT NULL CHECK (reserved_cpu_seconds >= 1),
+  cancel_requested_at       TIMESTAMPTZ,
+  review_state              TEXT NOT NULL DEFAULT 'draft' CHECK (review_state IN ('draft', 'promoted', 'discarded')),
+  reviewed_at               TIMESTAMPTZ,
+  reviewed_by_user_id       BIGINT REFERENCES users(id),
+  review_note               TEXT CHECK (review_note IS NULL OR char_length(review_note) <= 2000),
+  promoted_branch_id        TEXT,
+  created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (delegation_id, request_id),
+  UNIQUE (sandbox_id, run_number),
+  CHECK ((review_state = 'draft') = (reviewed_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_sandbox_runs_sandbox ON agent_sandbox_runs(sandbox_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_sandbox_runs_delegation ON agent_sandbox_runs(delegation_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION protect_agent_sandbox_run()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  mutable TEXT[] := ARRAY['cancel_requested_at','review_state','reviewed_at','reviewed_by_user_id','review_note','promoted_branch_id'];
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'agent sandbox runs are retained evidence' USING ERRCODE = '55000';
+  END IF;
+  IF (to_jsonb(NEW) - mutable) IS DISTINCT FROM (to_jsonb(OLD) - mutable)
+     OR (OLD.cancel_requested_at IS NOT NULL AND NEW.cancel_requested_at IS DISTINCT FROM OLD.cancel_requested_at) THEN
+    RAISE EXCEPTION 'agent sandbox run records are immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.review_state <> 'draft' AND (NEW.review_state, NEW.reviewed_at, NEW.reviewed_by_user_id, NEW.review_note, NEW.promoted_branch_id)
+     IS DISTINCT FROM (OLD.review_state, OLD.reviewed_at, OLD.reviewed_by_user_id, OLD.review_note, OLD.promoted_branch_id) THEN
+    RAISE EXCEPTION 'agent sandbox run review is already recorded' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_agent_sandbox_run_protect ON agent_sandbox_runs;
+CREATE TRIGGER trg_agent_sandbox_run_protect
+  BEFORE UPDATE OR DELETE ON agent_sandbox_runs
+  FOR EACH ROW EXECUTE FUNCTION protect_agent_sandbox_run();
+
+-- Dispatch-time recheck, now covering sandbox runs as well: their delegation,
+-- principal, sandbox, and cancellation are rechecked before any R contact.
+CREATE OR REPLACE FUNCTION agent_run_authority_revoked(p_job_id TEXT, p_at TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM agent_runs ar
+      JOIN agent_delegations ad ON ad.id = ar.delegation_id
+      JOIN agent_principals ap ON ap.id = ar.agent_principal_id
+      JOIN execution_plans ep ON ep.id = ar.plan_id
+      JOIN workflow_approvals wa ON wa.id = ep.approval_id
+      JOIN workflow_releases wr ON wr.id = ep.release_id
+      JOIN study_envelopes se ON se.id = ar.study_id
+     WHERE ar.job_id = p_job_id
+       AND (ad.revoked_at IS NOT NULL OR ad.expires_at <= p_at OR ap.status <> 'active'
+            OR wa.revoked_at IS NOT NULL OR wr.status <> 'current' OR se.status <> 'open'
+            OR ar.cancel_requested_at IS NOT NULL)
+  ) OR EXISTS (
+    SELECT 1 FROM agent_sandbox_runs sr
+      JOIN agent_delegations ad ON ad.id = sr.delegation_id
+      JOIN agent_principals ap ON ap.id = sr.agent_principal_id
+      JOIN agent_sandboxes sb ON sb.id = sr.sandbox_id
+     WHERE sr.job_id = p_job_id
+       AND (ad.revoked_at IS NOT NULL OR ad.expires_at <= p_at OR ap.status <> 'active'
+            OR sb.status <> 'open' OR sr.cancel_requested_at IS NOT NULL)
+  );
+$$;
+
+-- ── Agent reports (docs/spec.md phase 5) ─────────────────────────────────────
+-- An agent drafts a report section by section. Every write is a new immutable
+-- section version; figures reference output files of the agent's sandbox runs.
+-- People review each version (approve, request changes, or comment) in an
+-- append-only log, and only a person can finalize a report.
+CREATE TABLE IF NOT EXISTS agent_reports (
+  id                    TEXT PRIMARY KEY CHECK (id ~ '^rep_[0-9a-f]{24}$'),
+  project_id            TEXT NOT NULL REFERENCES projects(id),
+  delegation_id         TEXT NOT NULL REFERENCES agent_delegations(id),
+  agent_principal_id    TEXT NOT NULL REFERENCES agent_principals(id),
+  sponsor_user_id       BIGINT NOT NULL REFERENCES users(id),
+  request_id            TEXT NOT NULL CHECK (request_id ~ '^[A-Za-z0-9_-]{8,80}$'),
+  title                 TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 300),
+  status                TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'finalized')),
+  finalized_at          TIMESTAMPTZ,
+  finalized_by_user_id  BIGINT REFERENCES users(id),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (delegation_id, request_id),
+  CHECK ((status = 'finalized') = (finalized_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_reports_project ON agent_reports(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_report_sections (
+  id                    TEXT PRIMARY KEY CHECK (id ~ '^sec_[0-9a-f]{24}$'),
+  report_id             TEXT NOT NULL REFERENCES agent_reports(id),
+  project_id            TEXT NOT NULL REFERENCES projects(id),
+  section_key           TEXT NOT NULL CHECK (section_key ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
+  position              INTEGER NOT NULL CHECK (position BETWEEN 0 AND 999),
+  version               INTEGER NOT NULL CHECK (version >= 1),
+  heading               TEXT NOT NULL CHECK (char_length(heading) BETWEEN 1 AND 300),
+  body_markdown         TEXT NOT NULL CHECK (octet_length(body_markdown) <= 65536),
+  figures_json          JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(figures_json) = 'array'),
+  delegation_id         TEXT NOT NULL REFERENCES agent_delegations(id),
+  agent_principal_id    TEXT NOT NULL REFERENCES agent_principals(id),
+  request_id            TEXT NOT NULL CHECK (request_id ~ '^[A-Za-z0-9_-]{8,80}$'),
+  request_sha256        TEXT NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (report_id, section_key, version),
+  UNIQUE (delegation_id, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_report_reviews (
+  id                    TEXT PRIMARY KEY CHECK (id ~ '^rvw_[0-9a-f]{24}$'),
+  report_id             TEXT NOT NULL REFERENCES agent_reports(id),
+  section_id            TEXT NOT NULL REFERENCES agent_report_sections(id),
+  project_id            TEXT NOT NULL REFERENCES projects(id),
+  reviewer_user_id      BIGINT NOT NULL REFERENCES users(id),
+  decision              TEXT NOT NULL CHECK (decision IN ('approved', 'changes_requested', 'comment')),
+  comment               TEXT NOT NULL DEFAULT '' CHECK (char_length(comment) <= 4000),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_report_reviews_report ON agent_report_reviews(report_id, created_at);
+
+CREATE OR REPLACE FUNCTION reject_agent_report_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'agent report history is append-only' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_agent_report_sections_immutable ON agent_report_sections;
+CREATE TRIGGER trg_agent_report_sections_immutable
+  BEFORE UPDATE OR DELETE ON agent_report_sections
+  FOR EACH ROW EXECUTE FUNCTION reject_agent_report_mutation();
+DROP TRIGGER IF EXISTS trg_agent_report_reviews_immutable ON agent_report_reviews;
+CREATE TRIGGER trg_agent_report_reviews_immutable
+  BEFORE UPDATE OR DELETE ON agent_report_reviews
+  FOR EACH ROW EXECUTE FUNCTION reject_agent_report_mutation();
+
+CREATE OR REPLACE FUNCTION protect_agent_report()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'agent reports are retained evidence' USING ERRCODE = '55000';
+  END IF;
+  IF (to_jsonb(NEW) - ARRAY['status','finalized_at','finalized_by_user_id'])
+     IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','finalized_at','finalized_by_user_id'])
+     OR OLD.status = 'finalized' THEN
+    RAISE EXCEPTION 'agent report is immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_agent_report_protect ON agent_reports;
+CREATE TRIGGER trg_agent_report_protect
+  BEFORE UPDATE OR DELETE ON agent_reports
+  FOR EACH ROW EXECUTE FUNCTION protect_agent_report();

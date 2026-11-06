@@ -50,7 +50,9 @@ function createExpertSandboxClient({ baseUrl, token, timeoutMs = 780000 } = {}) 
         try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return reject(codedError('EXPERT_R_RESPONSE_INVALID', 'Expert R response is invalid.')); }
         if (response.statusCode === 422 && body?.code === 'EXPERT_R_SCRIPT_FAILED'
             && SAFE_SCRIPT_EXPLANATIONS.has(body.explanation)) {
-          return reject(codedError('EXPERT_R_SCRIPT_FAILED', body.explanation, { publicSafe: true }));
+          const failure = codedError('EXPERT_R_SCRIPT_FAILED', body.explanation, { publicSafe: true });
+          if (typeof body.consoleTail === 'string') failure.consoleTail = body.consoleTail.slice(-4000);
+          return reject(failure);
         }
         if (response.statusCode === 503
             && body?.error === 'Expert R storage capacity is temporarily unavailable.') {

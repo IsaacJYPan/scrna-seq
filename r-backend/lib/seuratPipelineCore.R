@@ -7,6 +7,7 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
                                      single_input = NULL, dataset_inputs = NULL,
                                      sample_names = NULL, condition_names = NULL,
                                      save_rds = saveRDS) {
+  # ---- Read parameters ----
   multi_sample <- !is.null(dataset_inputs)
   as_int <- function(v, d, lo, hi) {
     x <- suppressWarnings(as.integer(v))
@@ -37,6 +38,7 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   umap_neighbors <- as_int(p$umapNeighbors, 30, 2, 200)
   umap_min_dist <- as_num(p$umapMinDist, 0.3, 0, 1)
   used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+  # ---- Load counts ----
   if (multi_sample) {
     sample_objects <- lapply(seq_along(dataset_inputs), function(index) {
       input <- dataset_inputs[[index]]
@@ -70,6 +72,7 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   warnings <- c()
   pre_filter_cells <- ncol(obj)
 
+  # ---- Quality control ----
   mt_ok <- TRUE
   tryCatch({
     obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
@@ -88,6 +91,7 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   }
   post_filter_cells <- ncol(obj)
 
+  # ---- Normalize ----
   set.seed(used_seed)
   if (norm_method == "SCTransform") {
     obj <- SCTransform(obj, verbose = FALSE)
@@ -97,21 +101,25 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
     obj <- ScaleData(obj, features = rownames(obj), verbose = FALSE)
   }
 
+  # ---- PCA ----
   npcs <- min(pca_dims, ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
   if (is.na(npcs) || npcs < 2) stop("Insufficient cells/features for PCA.")
   obj <- RunPCA(obj, features = VariableFeatures(object = obj), npcs = npcs, seed.use = used_seed, verbose = FALSE)
 
+  # ---- Cluster ----
   avail_dims <- ncol(Embeddings(obj, "pca"))
   cdims <- min(cluster_dims, avail_dims)
   obj <- FindNeighbors(obj, reduction = "pca", dims = 1:cdims, verbose = FALSE)
   obj <- FindClusters(obj, resolution = cluster_res, random.seed = used_seed, verbose = FALSE)
 
+  # ---- UMAP ----
   udims <- min(umap_dims, avail_dims)
   un <- min(umap_neighbors, ncol(obj) - 1, na.rm = TRUE)
   if (is.na(un) || un < 2) stop("Insufficient cells for UMAP.")
   obj <- RunUMAP(obj, reduction = "pca", dims = 1:udims, n.components = umap_components,
                  n.neighbors = un, min.dist = umap_min_dist, seed.use = used_seed, verbose = FALSE)
 
+  # ---- Save checkpoint ----
   safe_path <- output_path
   save_rds(list(global = obj, raw = raw_obj), safe_path)
   size_bytes <- as.numeric(file.info(safe_path)$size)
@@ -127,6 +135,7 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
   cluster_counts <- table(obj$seurat_clusters)
 
+  # ---- Summarize ----
   summary_out <- list(
     n_cells = ncol(obj),
     n_features = nrow(obj),

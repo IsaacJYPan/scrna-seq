@@ -27,6 +27,8 @@ const RETRY = Object.freeze({
   PLAN_STALE: 'new-plan',
   IDEMPOTENCY_CONFLICT: 'never',
   SERVICE_UNAVAILABLE: 'same-request-id',
+  SANDBOX_CLOSED: 'never',
+  INVALID_SCRIPT: 'never',
 });
 
 function sendError(res, status, code, message, actor, details) {
@@ -57,7 +59,7 @@ function createRateLimiter() {
   };
 }
 
-function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets }) {
+function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports }) {
   const router = express.Router();
   const rateLimit = createRateLimiter();
 
@@ -199,6 +201,53 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
   router.post('/projects/:projectId/runs/:runId/cancel', route('run.cancelOwn', async (req, actor) => ({
     schema: 'traceomics.automation.run.v1', run: await admission.cancelForAgent(actor, req.params.runId),
   })));
+
+  // Isolated development (docs/spec.md phase 4): the agent's own R scripts.
+  if (sandboxes) {
+    router.get('/projects/:projectId/sandboxes', route('development.executeCandidate', async (req, actor) => ({
+      schema: 'traceomics.automation.sandboxes.v1', sandboxes: await sandboxes.listForAgent(actor),
+    })));
+    router.get('/projects/:projectId/sandboxes/:sandboxId', route('development.executeCandidate', async (req, actor) => ({
+      schema: 'traceomics.automation.sandbox.v1', sandbox: await sandboxes.getForAgent(actor, req.params.sandboxId),
+    })));
+    router.post('/projects/:projectId/sandboxes/:sandboxId/runs', route('development.executeCandidate', async (req, actor) => {
+      const { run, replayed } = await sandboxes.submitRun(actor, req.params.sandboxId, req.body);
+      return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.sandbox-run.v1', replayed, run } };
+    }));
+    router.get('/projects/:projectId/sandbox-runs/:runId', route('development.executeCandidate', async (req, actor) => ({
+      schema: 'traceomics.automation.sandbox-run.v1', run: await sandboxes.getRunForAgent(actor, req.params.runId),
+    })));
+    router.post('/projects/:projectId/sandbox-runs/:runId/cancel', route('development.executeCandidate', async (req, actor) => ({
+      schema: 'traceomics.automation.sandbox-run.v1', run: await sandboxes.cancelForAgent(actor, req.params.runId),
+    })));
+    router.get('/projects/:projectId/sandbox-runs/:runId/files/*name', route('results.read', async (req, actor) => {
+      const name = Array.isArray(req.params.name) ? req.params.name.join('/') : String(req.params.name);
+      const file = await sandboxes.fileForAgent(actor, req.params.runId, name);
+      return {
+        schema: 'traceomics.automation.sandbox-file.v1', name: file.name, kind: file.kind, mimeType: file.mimeType,
+        sizeBytes: file.content.length,
+        ...(file.kind === 'text' ? { text: file.content.toString('utf8') } : { base64: file.content.toString('base64') }),
+      };
+    }));
+  }
+
+  // Reports drafted by the agent for people to review (docs/spec.md phase 5).
+  if (reports) {
+    router.get('/projects/:projectId/reports', route('report.write', async (req, actor) => ({
+      schema: 'traceomics.automation.reports.v1', reports: await reports.listForAgent(actor),
+    })));
+    router.post('/projects/:projectId/reports', route('report.write', async (req, actor) => {
+      const { report, replayed } = await reports.createForAgent(actor, req.body);
+      return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.report.v1', replayed, report } };
+    }));
+    router.get('/projects/:projectId/reports/:reportId', route('report.write', async (req, actor) => ({
+      schema: 'traceomics.automation.report.v1', report: await reports.getForAgent(actor, req.params.reportId),
+    })));
+    router.post('/projects/:projectId/reports/:reportId/sections', route('report.write', async (req, actor) => {
+      const { section, replayed } = await reports.writeSectionForAgent(actor, req.params.reportId, req.body);
+      return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.report-section.v1', replayed, section } };
+    }));
+  }
 
   router.use((req, res) => sendError(res, 404, 'NOT_FOUND', 'Unknown automation operation.', req.actor));
   // Malformed JSON and other body errors.

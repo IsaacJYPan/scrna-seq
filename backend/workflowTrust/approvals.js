@@ -26,6 +26,7 @@ function publicRelease(release, approval = null) {
     resources: release.definition.resources,
     inputs: release.definition.inputs,
     outputs: release.definition.outputs,
+    readableSource: release.readableSource || null,
     approval: approval ? {
       id: approval.id,
       approvedByUserId: Number(approval.approved_by_user_id),
