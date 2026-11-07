@@ -1295,10 +1295,10 @@ async function main() {
   await checkSnapshot(page, `workspace_${initialTheme}`);
   await checkOverflow(page, `Workspace ${initialTheme}`);
   await runA11yAudit(page, `Workspace ${initialTheme}`);
-  await checkPrimaryButtonHover(page, 'New Project');
+  await checkPrimaryButtonHover(page, 'New project');
   await checkPrimaryButtonHover(page, 'Add analysis');
-  await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new_project');
-  await checkReducedMotion(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new project button');
+  await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New project', exact: true }).first(), 'new_project');
+  await checkReducedMotion(page, page.getByRole('button', { name: 'New project', exact: true }).first(), 'new project button');
 
   // ── Test 1b: Theme toggle to opposite mode ────────────────────────────────
   section(`STEP 3: Theme toggle (${initialTheme} → ${oppositeTheme})`);
@@ -1315,7 +1315,7 @@ async function main() {
     await checkSnapshot(page, `workspace_${activeTheme}`);
     await checkOverflow(page, `Workspace ${activeTheme}`);
     await runA11yAudit(page, `Workspace ${activeTheme}`);
-    await checkPrimaryButtonHover(page, 'New Project');
+    await checkPrimaryButtonHover(page, 'New project');
     await checkPrimaryButtonHover(page, 'Add analysis');
     // Toggle back to the default theme before continuing tab checks.
     const restoreTitle = initialTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
@@ -1574,7 +1574,7 @@ async function main() {
         }
 
         if (tab.id === 'explore') {
-          await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+          await page.getByRole('heading', { name: 'Exploratory analysis', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
           await page.screenshot({ path: path.join(REPORT_DIR, 'exploratory-analysis.png'), fullPage: true });
           assert('Exploratory Analysis: guided recipe controls are visible',
             await page.getByRole('button', { name: 'Run recipe', exact: true }).count() === 1);

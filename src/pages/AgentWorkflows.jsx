@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle2, FlaskConical, Loader2, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, Loader2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 
 // Human side of approved agent execution (docs/spec.md phase 2): approve exact
@@ -163,7 +163,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   return (
     <section className="space-y-5" aria-label="Approved workflows">
       <div>
-        <h3 className="flex items-center gap-2 text-lg font-bold text-text"><FlaskConical size={18} className="text-primary" /> Approved workflows and studies</h3>
+        <h3 className="flex items-center gap-2 text-lg font-bold text-text">Approved workflows and studies</h3>
         <p className="mt-1 text-sm text-textMuted">Agents can only run approved releases inside a study you define: exact inputs, the parameter options they may choose, a trial limit, and a compute budget. Results stay candidates until a person accepts one.</p>
       </div>
       {error && <p role="alert" className="rounded border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}

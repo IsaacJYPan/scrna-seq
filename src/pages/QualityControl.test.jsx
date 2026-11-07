@@ -42,7 +42,7 @@ describe('QualityControl', () => {
 
   it('renders the QC screen when a dataset is loaded', async () => {
     render(<QualityControl {...baseProps()} />);
-    expect(await screen.findByText('Quality Control')).toBeInTheDocument();
+    expect(await screen.findByText('Quality control')).toBeInTheDocument();
   });
 
   it('uses the reference QC thresholds only for the PBMC3k tutorial', async () => {
@@ -57,7 +57,7 @@ describe('QualityControl', () => {
   // would change the hook count and throw "Rendered fewer hooks than expected".
   it('does not crash when datasetInfo toggles to null on a mounted page', async () => {
     const { rerender } = render(<QualityControl {...baseProps()} />);
-    await screen.findByText('Quality Control');
+    await screen.findByText('Quality control');
 
     expect(() => {
       rerender(<QualityControl {...baseProps({ datasetInfo: null })} />);
@@ -88,7 +88,7 @@ describe('QualityControl', () => {
   it('blocks impossible filter ranges before calling the analysis endpoint', async () => {
     const callApi = vi.fn(async () => ({ percent_mt: [1], nFeature_RNA: [100], nCount_RNA: [200] }));
     render(<QualityControl {...baseProps({ callApi })} />);
-    await screen.findByText('Quality Control');
+    await screen.findByText('Quality control');
     fireEvent.change(screen.getByLabelText('Min Features'), { target: { value: '6000' } });
     fireEvent.change(screen.getByLabelText('Max Features'), { target: { value: '5000' } });
     expect(screen.getByText(/Max Features must be/i)).toBeInTheDocument();
@@ -114,7 +114,7 @@ describe('QualityControl', () => {
   it('hovers the visible QC cells with concise metrics and no invisible helper trace', async () => {
     const callApi = vi.fn(async () => ({ percent_mt: [1.25, 2], nFeature_RNA: [100, 250], nCount_RNA: [500, 750] }));
     render(<QualityControl {...baseProps({ callApi, theme: 'light' })} />);
-    await screen.findByText('Quality Control');
+    await screen.findByText('Quality control');
 
     await screen.findByTestId('plot-stub');
     let plot = plotSpy.mock.calls.at(-1)[0];

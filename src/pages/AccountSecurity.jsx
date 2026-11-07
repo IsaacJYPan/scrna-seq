@@ -66,8 +66,8 @@ export default function AccountSecurity({ user, onPasswordChanged, onSessionInva
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-background p-6 lg:p-10">
-      <div className="mx-auto max-w-3xl space-y-6">
+    <div className="page-scroll custom-scrollbar">
+      <div className="page-column space-y-6">
         <header>
           <h2 className="page-title">Account security</h2>
           <p className="mt-2 text-sm leading-6 text-textMuted">

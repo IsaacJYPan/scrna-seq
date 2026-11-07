@@ -136,10 +136,10 @@ function startReadinessR(storageRoot, port) {
 }
 
 async function login(page, email, password) {
-  await page.getByRole('button', { name: 'Log In', exact: true }).click();
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: /Open Workbench/ }).click();
+  await page.getByRole('button', { name: /Open workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
 
@@ -373,7 +373,7 @@ async function main() {
     });
 
     await page.goto(origin, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: 'Log in', exact: true }).waitFor({ state: 'visible' });
     await login(page, email, password);
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
 
 const SUPPORTED_R_TARGET = 'R 4.5.x';
 
@@ -49,7 +49,6 @@ export default function Diagnostics({ apiStatus }) {
       <div className="max-w-3xl w-full mx-auto space-y-6">
         <header className="mb-4">
           <h1 className="text-3xl font-semibold text-text flex items-center gap-3">
-            <Activity className="text-primary" size={32} />
             Technical support
           </h1>
           <p className="text-textMuted mt-2">A secondary support surface with safe availability information. Local paths, package probes, and runtime topology are not shown here.</p>

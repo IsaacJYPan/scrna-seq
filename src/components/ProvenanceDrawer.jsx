@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { X, FileCode2 } from 'lucide-react';
+import { X } from 'lucide-react';
 
 export default function ProvenanceDrawer({ provId, chain, onClose }) {
   const panelRef = useRef(null);
@@ -43,7 +43,6 @@ export default function ProvenanceDrawer({ provId, chain, onClose }) {
         <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-slate-800/50">
           <div>
             <h3 id="prov-drawer-title" className="text-lg font-bold text-white flex items-center gap-2">
-              <FileCode2 size={20} className="text-primary" />
               {stepName}
             </h3>
             <span className="text-xs text-textMuted">{timestamp}</span>

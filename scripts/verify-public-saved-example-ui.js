@@ -117,7 +117,7 @@ async function run() {
     await offered.click(); const offeredReader = await offeredPage;
     await tableReady(offeredReader); assert(offeredReader.url() === publicUrl, 'Sign-in did not offer the explicit versioned public example.');
     assert(await login.getByPlaceholder('researcher@lab.edu').inputValue() === service.account.email, 'Opening a public example erased the sign-in form.'); await offeredReader.close();
-    await login.getByLabel('Password', { exact: true }).fill(service.account.password); await login.getByRole('button', { name: /Open Workbench/ }).click();
+    await login.getByLabel('Password', { exact: true }).fill(service.account.password); await login.getByRole('button', { name: /Open workbench/ }).click();
     await login.getByText('Connection details', { exact: true }).waitFor();
     const signedIn = await login.evaluate(async () => { const response = await fetch('/api/auth/session', { credentials: 'include' }); const body = await response.json(); return { status: response.status, id: body.user?.id }; });
     assert(signedIn.status === 200 && Number.isSafeInteger(Number(signedIn.id)), 'The populated-profile public check did not begin with an actual authenticated cookie.');

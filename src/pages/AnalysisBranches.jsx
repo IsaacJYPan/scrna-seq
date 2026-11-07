@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, GitBranch, GitCompare, History, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Download, GitBranch, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 
@@ -352,7 +352,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
             )}
 
             <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
-              <h3 className="font-bold text-text flex items-center gap-2"><GitCompare size={17} /> Compare branches</h3>
+              <h3 className="font-bold text-text flex items-center gap-2">Compare branches</h3>
               <label className="block space-y-1 text-sm"><span>Left branch</span><select aria-label="Left branch" className="input w-full" value={leftBranchId} onChange={(event) => setLeftBranchId(event.target.value)}><option value="">Select a branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select></label>
               <label className="block space-y-1 text-sm"><span>Right branch</span><select aria-label="Right branch" className="input w-full" value={rightBranchId} onChange={(event) => setRightBranchId(event.target.value)}><option value="">Select a branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select></label>
               <button className="btn btn-secondary w-full" disabled={!leftBranchId || !rightBranchId || !!busy} onClick={() => mutate('compare', async () => setComparison(await window.electronAPI.compareAnalysisBranches(projectId, leftBranchId, rightBranchId)))}>Compare recorded history</button>
@@ -366,7 +366,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
             </div>
 
             <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
-              <h3 className="font-bold text-text flex items-center gap-2"><History size={17} /> Project activity</h3>
+              <h3 className="font-bold text-text flex items-center gap-2">Project activity</h3>
               {auditEvents.length === 0 ? (
                 <p className="text-xs text-textMuted">No recorded branch or export activity yet.</p>
               ) : auditEvents.slice(0, 8).map((event) => (

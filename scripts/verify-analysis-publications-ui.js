@@ -107,7 +107,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
   async function login(actor = 'owner') {
     const context = await browser.newContext({ viewport: { width: 1366, height: 768 } }); const target = registerPage(await context.newPage(), actor);
     await target.goto(service.endpoint); await target.getByPlaceholder('researcher@lab.edu').fill(accounts[actor].email);
-    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor(); return target;
   }
   async function nav(target, name) {

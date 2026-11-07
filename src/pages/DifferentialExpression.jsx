@@ -1,16 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Archive,
-  Ban,
-  CheckCircle2,
-  Clock,
-  FileText,
-  Loader2,
-  Play,
-  RefreshCw,
-  ShieldCheck,
-} from 'lucide-react';
+import { AlertTriangle, Ban, CheckCircle2, FileText, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
@@ -668,7 +657,6 @@ export default function DifferentialExpression({
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                <Clock size={18} className="text-primary" />
                 Run status
               </h3>
               <p className="mt-1 text-sm text-textMuted">
@@ -722,7 +710,6 @@ export default function DifferentialExpression({
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                <Archive size={18} className="text-primary" />
                 Marker analysis summary
               </h3>
               <p className="mt-1 text-sm text-textMuted">

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link2, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 
 export function ConditionsForm({ conditions, conditionName, setConditionName, busy, onSubmit }) {
   return (
@@ -185,7 +185,6 @@ export function SampleMappings({
   return (
     <form className="card min-w-0 p-4 grid grid-cols-1 sm:grid-cols-2 gap-3" onSubmit={onSubmit}>
       <h3 className="sm:col-span-2 font-semibold flex items-center gap-2">
-        <Link2 size={16} />
         3. Map cells to samples
       </h3>
       <div className="block space-y-1 text-sm">

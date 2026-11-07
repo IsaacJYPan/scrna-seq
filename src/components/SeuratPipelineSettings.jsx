@@ -35,7 +35,7 @@ export default function SeuratPipelineSettings({ params, setParams, controls }) 
       {STEPS.map((step, index) => <li key={step.title}>
         <section role="group" aria-labelledby={`${id}-${index}`} className="pipeline-step-row">
           <div className="pipeline-step-heading">
-            <span className="pipeline-step-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+            <span className="pipeline-step-number" aria-hidden="true">{index + 1}.</span>
             <div><h5 id={`${id}-${index}`} className="font-semibold text-text">{step.title}</h5>
               <p className="mt-1 text-xs leading-relaxed text-textMuted">{step.description}</p></div>
           </div>

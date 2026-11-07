@@ -234,7 +234,7 @@ describe('Sidebar component', () => {
 
     const qcButton = screen.getByRole('button', { name: /Quality Control/i });
     expect(qcButton.querySelector('svg')).toBeNull();
-    expect(container.textContent).toContain('Quality Control');
+    expect(container.textContent).toContain('Quality control');
   });
 
   it('uses a readable token-based selected state in light mode', () => {

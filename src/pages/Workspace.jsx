@@ -2,12 +2,7 @@ import WorkbenchOverview from '../components/WorkbenchOverview';
 import DetailsPopover from '../components/DetailsPopover';
 import SeuratPipelineSettings from '../components/SeuratPipelineSettings';
 import React, { useRef, useState } from 'react';
-import {
-  Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
-  LayoutGrid, List, Edit2, FolderOpen, HardDrive, FlaskConical,
-  X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2,
-  FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive
-} from 'lucide-react';
+import { Database, FileUp, Zap, CheckCircle, Info, Globe, Lock, LayoutGrid, Edit2, FolderOpen, HardDrive, FlaskConical, X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2, FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive } from 'lucide-react';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 import { publicErrorMessage } from '../publicError';
 
@@ -412,7 +407,6 @@ function LoadModal({
             <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800 flex-shrink-0">
               <div>
                 <h3 id="multi-sample-loader-title" className="text-lg font-semibold text-white tracking-tight flex items-center gap-2">
-                  <FolderTree size={18} className="text-cyan-400" />
                   Configure Multi-Sample Merge
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
@@ -1489,7 +1483,7 @@ export function SeuratPipelinePanel({
               ].map(([route, title, description], index) => (
                 <li key={route} className="flex flex-wrap items-center justify-between gap-3 p-4">
                   <div className="flex min-w-0 flex-1 items-baseline gap-3">
-                    <span className="pipeline-step-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="pipeline-step-number" aria-hidden="true">{index + 1}.</span>
                     <div><h4 className="font-semibold text-text">{title}</h4><p className="mt-1 text-xs leading-relaxed text-textMuted">{description}</p></div>
                   </div>
                   <button type="button" onClick={() => openGuidedStep(route)} disabled={!guidedReady}
@@ -1535,7 +1529,7 @@ export function SeuratPipelinePanel({
             </div>
 
             <div className="rounded border border-border bg-background/40 p-4">
-              <h4 className="mb-3 flex items-center gap-2 font-bold text-text"><Archive size={16} /> Continue this analysis</h4>
+              <h4 className="mb-3 flex items-center gap-2 font-bold text-text">Continue this analysis</h4>
               {safeSummary ? (
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
@@ -1875,20 +1869,18 @@ export default function Workspace({
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
-      {/* Header */}
-      <div className="px-4 pt-5 pb-4 flex justify-between items-end border-b border-border bg-slate-800/10 sm:px-8 sm:pt-6">
-        <div className="min-w-0">
-          <h2 className="page-title min-w-0">
-            <span className="truncate">{currentWs.name}</span>
-            {currentWs.type === 'personal'
-              ? <Lock size={16} className="text-slate-400" />
-              : <Globe size={16} className="text-primary" />}
-          </h2>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
-        <div className="max-w-5xl mx-auto space-y-6">
+      <div className="page-scroll flex-1 custom-scrollbar">
+        <div className="page-column space-y-6">
+          <header className="page-header">
+            <div className="page-header-content">
+              <h2 className="page-title min-w-0">
+                <span className="truncate">{currentWs.name}</span>
+                {currentWs.type === 'personal'
+                  ? <Lock size={15} className="text-textMuted" aria-label="Private workspace" />
+                  : <Globe size={15} className="text-textMuted" aria-label="Shared workspace" />}
+              </h2>
+            </div>
+          </header>
           <WorkbenchOverview
             activeProject={activeProject}
             selectedObject={selectedObject}
@@ -1932,7 +1924,6 @@ export default function Workspace({
           <div>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
-                <FolderTree size={18} className="text-slate-400" />
                 Projects
               </h3>
               {isCreatingProject ? (
@@ -1958,7 +1949,7 @@ export default function Workspace({
                   onClick={() => setIsCreatingProject(true)}
                   className="btn btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm transition-colors"
                 >
-                  <Plus size={14} /> New Project
+                  <Plus size={14} /> New project
                 </button>
               )}
             </div>
@@ -1980,7 +1971,7 @@ export default function Workspace({
                     onClick={() => setIsCreatingProject(true)}
                     className="btn btn-primary text-xs px-4 py-2 inline-flex items-center gap-2"
                   >
-                    <Plus size={14} /> Create Project
+                    <Plus size={14} /> Create project
                   </button>
                 </div>
               ) : currentWs.projects?.map(proj => {
@@ -2033,35 +2024,32 @@ export default function Workspace({
 
             <div className="grid grid-cols-1 gap-3">
               {!activeProjectId ? (
-                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
-                  <FolderTree size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">Select a project</h4>
-                  <p className="text-sm text-textMuted mb-6">
+                <div className="empty-note">
+                  <h4 className="font-semibold text-text">Select a project</h4>
+                  <p className="mt-1 text-sm text-textMuted">
                     Select or create a project to list saved analyses.
                   </p>
                 </div>
               ) : backendModelStatus?.objectsLoading ? (
-                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
-                  <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">Loading saved analyses</h4>
-                  <p className="text-sm text-textMuted">Loading saved analysis details.</p>
+                <div className="empty-note">
+                  <h4 className="font-semibold text-text">Loading saved analyses</h4>
+                  <p className="mt-1 text-sm text-textMuted">Loading saved analysis details.</p>
                 </div>
               ) : activeProjectObjects.length === 0 ? (
-                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
-                  <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">No saved analyses in this project</h4>
-                  <p className="text-sm text-textMuted mb-6">
+                <div className="empty-note">
+                  <h4 className="font-semibold text-text">No saved analyses yet</h4>
+                  <p className="mt-1 text-sm text-textMuted">
                     {canWriteProject
-                      ? 'Use an approved workflow or the PBMC demo to create a saved analysis.'
+                      ? 'Load the PBMC demo dataset or run an approved workflow to add one.'
                       : 'Your project role is read-only. An owner, administrator, or analyst can add a saved analysis.'}
                   </p>
                   <button
                     onClick={() => setShowLoadModal(true)}
                     disabled={!canWriteProject}
                     title={!canWriteProject ? 'Your project role is read-only.' : undefined}
-                    className="btn btn-primary flex items-center gap-2"
+                    className="btn btn-primary mt-4"
                   >
-                    <FileUp size={15} /> Add analysis
+                    Add analysis
                   </button>
                 </div>
               ) : activeProjectObjects.map(obj => {

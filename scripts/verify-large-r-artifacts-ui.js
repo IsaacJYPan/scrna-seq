@@ -108,7 +108,7 @@ async function main() {
     await page.goto(service.endpoint);
     await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
     await page.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
     await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
     const consoleUi = page.getByRole('region', { name: 'Private R console', exact: true });

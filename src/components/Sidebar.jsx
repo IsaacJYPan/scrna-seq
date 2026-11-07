@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  CheckCircle2, ChevronDown, ChevronLeft, Database, FileText, GitBranch, LayoutPanelTop,
-  Bot, Info, Lock, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
+  CheckCircle2, ChevronDown, ChevronLeft, Database, FileText, GitBranch, History, Images,
+  Bot, ListChecks, Lock, LogOut, Menu, Microscope, Moon, Network, SquareTerminal, Sun, TestTubes,
+  UserRound, Users, Workflow,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
+import { sentenceCase } from '../sentenceCase';
 import { workflowTabAvailability } from '../../shared/workflowState.mjs';
 import { APP_NAME } from '../brand';
 
@@ -35,9 +37,9 @@ function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }
       ${isDisabled ? 'cursor-not-allowed' : ''} ${isDisabled && !item.lockReason ? 'opacity-45' : ''}
       ${isActive ? 'nav-item-active border-primary/30 bg-primary/10 text-text' : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
   >
-    {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-textMuted'} group-hover:text-text flex-shrink-0`} strokeWidth={1.75} />}
-    <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
-    {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
+    {Icon ? <Icon size={18} className={`${isActive ? 'text-primary' : 'text-textMuted'} group-hover:text-text flex-shrink-0`} strokeWidth={1.75} aria-hidden="true" />
+      : <span className="w-[18px] flex-shrink-0" aria-hidden="true" />}
+    <span className="min-w-0 flex-1 truncate text-left">{sentenceCase(researcherLabel(item.label))}</span>
     {item.lockReason && <>
       <Lock size={13} className="flex-shrink-0" aria-hidden="true" />
       <span id={`${item.id}-dependency`} role="tooltip" className="pointer-events-none absolute inset-x-0 top-full z-30 hidden rounded border border-border bg-surface p-2 text-left text-xs text-text shadow group-hover:block group-focus:block">{item.lockReason}</span>
@@ -53,7 +55,7 @@ function NavSection({ id, label, open, active, onToggle, children }) {
       aria-disabled={active || undefined} title={active ? 'This group contains the current page' : undefined}
       className="nav-group-label flex min-h-9 w-full items-center gap-2 rounded px-2 text-left text-textMuted hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
       <ChevronDown size={14} className={`shrink-0 transition-transform motion-reduce:transition-none ${open ? '' : '-rotate-90'}`} aria-hidden="true" />
-      <span className="min-w-0 flex-1 break-words leading-relaxed">{label}</span>
+      <span className="min-w-0 flex-1 break-words leading-relaxed">{sentenceCase(label)}</span>
     </button>
     <div id={`navigation-group-${id}`} hidden={!open} className="space-y-0.5">{children}</div>
   </section>;
@@ -287,18 +289,18 @@ export default function Sidebar({
         </div>
         <div ref={navigationScrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-3 custom-scrollbar" style={{ scrollbarGutter: 'stable' }}>
           <NavSection id="project" label="Project" active={['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'agents', 'history'].includes(activeTab)} open={!closedGroups.has('project') || ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'agents', 'history'].includes(activeTab)} onToggle={() => toggleGroup('project', ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'agents', 'history'].includes(activeTab))}>
-            <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: LayoutPanelTop }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: Workflow, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: History }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
+            <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: TestTubes, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: SquareTerminal, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
             <NavButton {...navProps} item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'agents', label: 'Agent access', icon: Bot, status: deploymentPolicy.demoMode ? 'Unavailable in public demo' : hasProject ? 'Delegated AI agents' : 'Select project' }} disabled={!hasProject || deploymentPolicy.demoMode === true} />
           </NavSection>
           <NavSection id="data" label="Data & analysis" active={['lineage', 'publication', 'validation'].includes(activeTab)} open={!closedGroups.has('data') || ['lineage', 'publication', 'validation'].includes(activeTab)} onToggle={() => toggleGroup('data', ['lineage', 'publication', 'validation'].includes(activeTab))}>
-              <NavButton {...navProps} item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
-              <NavButton {...navProps} item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
-              <NavButton {...navProps} item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
+              <NavButton {...navProps} item={{ id: 'lineage', label: 'Lineage', icon: Network, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
+              <NavButton {...navProps} item={{ id: 'publication', label: 'Figure Gallery', icon: Images, status: 'Saved figures' }} disabled={!hasData} />
+              <NavButton {...navProps} item={{ id: 'validation', label: 'Validation', icon: ListChecks }} disabled={!hasData} />
           </NavSection>
 
           {pipelineSections.map(section => (

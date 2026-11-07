@@ -31,7 +31,7 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projec
       </span>}
       {(error || connectionError) && <span role="status" className="block truncate" title={error || connectionError}>Connection needs attention</span>}
     </div>
-    <DetailsPopover label="Connection details" className="shrink-0">
+    <DetailsPopover label="Connection details" className="shrink-0" summaryClassName="inline-flex min-h-8 cursor-pointer list-none select-none items-center rounded px-2 text-xs font-medium text-textMuted hover:bg-black/5 hover:text-text dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
       <p className="font-medium break-words">Server: {target?.name || endpoint}</p>
       {target && <p className="mt-1 break-all text-textMuted">{endpoint}</p>}
       <p className="mt-3 font-medium">{runtime}</p>

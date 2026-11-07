@@ -1,6 +1,6 @@
 import PageHeader from '../components/PageHeader';
 import React, { useState, useCallback, useEffect } from 'react';
-import { Layers, ListFilter, AlertTriangle, ImageDown, FileText } from 'lucide-react';
+import { Layers, AlertTriangle, ImageDown, FileText } from 'lucide-react';
 import Plot, { getPlotHoverStyle, supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -561,7 +561,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           <div className="w-full xl:w-64 flex flex-col gap-4 flex-shrink-0">
             <div className="card p-4 flex-1 flex flex-col">
               <h4 className="font-semibold border-b border-border pb-2 mb-3 text-text text-sm">
-                <ListFilter size={14} className="inline text-primary mr-2" />Cell groups
+                Cell groups
               </h4>
               <div role="region" aria-label="Cell group counts" tabIndex={0} className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
                 {activeTraces.map((trace, i) => (

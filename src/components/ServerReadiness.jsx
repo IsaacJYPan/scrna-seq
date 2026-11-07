@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { RefreshCw, Server, X } from 'lucide-react';
+import { RefreshCw, X } from 'lucide-react';
 import { READINESS_REMEDIATIONS, readRuntimeReadiness, readinessFailureMessage } from '../runtime/runtimeReadiness';
 
 const LABELS = {
@@ -120,7 +120,7 @@ export default function ServerReadiness({ projectId, userId, target, onClose, ap
     <section ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={trapFocus} className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-border bg-surface text-text shadow-2xl sm:max-h-[90vh]">
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-6">
         <div className="min-w-0">
-          <h2 id={titleId} className="flex items-center gap-2 text-lg font-bold"><Server size={20} className="shrink-0 text-primary" aria-hidden="true" />Server readiness</h2>
+          <h2 id={titleId} className="flex items-center gap-2 text-lg font-bold">Server readiness</h2>
           <p className="mt-1 break-words text-sm text-textMuted">{target?.name || endpoint}</p>
           {target?.name && <p className="mt-1 break-all text-xs text-textMuted">{endpoint}</p>}
         </div>

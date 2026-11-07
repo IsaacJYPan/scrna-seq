@@ -106,7 +106,7 @@ async function main() {
       if (/^\/assets\/.*\.js$/.test(pathname) && response.ok()) { try { compiledAssets[pathname] = sha256(await response.body()); } catch { /* A failed asset also raises a browser error. */ } }
     });
     await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
-    await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByText('Connection details', { exact: true }).waitFor(); await openProject(service.project);
     const csv = await importFile(files.csv, 'Donor scores');
     await viewer().getByRole('columnheader', { name: 'gene' }).waitFor();

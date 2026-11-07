@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileClock, FormInput, TableProperties } from 'lucide-react';
+import { FileClock, TableProperties } from 'lucide-react';
 
 const VIEW_LABELS = Object.freeze({
   summaryMetrics: 'Summary metrics',
@@ -100,7 +100,6 @@ export default function PipelineTemplatePreview({ manifest }) {
     <section className="space-y-4" aria-labelledby="pipeline-template-preview-heading">
       <div>
         <h3 id="pipeline-template-preview-heading" className="flex items-center gap-2 text-lg font-bold text-text">
-          <FormInput size={18} className="text-primary" />
           Workflow preview
         </h3>
         <p className="mt-1 max-w-4xl text-sm text-textMuted">

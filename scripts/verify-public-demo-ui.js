@@ -202,7 +202,7 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     await page.screenshot({ path: umapPath, fullPage: false });
 
     await openSidebarPage(page, 'Exploratory Analysis');
-    await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true })
+    await page.getByRole('heading', { name: 'Exploratory analysis', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
     await page.getByRole('button', { name: 'Run recipe', exact: true }).click();
     const explorationJob = await waitFor(async () => page.evaluate(async () => {

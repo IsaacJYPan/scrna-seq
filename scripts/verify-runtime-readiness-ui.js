@@ -49,7 +49,7 @@ async function main() {
     });
     await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
     await page.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByText('Connection details', { exact: true }).waitFor();
     assert(observations.length === 0, 'Login started a readiness check without an explicit request.');
     const initial = (await database.query('SELECT (SELECT count(*) FROM jobs)::int AS jobs,(SELECT count(*) FROM private_r_kernels)::int AS kernels')).rows[0];

@@ -299,7 +299,7 @@ async function main() {
     await installRoutes(page);
 
     await page.goto(FRONTEND_URL, { waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: /^Sign Up$/ }).click();
+    await page.getByRole('button', { name: /^Sign up$/ }).click();
     await page.locator('input[type="text"]').fill('DB Flow Tester');
     await page.locator('input[type="email"]').fill(state.user.email);
     await page.getByLabel('Password', { exact: true }).fill('correct-horse-42');
@@ -307,7 +307,7 @@ async function main() {
     await page.getByRole('button', { name: /Create Account/i }).click();
 
     await page.getByText('No projects yet').waitFor({ timeout: 15_000 });
-    await page.getByRole('button', { name: /Create Project/i }).click();
+    await page.getByRole('button', { name: /Create project/i }).click();
     await page.getByPlaceholder('Project Name').fill('DB Flow Project');
     await page.getByRole('button', { name: /^Save$/ }).click();
     await page.getByText('DB Flow Project').first().waitFor({ timeout: 10_000 });
@@ -317,7 +317,7 @@ async function main() {
     await page.locator('text=PBMC_3k_Tutorial').first().waitFor({ timeout: 10_000 });
 
     await page.getByRole('button', { name: /^Quality Control$/i }).click();
-    await page.getByRole('heading', { name: /Quality Control/i }).waitFor({ timeout: 10_000 });
+    await page.getByRole('heading', { name: /Quality control/i }).waitFor({ timeout: 10_000 });
     const applyButton = page.getByRole('button', { name: /Apply QC Filters/i });
     await waitUntil('enabled QC button', async () => applyButton.isEnabled(), 10_000);
 

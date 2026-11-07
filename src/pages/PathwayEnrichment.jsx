@@ -1,15 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Archive,
-  Ban,
-  Clock,
-  FileText,
-  Loader2,
-  Play,
-  RefreshCw,
-  ShieldCheck,
-} from 'lucide-react';
+import { AlertTriangle, Ban, FileText, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
 import { publicErrorMessage } from '../publicError';
@@ -709,7 +699,7 @@ export default function PathwayEnrichment({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Run status</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Run status</h3>
               <p className="mt-1 text-sm text-textMuted">Compute is allocated when available. When demand is high, a new analysis waits for compute.</p>
             </div>
             <div className="flex items-center gap-2">
@@ -743,7 +733,7 @@ export default function PathwayEnrichment({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> Pathway summary</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Pathway summary</h3>
               <p className="mt-1 text-sm text-textMuted">Review the leading pathways here. Export the full table from Runs &amp; Results.</p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}

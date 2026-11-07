@@ -119,12 +119,14 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="h-full flex items-center justify-center p-8 bg-background">
-          <div className="text-center max-w-md">
-            <div className="text-6xl mb-4">⚠️</div>
-            <h2 className="text-xl font-bold text-text mb-2">Analysis unavailable</h2>
-            <p className="text-slate-400 text-sm mb-4">This analysis could not be displayed. Retry it or return to the workspace.</p>
-            <button onClick={() => this.setState({ hasError: false, error: null })} className="btn btn-primary text-sm">Retry</button>
+        <div className="h-full bg-background p-6 lg:p-8">
+          <div role="alert" className="max-w-xl border-l-2 border-danger pl-4">
+            <h2 className="text-lg font-semibold text-text">This page stopped working</h2>
+            <p className="mt-1 text-sm text-textMuted">Your saved work is not affected. Try loading the page again.</p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button type="button" onClick={() => this.setState({ hasError: false, error: null })} className="btn btn-primary">Try again</button>
+              {this.props.onReturn && <button type="button" onClick={() => { this.setState({ hasError: false, error: null }); this.props.onReturn(); }} className="btn btn-secondary">Back to workspace</button>}
+            </div>
           </div>
         </div>
       );
@@ -174,6 +176,7 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
+  const returnToWorkspace = useCallback(() => setActiveTab('workspace'), []);
   const [activeWorkflow, setActiveWorkflow] = useState(null);
   const workflowNavigation = React.useRef(null);
   const [savedWorkflowNotice, setSavedWorkflowNotice] = useState('');
@@ -1398,7 +1401,7 @@ export default function App() {
 
     return (
       <div className="relative w-full h-full bg-background">
-        {activeWorkflow && activeTab.startsWith('workflow:') && <div className="h-full overflow-auto"><ErrorBoundary key={activeWorkflow.id}>
+        {activeWorkflow && activeTab.startsWith('workflow:') && <div className="h-full overflow-auto"><ErrorBoundary key={activeWorkflow.id} onReturn={returnToWorkspace}>
           {/* Its own boundary: without it the first lazy load suspends to the
               app-level boundary, which remounts the app and drops the workflow. */}
           <React.Suspense fallback={<div role="status" className="flex h-full items-center justify-center text-sm text-textMuted">Opening workflow…</div>}>
@@ -1425,7 +1428,7 @@ export default function App() {
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
-        <ErrorBoundary key="analyses"><TabContent id="analyses" activeTab={activeTab} contextKey={`${user?.id}:${activeProjectIdForPipeline}`}>
+        <ErrorBoundary key="analyses" onReturn={returnToWorkspace}><TabContent id="analyses" activeTab={activeTab} contextKey={`${user?.id}:${activeProjectIdForPipeline}`}>
           <ResearchAnalyses
             userId={user?.id}
             projectId={activeProjectIdForPipeline}
@@ -1439,7 +1442,7 @@ export default function App() {
             onOpenWorkflow={openRetainedWorkflow}
           />
         </TabContent></ErrorBoundary>
-        <ErrorBoundary key="pipeline-manager"><TabContent id="pipeline-manager" activeTab={activeTab}>
+        <ErrorBoundary key="pipeline-manager" onReturn={returnToWorkspace}><TabContent id="pipeline-manager" activeTab={activeTab}>
           <PipelineManager
             {...props}
             activePipeline={activePipeline}
@@ -1449,38 +1452,38 @@ export default function App() {
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
-        <ErrorBoundary key="branches"><TabContent id="branches" activeTab={activeTab}><AnalysisBranches {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="study-design"><TabContent id="study-design" activeTab={activeTab}><StudyDesign {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="expert-r"><TabContent id="expert-r" activeTab={activeTab}><ExpertR {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="account"><TabContent id="account" activeTab={activeTab}>
+        <ErrorBoundary key="branches" onReturn={returnToWorkspace}><TabContent id="branches" activeTab={activeTab}><AnalysisBranches {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="study-design" onReturn={returnToWorkspace}><TabContent id="study-design" activeTab={activeTab}><StudyDesign {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="expert-r" onReturn={returnToWorkspace}><TabContent id="expert-r" activeTab={activeTab}><ExpertR {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="account" onReturn={returnToWorkspace}><TabContent id="account" activeTab={activeTab}>
           <AccountSecurity
             user={user}
             onPasswordChanged={(updatedUser) => setUser(updatedUser)}
             onSessionInvalid={(message) => clearAuthenticatedWorkspace(message || 'Sign in again to continue.')}
           />
         </TabContent></ErrorBoundary>
-        <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab} contextKey={objKey}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="normalize"><TabContent id="normalize" activeTab={activeTab} contextKey={objKey}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="pca"><TabContent id="pca" activeTab={activeTab} contextKey={objKey}><PCA key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="cluster"><TabContent id="cluster" activeTab={activeTab} contextKey={objKey}><Clustering key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="umap"><TabContent id="umap" activeTab={activeTab} contextKey={objKey}><UMAPView key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab} contextKey={objKey}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab} contextKey={objKey}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab} contextKey={objKey}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="explore"><TabContent id="explore" activeTab={activeTab} contextKey={objKey}><ExploratoryAnalysis key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab} contextKey={objKey}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab} contextKey={objKey}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab} contextKey={objKey}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab} contextKey={objKey}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab} contextKey={objKey}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="team"><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="agents"><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="diagnostics"><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="inspect" onReturn={returnToWorkspace}><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="lineage" onReturn={returnToWorkspace}><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="qc" onReturn={returnToWorkspace}><TabContent id="qc" activeTab={activeTab} contextKey={objKey}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="normalize" onReturn={returnToWorkspace}><TabContent id="normalize" activeTab={activeTab} contextKey={objKey}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="pca" onReturn={returnToWorkspace}><TabContent id="pca" activeTab={activeTab} contextKey={objKey}><PCA key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cluster" onReturn={returnToWorkspace}><TabContent id="cluster" activeTab={activeTab} contextKey={objKey}><Clustering key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="umap" onReturn={returnToWorkspace}><TabContent id="umap" activeTab={activeTab} contextKey={objKey}><UMAPView key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="featureplot" onReturn={returnToWorkspace}><TabContent id="featureplot" activeTab={activeTab} contextKey={objKey}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="heatmap" onReturn={returnToWorkspace}><TabContent id="heatmap" activeTab={activeTab} contextKey={objKey}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="dotplot" onReturn={returnToWorkspace}><TabContent id="dotplot" activeTab={activeTab} contextKey={objKey}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="explore" onReturn={returnToWorkspace}><TabContent id="explore" activeTab={activeTab} contextKey={objKey}><ExploratoryAnalysis key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="geneviewer" onReturn={returnToWorkspace}><TabContent id="geneviewer" activeTab={activeTab} contextKey={objKey}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="deg" onReturn={returnToWorkspace}><TabContent id="deg" activeTab={activeTab} contextKey={objKey}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="history" onReturn={returnToWorkspace}><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="enrichment" onReturn={returnToWorkspace}><TabContent id="enrichment" activeTab={activeTab} contextKey={objKey}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cellchat" onReturn={returnToWorkspace}><TabContent id="cellchat" activeTab={activeTab} contextKey={objKey}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="integrate" onReturn={returnToWorkspace}><TabContent id="integrate" activeTab={activeTab} contextKey={objKey}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="publication" onReturn={returnToWorkspace}><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="validation" onReturn={returnToWorkspace}><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="team" onReturn={returnToWorkspace}><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="agents" onReturn={returnToWorkspace}><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="diagnostics" onReturn={returnToWorkspace}><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
       </div>
     );
   };

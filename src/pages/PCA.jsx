@@ -172,7 +172,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
       {!result && !running && (
         <div className="card p-3 sm:p-6 mb-8 border-l-4 border-l-primary">
           <h3 className="font-bold flex items-center gap-2 text-text mb-5">
-            <BarChart3 size={18} className="text-primary" /> PCA Parameters
+            PCA parameters
           </h3>
           <div className="max-w-xs">
             <label htmlFor="pca-npcs" className="block text-xs text-textMuted mb-1.5 font-medium">Number of PCs</label>

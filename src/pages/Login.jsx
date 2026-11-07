@@ -5,7 +5,7 @@ import auth from '../auth';
 import passwordPolicy from '../../shared/passwordPolicyContract.json';
 import { buildPublicExampleUrl } from '../examples/publicExampleRoute';
 
-export default function Login({ onLogin, notice = '', theme = 'light', setTheme, allowDemo = true, submitLabel = 'Open Workbench', pendingLabel = 'Opening workbench…' }) {
+export default function Login({ onLogin, notice = '', theme = 'light', setTheme, allowDemo = true, submitLabel = 'Open workbench', pendingLabel = 'Opening workbench…' }) {
   const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -148,13 +148,13 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
               onClick={() => { setMode('login'); setPasswordConfirmation(''); setError(''); setSuccess(''); }}
               className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text ring-1 ring-border' : 'text-textMuted hover:text-text'}`}
             >
-              Log In
+              Log in
             </button>
               <button
                 onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
                 className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text ring-1 ring-border' : 'text-textMuted hover:text-text'}`}
               >
-                Sign Up
+                Sign up
               </button>
           </div>}
 
@@ -304,14 +304,14 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
                 {mode === 'signup' ? 'Creating account…' : pendingLabel}
               </> : (
                 <>
-                  {mode === 'login' ? submitLabel : 'Create Account'} <Shield size={17} />
+                  {mode === 'login' ? submitLabel : 'Create account'}
                 </>
               )}
             </button>
           </form>
           {publicExampleUrl && <div className="mt-5 border-t border-border pt-4">
             <a href={publicExampleUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-primary underline">Inspect a public saved example</a>
-            <p className="mt-1 text-xs text-textMuted">Synthetic findings. No sign-in or compute session needed; opens in a new tab.</p>
+            <p className="mt-1 text-xs text-textMuted">Synthetic data. Opens in a new tab without signing in.</p>
           </div>}
 
         </div>

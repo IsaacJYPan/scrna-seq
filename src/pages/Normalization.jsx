@@ -98,7 +98,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
       {!result && (
         <div className="card p-6 mb-8 border-l-4 border-l-primary">
           <h3 className="font-bold flex items-center gap-2 text-text mb-5">
-            <Sparkles size={18} className="text-primary" /> Normalization Parameters
+            Normalization parameters
           </h3>
           <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
             <div>

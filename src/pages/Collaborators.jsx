@@ -220,19 +220,18 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
 
   if (!activeProjectId) {
     return (
-      <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
-        <div className="mx-auto max-w-5xl rounded-lg border border-dashed border-border p-8 text-center">
-          <Users size={30} className="mx-auto mb-3 text-textMuted" />
-          <h2 className="text-xl font-bold text-text">Select a project</h2>
-          <p className="mt-2 text-sm text-textMuted">Membership and roles are scoped to the selected research project.</p>
+      <div className="page-scroll custom-scrollbar">
+        <div className="page-column empty-note">
+          <h2 className="text-lg font-semibold text-text">Select a project</h2>
+          <p className="mt-1 text-sm text-textMuted">Membership and roles are scoped to the selected research project.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-8 custom-scrollbar">
-      <div className="mx-auto max-w-5xl space-y-7">
+    <div className="page-scroll custom-scrollbar">
+      <div className="page-column space-y-7">
         <PageHeader title="Collaborators" icon={Users} className="border-b border-border pb-5"
           description={<>Manage access to <span className="font-bold text-text">{activeProject?.name || 'the selected project'}</span>.</>}
           actions={<button onClick={loadMembers} disabled={interactionBlocked} className="btn btn-secondary">
@@ -262,7 +261,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
         {canManage && (
           <form onSubmit={addMember} className="rounded-lg border border-border bg-surface p-5">
             <div className="mb-4">
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><UserPlus size={18} className="text-primary" /> Add existing user</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Add existing user</h3>
               <p className="mt-1 text-sm text-textMuted">The user must already have an account. This is immediate membership, not an emailed invitation.</p>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
@@ -295,13 +294,12 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
         <section className="space-y-3">
           <div>
             <h3 className="text-lg font-bold text-text">Project members</h3>
-            <p className="mt-1 text-sm text-textMuted">Access is re-checked for every action. Visible controls do not replace those checks.</p>
           </div>
 
           {loading && members.length === 0 ? (
             <div className="flex h-40 items-center justify-center rounded-lg border border-border bg-surface"><Loader2 size={28} className="animate-spin text-primary" /></div>
           ) : members.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-textMuted">No member list is available.</div>
+            <div className="empty-note text-sm text-textMuted">No member list is available.</div>
           ) : (
             <div className="space-y-2">
               {members.map(member => {

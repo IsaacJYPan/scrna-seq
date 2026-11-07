@@ -1,6 +1,6 @@
 import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect, useCallback } from 'react';
-import { Layers, AlertTriangle, CheckCircle2, RefreshCw, Zap, GitMerge, FileText } from 'lucide-react';
+import { Layers, AlertTriangle, CheckCircle2, RefreshCw, GitMerge, FileText } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import { publicErrorMessage } from '../publicError';
@@ -195,7 +195,7 @@ export default function BatchIntegration({
           {/* Method selector */}
           <div className="card p-5 border-l-4 border-l-primary">
             <h3 className="font-medium text-white mb-4 text-sm flex items-center gap-2">
-              <Zap size={14} className="text-primary" /> Integration Method
+              Integration method
             </h3>
             <div className="space-y-2.5">
               {Object.entries(METHOD_INFO).map(([key, info]) => (
@@ -225,7 +225,7 @@ export default function BatchIntegration({
           {/* Batch column selector */}
           <div className="card p-5 border-l-4 border-l-violet-500">
             <h3 className="font-medium text-white mb-3 text-sm flex items-center gap-2">
-              <Layers size={14} className="text-violet-400" /> Batch Variable
+              Batch variable
             </h3>
             {colsError ? (
               <p className="text-danger text-xs">{colsError}</p>
@@ -238,7 +238,7 @@ export default function BatchIntegration({
               <>
                 <select
                   id="batch-col-select"
-                  aria-label="Batch Variable"
+                  aria-label="Batch variable"
                   value={batchCol}
                   onChange={e => setParam('batchCol', e.target.value)}
                   className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary mb-2"

@@ -95,7 +95,7 @@ async function main() {
         metricDescriptors: parsed.preview.items?.map(({ key, label, unit }) => ({ key, label, unit })) }); } catch { /* Navigation can cancel a body. */ } }
       if (/\/image$/.test(pathname) && response.ok()) { try { const body = await response.body(); imageResponses.push({ path: pathname, sha256: sha(body), sizeBytes: body.length }); } catch { /* Navigation can cancel a body. */ } }
     });
-    await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email); await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email); await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByText('Connection details', { exact: true }).waitFor(); await nav(/^Data workspace,/); await page.getByRole('button', { name: new RegExp('^' + service.project.name) }).click();
     await openInspector(); await select(material.outputs.metrics);
     await viewer().getByText('2638', { exact: true }).waitFor(); await viewer().getByText('13714', { exact: true }).waitFor();

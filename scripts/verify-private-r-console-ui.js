@@ -169,7 +169,7 @@ async function main() {
     await page.goto(service.endpoint);
     await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
     await page.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
     const darkMode = page.getByRole('button', { name: 'Switch to dark mode', exact: true });
     if (await darkMode.isVisible()) await darkMode.click();
@@ -693,7 +693,7 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
     const otherPage = await otherContext.newPage(); await otherPage.goto(service.endpoint);
     await otherPage.getByPlaceholder('researcher@lab.edu').fill(colleagueEmail);
     await otherPage.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await otherPage.getByRole('button', { name: /Open Workbench/ }).click();
+    await otherPage.getByRole('button', { name: /Open workbench/ }).click();
     await otherPage.getByRole('button', { name: /^Advanced analysis,/ }).waitFor();
     const privateVersion = await apiGet(otherPage, '/api/artifact-versions/' + service.project.id + '/' + revisedObject.version.versionId + '/preview');
     const privateJournal = await apiGet(otherPage, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/publications');

@@ -373,7 +373,7 @@ async function main() {
     const explore = workspace.locator('[data-destination="explore"]');
     if (!await explore.isVisible()) await workspace.getByRole('button', { name: 'Explore', exact: true }).click();
     await explore.click();
-    await workspace.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor();
+    await workspace.getByRole('heading', { name: 'Exploratory analysis', exact: true }).waitFor();
     await waitFor(() => workspace.getByRole('button', { name: 'Run recipe', exact: true }).isEnabled(),
       'The connected saved analysis never enabled its guided recipe.', 30_000);
     const [guidedResponse] = await Promise.all([

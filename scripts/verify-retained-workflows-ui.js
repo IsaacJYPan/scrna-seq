@@ -62,7 +62,7 @@ async function main({ artifactDirectory } = {}) {
       try { const value = sha(await response.body()); assets[pathname] = value; if (assetsBefore.get(pathname.split('/').at(-1)) !== value) errors.push('Compiled assets changed during workflow acceptance.'); } catch { /* Page loading also must succeed. */ }
     });
     await target.goto(service.endpoint); await target.getByPlaceholder('researcher@lab.edu').fill(account.email);
-    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor(); return target;
   }
   async function nav(target, name) {

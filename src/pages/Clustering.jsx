@@ -124,7 +124,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
       {/* Parameters — always visible so user can re-cluster */}
       <div className="analysis-parameter-card card p-4 sm:p-6 mb-8 border-l-4 border-l-primary">
         <h3 className="font-bold flex items-center gap-2 text-text mb-5">
-          <Network size={18} className="text-primary" /> Clustering Parameters
+          Clustering parameters
         </h3>
         <div className="analysis-parameter-grid">
           <div>

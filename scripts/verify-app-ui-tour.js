@@ -254,7 +254,7 @@ async function tour(browser, theme, width) {
       await scrollBody(page, false);
       await capture(page, `${label}-${destination}`);
       check(`${label} ${destination}: fits viewport`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      check(`${label} ${destination}: no error boundary`, !(await page.getByRole('heading', { name: 'Analysis unavailable', exact: true }).isVisible()));
+      check(`${label} ${destination}: no error boundary`, !(await page.getByRole('heading', { name: 'This page stopped working', exact: true }).isVisible()));
       const audit = await new AxeBuilder({ page }).exclude('.scatterlayer,.heatmaplayer,.gl-container').withTags(['wcag2a','wcag2aa']).analyze();
       check(`${label} ${destination}: accessible`, !audit.violations.some(v => ['serious','critical'].includes(v.impact)),
         audit.violations.filter(v => ['serious','critical'].includes(v.impact)).map(v => ({ id: v.id, nodes: v.nodes.map(n => n.html).slice(0,3) })));
@@ -416,22 +416,22 @@ async function authTour(browser,theme,width) {
   };
   try {
     await page.goto(origin,{waitUntil:'networkidle'});
-    await page.getByRole('button',{name:'Open Workbench',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Open workbench',exact:true}).waitFor();
     const email=page.getByLabel('Email',{exact:true}), password=page.getByLabel('Password',{exact:true});
     await email.fill('ui-review@example.invalid'); await password.fill('Review-only-123!');
     await page.getByRole('button',{name:'Show password',exact:true}).click();
     check(label+': password visibility control works',await password.getAttribute('type')==='text');
     await page.getByRole('button',{name:'Hide password',exact:true}).click();
-    await page.getByRole('button',{name:'Sign Up',exact:true}).click();
+    await page.getByRole('button',{name:'Sign up',exact:true}).click();
     await page.getByLabel('Full name',{exact:true}).fill('UI review');
     await page.getByLabel('Confirm password',{exact:true}).fill('Different-value');
-    check(label+': mismatched passwords prevent signup',await page.getByRole('button',{name:'Create Account',exact:true}).isDisabled());
+    check(label+': mismatched passwords prevent signup',await page.getByRole('button',{name:'Create account',exact:true}).isDisabled());
     await authCapture(label+'-signup');
     await page.getByLabel('Confirm password',{exact:true}).fill('Review-only-123!');
-    check(label+': valid signup draft remains usable',await page.getByRole('button',{name:'Create Account',exact:true}).isEnabled());
-    await page.getByRole('button',{name:'Log In',exact:true}).click();
+    check(label+': valid signup draft remains usable',await page.getByRole('button',{name:'Create account',exact:true}).isEnabled());
+    await page.getByRole('button',{name:'Log in',exact:true}).click();
     check(label+': sign-in return preserves email',await email.inputValue()==='ui-review@example.invalid');
-    await page.getByRole('button',{name:'Open Workbench',exact:true}).click();
+    await page.getByRole('button',{name:'Open workbench',exact:true}).click();
     await page.getByRole('alert').waitFor();
     check(label+': sign-in error is short and actionable',await page.getByRole('alert').innerText()==='Invalid email or password.');
     check(label+': failed sign-in preserves editable email',await email.inputValue()==='ui-review@example.invalid'&&await email.isEditable());
@@ -507,13 +507,13 @@ async function walkthrough(browser) {
   };
   try{
     await page.goto(origin,{waitUntil:'networkidle'});
-    await page.getByRole('button',{name:'Open Workbench',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Open workbench',exact:true}).waitFor();
     await chapter('Sign in');await read(3500);
-    await humanClick(page.getByRole('button',{name:'Sign Up',exact:true}));await chapter('Sign up');await read(3500);
-    await humanClick(page.getByRole('button',{name:'Log In',exact:true}));
+    await humanClick(page.getByRole('button',{name:'Sign up',exact:true}));await chapter('Sign up');await read(3500);
+    await humanClick(page.getByRole('button',{name:'Log in',exact:true}));
     await page.getByLabel('Email',{exact:true}).pressSequentially(user.email,{delay:45});
     await page.getByLabel('Password',{exact:true}).pressSequentially('Review-only-123!',{delay:65});
-    await humanClick(page.getByRole('button',{name:'Open Workbench',exact:true}));
+    await humanClick(page.getByRole('button',{name:'Open workbench',exact:true}));
     await page.getByRole('button',{name:'Add analysis',exact:true}).first().waitFor();
     await chapter('Load the measured PBMC3k analysis');
     await humanClick(page.getByRole('button',{name:'Add analysis',exact:true}).first());await read(1800);
@@ -523,7 +523,7 @@ async function walkthrough(browser) {
       const destination=destinations[i],title=await visit(destination),label=`${i+1}/26 · ${title}`;
       await chapter(label);await prepareView(page,destination);await scrollBody(page,false);await read(3000);
       await capture(page,`page-${String(i+1).padStart(2,'0')}-${destination}`);
-      check(title+': shown',!(await page.getByRole('heading',{name:'Analysis unavailable',exact:true}).isVisible()));
+      check(title+': shown',!(await page.getByRole('heading',{name:'This page stopped working',exact:true}).isVisible()));
       await scrollThrough();await scrollBody(page,false);
       if(destination==='workspace'){
         await humanClick(page.getByRole('button',{name:'Dataset details',exact:true}));await chapter(label+' · Dataset details');await read(2800);await page.keyboard.press('Escape');
@@ -631,7 +631,7 @@ async function pipelineLayoutTour(browser, theme, width) {
     for (const [name, route] of [['Inspect', 'inspect'], ['Quality control', 'qc'], ['Normalization', 'normalize'], ['Integration (optional)', 'integrate'], ['PCA', 'pca'], ['Clustering', 'cluster'], ['UMAP', 'umap']]) {
       await click(ui.getByRole('button', { name: `Open ${name}`, exact: true }));
       await prepareView(page, route); await pause(650);
-      check(`${label}: opens ${name}`, !(await ui.isVisible()) && !(await page.getByRole('heading', { name: 'Analysis unavailable', exact: true }).isVisible()));
+      check(`${label}: opens ${name}`, !(await ui.isVisible()) && !(await page.getByRole('heading', { name: 'This page stopped working', exact: true }).isVisible()));
       if (route === 'qc' || route === 'pca' || route === 'umap') await shot('inspect-' + route);
       await navigate(page, 'pipeline-manager'); await scrollBody(page, false);
       check(`${label}: returns to inspection after ${name}`, await guided.getAttribute('aria-selected') === 'true');

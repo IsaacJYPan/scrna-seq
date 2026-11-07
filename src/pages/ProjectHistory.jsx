@@ -1,8 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  AlertTriangle, Archive, Briefcase, Clock, FileText,
-  GitBranch, ImageIcon, Loader2, RefreshCw,
-} from 'lucide-react';
+import { AlertTriangle, Archive, Briefcase, GitBranch, Loader2, RefreshCw } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import ArtifactInspector from '../components/ArtifactInspector';
 import ExecutionHistory from '../components/ExecutionHistory';
@@ -173,15 +170,12 @@ function displayStatus(status) {
   return labels[status] || 'Unknown';
 }
 
-function Section({ title, icon, subtitle, children }) {
+function Section({ title, subtitle, children }) {
   return (
     <section className="space-y-3">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-            {icon}
-            {title}
-          </h3>
+          <h3 className="text-lg font-semibold text-text">{title}</h3>
           {subtitle && <p className="mt-1 text-sm text-textMuted">{subtitle}</p>}
         </div>
       </div>
@@ -192,9 +186,9 @@ function Section({ title, icon, subtitle, children }) {
 
 function EmptyState({ title, children }) {
   return (
-    <div className="rounded-lg border border-dashed border-border p-6 text-center">
-      <p className="font-bold text-text">{title}</p>
-      <p className="mt-2 text-sm text-textMuted">{children}</p>
+    <div className="empty-note">
+      <p className="font-semibold text-text">{title}</p>
+      <p className="mt-1 text-sm text-textMuted">{children}</p>
     </div>
   );
 }
@@ -878,8 +872,8 @@ export default function ProjectHistory({
 
   if (!activeProjectId) {
     return (
-      <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
-        <div className="mx-auto max-w-5xl">
+      <div className="page-scroll custom-scrollbar">
+        <div className="page-column">
           <EmptyState title="Select a project">
             Analysis runs, saved results, provenance, figures, and lineage are scoped to a project.
           </EmptyState>
@@ -889,8 +883,8 @@ export default function ProjectHistory({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
-      <div className="mx-auto max-w-6xl space-y-5">
+    <div className="page-scroll custom-scrollbar">
+      <div className="page-column space-y-5">
         <PageHeader title="Runs & Results" icon={Briefcase} description="Review recorded analysis history, saved results, and reproducible branches." actions={
           <button
             onClick={loadHistory}
@@ -927,7 +921,6 @@ export default function ProjectHistory({
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                  <Archive size={18} className="text-primary" />
                   Restore a saved version
                 </h3>
                 <p className="mt-1 max-w-3xl text-sm text-textMuted">
@@ -997,7 +990,7 @@ export default function ProjectHistory({
               <span><strong className="text-text">{historyState.lineage?.edges?.length || 0}</strong> lineage links</span>
             </div>
 
-            <Section title="Selected Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Only runs whose input or saved result is the selected analysis are shown here.">
+            <Section title="Runs for this analysis">
               <JobList
                 jobs={selectedJobs}
                 analysisObjects={currentWs?.objects || []}
@@ -1007,7 +1000,7 @@ export default function ProjectHistory({
               />
             </Section>
 
-            <Section title="Selected Analysis Results" icon={<Archive size={18} className="text-primary" />} subtitle="Only saved results associated with the selected analysis are shown here. Reviewed result tables and Expert R bundles have authenticated, audited downloads; saved versions are never downloadable.">
+            <Section title="Saved results for this analysis" subtitle="Reviewed result tables and R bundles can be downloaded. Saved versions stay on the server.">
               <ArtifactList
                 artifacts={selectedArtifacts}
                 jobs={historyState.jobs}
@@ -1083,15 +1076,15 @@ export default function ProjectHistory({
               </p>
             </div>
 
-            <Section title="Lineage" icon={<GitBranch size={18} className="text-primary" />} subtitle="Recorded relationships between saved analyses.">
+            <Section title="Lineage" subtitle="Recorded relationships between saved analyses.">
               <LineageSummary lineage={historyState.lineage} selectedObjectId={selectedObjectId} />
             </Section>
 
-            <Section title="Project Provenance" icon={<FileText size={18} className="text-primary" />} subtitle="Project-scoped provenance records. Scripts and parameters are not expanded here.">
+            <Section title="Project provenance" subtitle="Scripts and parameters are not shown in this list.">
               <ProvenanceList provenance={historyState.provenance} />
             </Section>
 
-            <Section title="Project Figures" icon={<ImageIcon size={18} className="text-primary" />} subtitle="Figure metadata only. File bytes and downloads are not exposed.">
+            <Section title="Project figures" subtitle="Figure details only. Image files are not available here.">
               <FigureList figures={historyState.figures} />
             </Section>
 

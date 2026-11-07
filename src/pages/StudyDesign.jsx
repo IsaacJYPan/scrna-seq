@@ -246,8 +246,8 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
     return <div className="p-8 text-slate-400">Select a project to define its study design.</div>;
 
   return (
-    <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
-      <div className="max-w-6xl mx-auto space-y-5">
+    <div className="page-scroll custom-scrollbar text-text">
+      <div className="page-column space-y-5">
         <PageHeader
           title="Study Design"
           icon={FlaskConical}

@@ -122,7 +122,7 @@ async function main({ artifactDirectory } = {}) {
     await target.goto(service.endpoint);
     await target.getByPlaceholder('researcher@lab.edu').fill(accounts.owner.email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
   }

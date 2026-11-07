@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
+import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
 import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -424,7 +424,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         )}
         <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
           <h3 className="font-bold flex items-center gap-2 text-text">
-            <SlidersHorizontal size={18} className="text-primary" /> Filtering Thresholds
+            Filtering thresholds
           </h3>
           <span className="text-xs font-medium text-slate-400">
             {pipelineState?.isSubset || datasetInfo?.parentObjId ? 'Subset Inherited Mode' : 'Manual Mode'}
@@ -538,7 +538,6 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           ) : activePlot === 'stats' ? (
             <div>
               <h3 className="text-sm font-bold text-text mb-6 flex items-center gap-2">
-                <Info size={16} className="text-primary" />
                 Distribution Summary
               </h3>
 
@@ -668,7 +667,6 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
               {['mt', 'features', 'counts'].includes(activePlot) && (
                 <div className="w-full lg:w-64 lg:flex-shrink-0 flex flex-col gap-3">
                   <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
-                    <Info size={16} className="text-primary" />
                     Related Statistics
                   </h3>
                   <dl className="divide-y divide-border/70 text-xs">

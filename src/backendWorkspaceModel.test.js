@@ -194,7 +194,7 @@ describe('backend workspace model', () => {
       createProject: vi.fn(async payload => ({ id: 'proj_2', name: payload.name, organizationId: payload.organizationId })),
     };
 
-    await createProjectWithBackend(api, { name: 'New Project' });
+    await createProjectWithBackend(api, { name: 'New project' });
 
     expect(api.createOrganization).toHaveBeenCalledWith({ name: 'Personal Organization' });
     expect(api.createProject).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org_new' }));

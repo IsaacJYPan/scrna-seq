@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, FolderTree } from 'lucide-react';
+import {  } from 'lucide-react';
 
 const PROJECT_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 
@@ -18,7 +18,7 @@ export default function WorkbenchOverview({
 
   const liveAttached = selectedObject?.liveState === 'attached';
   let nextAction = 'Select or create a project.';
-  let actionLabel = 'Create Project';
+  let actionLabel = 'Create project';
   let action = null;
   if (hasProject && !hasObject && hasObjectsInProject) {
     nextAction =
@@ -26,9 +26,9 @@ export default function WorkbenchOverview({
     actionLabel = 'Select analysis';
   } else if (hasProject && !hasObject) {
     if (canWriteProject) {
-      nextAction =
-        'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
-      // The Saved analyses empty state owns the single primary add action.
+      // The Saved analyses empty state below explains how to add one, so this
+      // summary does not repeat it.
+      nextAction = '';
       actionLabel = 'Add analysis';
     } else {
       nextAction =
@@ -78,17 +78,13 @@ export default function WorkbenchOverview({
     >
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="min-w-0">
-          <p className="flex items-center gap-2 text-xs text-textMuted">
-            <FolderTree size={14} aria-hidden="true" /> {activeProject.name}
-            <span className="capitalize">· {activeProject.role}</span>
-          </p>
-          <h3 className="mt-2 flex items-center gap-2 text-lg font-semibold text-text">
-            <Database size={18} className="shrink-0 text-primary" aria-hidden="true" />
+          <p className="text-sm text-textMuted">{activeProject.name}</p>
+          <h3 className="mt-0.5 flex items-center gap-2 text-lg font-semibold text-text">
             <span className="truncate">
               {selectedObject?.name || selectedObject?.displayName || 'No analysis selected'}
             </span>
           </h3>
-          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-textMuted">{nextAction}</p>
+          {nextAction && <p className="mt-1 max-w-2xl text-sm leading-relaxed text-textMuted">{nextAction}</p>}
         </div>
         {action && (
           <button onClick={action} className="btn btn-primary text-sm">

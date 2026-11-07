@@ -74,7 +74,7 @@ async function verifySharedLinks(context) {
     await baselineColleague.goto(service.endpoint);
     await baselineColleague.getByPlaceholder('researcher@lab.edu').fill(accounts.colleague.email);
     await baselineColleague.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await baselineColleague.getByRole('button', { name: /Open Workbench/ }).click();
+    await baselineColleague.getByRole('button', { name: /Open workbench/ }).click();
     await baselineColleague.getByText('Connection details', { exact: true }).waitFor();
     await openPublications(baselineColleague, study); await openPublic(baselineColleague);
     loggedOutEverySession = false;

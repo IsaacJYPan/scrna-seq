@@ -146,7 +146,7 @@ describe('ProjectHistory', () => {
   it('renders researcher-safe history without leaking private runtime details', async () => {
     const { container } = render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
 
-    expect(screen.getByText('Runs & Results')).toBeInTheDocument();
+    expect(screen.getByText('Runs & results')).toBeInTheDocument();
     expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
     const privacy = screen.getByText('Visibility & privacy');
     expect(privacy.closest('details')).not.toHaveAttribute('open');
@@ -157,8 +157,8 @@ describe('ProjectHistory', () => {
 
     expect(screen.getByLabelText('Selected analysis counts')).toHaveTextContent('3 selected runs');
     expect(screen.getByLabelText('Selected analysis counts')).toHaveTextContent('1 selected result');
-    const selectedRuns = screen.getByText('Selected Analysis Runs').closest('section');
-    const selectedResults = screen.getByText('Selected Analysis Results').closest('section');
+    const selectedRuns = screen.getByText('Runs for this analysis').closest('section');
+    const selectedResults = screen.getByText('Saved results for this analysis').closest('section');
     const runMonitor = screen.getByRole('region', { name: 'Run monitoring' });
     expect(selectedRuns.compareDocumentPosition(selectedResults) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(selectedResults.compareDocumentPosition(runMonitor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -261,7 +261,7 @@ describe('ProjectHistory', () => {
 
     render(<ProjectHistory currentWs={mixedWorkspace} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} userId={7} />);
 
-    const selectedSection = (await screen.findByText('Selected Analysis Runs')).closest('section');
+    const selectedSection = (await screen.findByText('Runs for this analysis')).closest('section');
     expect(within(selectedSection).getByText('PBMC preprocessing')).toBeInTheDocument();
     expect(within(selectedSection).queryByText('Spatial preprocessing')).not.toBeInTheDocument();
     expect(screen.getByText(/Other project activity \(1 runs/i)).toBeInTheDocument();

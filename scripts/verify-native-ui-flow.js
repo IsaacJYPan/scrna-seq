@@ -134,10 +134,10 @@ function observePage(page, label, diagnostics) {
 }
 
 async function login(page, lane) {
-  await page.getByRole('button', { name: 'Log In', exact: true }).click();
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(lane.email);
   await page.getByLabel('Password', { exact: true }).fill(lane.password);
-  await page.getByRole('button', { name: /Open Workbench/ }).click();
+  await page.getByRole('button', { name: /Open workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 30_000 });
   await page.getByText(`Private fixture ${lane.index}`, { exact: true }).first()
     .waitFor({ state: 'visible', timeout: 30_000 });
@@ -500,7 +500,7 @@ async function showUmap(page) {
 
 async function runOverview(page, lane) {
   await openSidebarPage(page, 'Exploratory Analysis');
-  await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor({ timeout: 30_000 });
+  await page.getByRole('heading', { name: 'Exploratory analysis', exact: true }).waitFor({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Run recipe', exact: true }).click();
   const job = await waitFor(async () => {
     const jobs = await page.evaluate(({ projectId, objectId }) => (
