@@ -125,7 +125,7 @@ function MetadataTab({ info }) {
               <span className="text-sm font-bold text-white font-mono">{toStr(col.name)}</span>
               <Badge color={toStr(col.type) === 'numeric' ? 'primary' : 'amber'}>{toStr(col.type)}</Badge>
             </div>
-            <div className="text-[11px] text-slate-400">
+            <div className="text-xs text-slate-400">
               {toStr(col.type) === 'numeric' ? (
                 <span>
                   <span className="text-slate-400">min </span><span className="text-slate-300">{col.min}</span>
@@ -408,7 +408,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
                     <div key={value} className="flex items-center gap-3 bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
                       <div className="w-1/2 flex items-center justify-between px-2">
                         <span className="text-sm font-mono text-white truncate" title={value}>{value}</span>
-                        <span className="text-[10px] text-slate-400">{count?.toLocaleString()} cells</span>
+                        <span className="text-xs text-slate-400">{count?.toLocaleString()} cells</span>
                       </div>
                       <div className="text-slate-400">→</div>
                       <input
@@ -555,7 +555,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
               Select Values
             </label>
             {selected.length > 0 && (
-              <span className="text-[10px] text-primary font-bold">
+              <span className="text-xs text-primary font-bold">
                 ~{selectedCells.toLocaleString()} cells
               </span>
             )}
@@ -581,7 +581,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
                       ? <CheckSquare size={14} className="text-primary flex-shrink-0" />
                       : <Square size={14} className="text-slate-400 flex-shrink-0" />}
                     <span className="flex-1 text-sm font-mono text-white">{value}</span>
-                    <div className="flex items-center gap-2 text-[10px]">
+                    <div className="flex items-center gap-2 text-xs">
                       <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-primary/60 rounded-full"

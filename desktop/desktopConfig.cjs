@@ -1,5 +1,7 @@
 'use strict';
 
+const { name: APP_NAME } = require('../shared/brand.json');
+
 const { createHash, randomUUID } = require('node:crypto');
 const { isIP } = require('node:net');
 const path = require('node:path');
@@ -9,7 +11,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 function normalizeServerUrl(value) {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('Enter the address of your TraceOmics server.');
+    throw new Error(`Enter the address of your ${APP_NAME} server.`);
   }
 
   let parsed;

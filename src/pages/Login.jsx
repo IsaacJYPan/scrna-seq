@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
+import { APP_NAME, APP_TAGLINE } from '../brand';
 import auth from '../auth';
 import passwordPolicy from '../../shared/passwordPolicyContract.json';
 import { buildPublicExampleUrl } from '../examples/publicExampleRoute';
@@ -132,16 +133,14 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
 
       <div className="w-full max-w-sm relative z-10 my-auto shrink-0">
         <div className="login-panel overflow-hidden border border-border bg-surface">
-        {/* Brand: the same petrol band that frames the workbench */}
-        <div className="login-brand px-6 pb-5 pt-6 sm:px-7">
+        <div className="border-b border-border px-6 py-5 sm:px-7">
           <div className="flex items-center gap-2.5">
-            <Microscope size={22} strokeWidth={1.75} aria-hidden="true" />
-            <h1 className="login-wordmark">TraceOmics</h1>
+            <span className="nav-rail-mark flex h-8 w-8 shrink-0 items-center justify-center"><Microscope size={18} strokeWidth={1.75} aria-hidden="true" /></span>
+            <h1 className="login-wordmark">{APP_NAME}</h1>
           </div>
-          <p className="mt-2 text-sm">Seurat analysis with every run, setting, and figure on record.</p>
+          <p className="mt-2 text-sm text-textMuted">{APP_TAGLINE}</p>
         </div>
 
-        {/* Card */}
         <div className="p-6 sm:p-7">
           {/* Mode Toggle — segmented control */}
           {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-lg">
@@ -160,7 +159,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           </div>}
 
           {!registrationEnabled && (!demoMode || !allowDemo) && (
-            <p className="mb-5 text-center text-xs text-textMuted">
+            <p className="mb-5 text-sm text-textMuted">
               Accounts are provisioned by your deployment administrator.
             </p>
           )}
@@ -189,7 +188,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           <form onSubmit={handleSubmit} aria-busy={loading} className="space-y-4">
             {mode === 'signup' && (
               <div className="space-y-1.5">
-                <label htmlFor="signup-name" className="text-[13px] font-medium text-textMuted ml-0.5">Full name</label>
+                <label htmlFor="signup-name" className="text-sm font-medium text-textMuted ml-0.5">Full name</label>
                 <div className="relative group">
                   <User className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                   <input
@@ -207,7 +206,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             )}
 
             <div className="space-y-1.5">
-              <label htmlFor="login-email" className="text-[13px] font-medium text-textMuted ml-0.5">Email</label>
+              <label htmlFor="login-email" className="text-sm font-medium text-textMuted ml-0.5">Email</label>
               <div className="relative group">
                 <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
@@ -226,7 +225,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="login-password" className="text-[13px] font-medium text-textMuted ml-0.5">Password</label>
+              <label htmlFor="login-password" className="text-sm font-medium text-textMuted ml-0.5">Password</label>
               <div className="relative group">
                 <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
@@ -258,7 +257,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
 
             {mode === 'signup' && (
               <div className="space-y-1.5">
-                <label htmlFor="signup-password-confirmation" className="text-[13px] font-medium text-textMuted ml-0.5">
+                <label htmlFor="signup-password-confirmation" className="text-sm font-medium text-textMuted ml-0.5">
                   Confirm password
                 </label>
                 <div className="relative group">
@@ -310,7 +309,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
               )}
             </button>
           </form>
-          {publicExampleUrl && <div className="mt-5 border-t border-border pt-4 text-center">
+          {publicExampleUrl && <div className="mt-5 border-t border-border pt-4">
             <a href={publicExampleUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-primary underline">Inspect a public saved example</a>
             <p className="mt-1 text-xs text-textMuted">Synthetic findings. No sign-in or compute session needed; opens in a new tab.</p>
           </div>}

@@ -208,7 +208,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
                       <div className="text-xs text-textMuted mt-1">Current saved analysis: {headObject ? savedAnalysisLabel(headObject) : 'Saved analysis unavailable'}</div>
                       <div className="text-xs text-textMuted mt-1">Review: {latestReview ? reviewStatusLabel(latestReview.status) : 'Not requested'}</div>
                     </div>
-                    <span className={`text-[11px] rounded-full border px-2 py-1 ${branch.visibility === 'private' ? 'border-amber-500/30 text-amber-700 dark:text-amber-300' : 'border-success/30 text-success'}`}>
+                    <span className={`text-xs rounded-full border px-2 py-1 ${branch.visibility === 'private' ? 'border-amber-500/30 text-amber-700 dark:text-amber-300' : 'border-success/30 text-success'}`}>
                       {branch.visibility === 'private' ? 'Private draft' : 'Shared with project'}
                     </span>
                   </div>
@@ -372,7 +372,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
               ) : auditEvents.slice(0, 8).map((event) => (
                 <div key={event.id} className="border-t border-border pt-2 first:border-0 first:pt-0">
                   <div className="text-xs font-semibold text-text">{activityLabel(event.action)}</div>
-                  <div className="text-[11px] text-textMuted">{new Date(event.createdAt).toLocaleString()}</div>
+                  <div className="text-xs text-textMuted">{new Date(event.createdAt).toLocaleString()}</div>
                 </div>
               ))}
             </div>

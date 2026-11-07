@@ -121,7 +121,7 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
       'The public demo policy notice was not visible before guest creation.');
     await start.click();
 
-    await page.getByRole('heading', { name: /^TraceOmics Workbench/ })
+    await page.getByRole('heading', { name: / Workbench — / })
       .waitFor({ state: 'visible', timeout: 60_000 });
     await page.getByText('Curated single-cell demo', { exact: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });

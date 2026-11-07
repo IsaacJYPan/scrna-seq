@@ -216,7 +216,7 @@ export default function BatchIntegration({
                       <div className={`w-2 h-2 rounded-full ${info.textColor.replace('text-', 'bg-')}`} />
                     )}
                   </div>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">{info.description}</p>
+                  <p className="text-xs text-slate-400 leading-relaxed">{info.description}</p>
                 </button>
               ))}
             </div>
@@ -275,7 +275,7 @@ export default function BatchIntegration({
                   {(batchPreview.values || []).slice(0, 20).map(v => (
                     <span
                       key={v.value}
-                      className="px-2 py-0.5 bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-300 font-mono"
+                      className="px-2 py-0.5 bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 font-mono"
                       title={`${v.count} cells`}
                     >
                       {v.value}
@@ -283,7 +283,7 @@ export default function BatchIntegration({
                     </span>
                   ))}
                   {batchPreview.n_unique > 20 && (
-                    <span className="text-[11px] text-slate-400 self-center">
+                    <span className="text-xs text-slate-400 self-center">
                       +{batchPreview.n_unique - 20} more
                     </span>
                   )}
@@ -306,7 +306,7 @@ export default function BatchIntegration({
               ))}
             </ul>
             {selectedMethod.package && (
-              <p className="text-[10px] text-slate-400 mt-2">
+              <p className="text-xs text-slate-400 mt-2">
                 Requires: <code className={`${selectedMethod.textColor} bg-black/20 px-1 rounded`}>{selectedMethod.package}</code>
               </p>
             )}
@@ -439,7 +439,7 @@ export default function BatchIntegration({
                     <CheckCircle2 size={12} className="text-success" />
                     Method: <span className="text-white">{selectedMethod.name}</span>
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-2 pl-4">
+                  <p className="text-xs text-slate-400 mt-2 pl-4">
                     Click <strong className="text-white">Run Integration</strong> to begin.
                   </p>
                 </div>

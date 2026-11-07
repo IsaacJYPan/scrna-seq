@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 import { workflowTabAvailability } from '../../shared/workflowState.mjs';
+import { APP_NAME } from '../brand';
 
 const PRIMARY_DESTINATION_IDS = new Set([
   'workspace', 'analyses', 'pipeline-manager', 'branches', 'study-design', 'expert-r',
@@ -30,7 +31,7 @@ function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }
     aria-describedby={item.lockReason ? `${item.id}-dependency` : undefined}
     title={item.status || researcherLabel(item.label)}
     aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
-    className={`nav-item relative w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] transition-colors group
+    className={`nav-item relative w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-sm transition-colors group
       ${isDisabled ? 'cursor-not-allowed' : ''} ${isDisabled && !item.lockReason ? 'opacity-45' : ''}
       ${isActive ? 'nav-item-active border-primary/30 bg-primary/10 text-text' : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
   >
@@ -41,7 +42,7 @@ function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }
       <Lock size={13} className="flex-shrink-0" aria-hidden="true" />
       <span id={`${item.id}-dependency`} role="tooltip" className="pointer-events-none absolute inset-x-0 top-full z-30 hidden rounded border border-border bg-surface p-2 text-left text-xs text-text shadow group-hover:block group-focus:block">{item.lockReason}</span>
     </>}
-    {item.id === 'publication' && figuresCount > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">{figuresCount}</span>}
+    {item.id === 'publication' && figuresCount > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">{figuresCount}</span>}
     {item.done && <CheckCircle2 size={14} className="text-success flex-shrink-0" />}
   </button>;
 }
@@ -199,7 +200,7 @@ export default function Sidebar({
   return (
     <div ref={shellRef} onKeyDown={handleDrawerKeyDown} className="relative z-20 flex h-14 w-full shrink-0 sm:h-full sm:w-[72px] lg:w-auto">
       <nav aria-label="Account and navigation controls" inert={isNarrow && !isCollapsed} className="nav-rail relative z-50 flex h-14 w-full shrink-0 items-center gap-2 px-3 sm:h-full sm:w-[72px] sm:flex-col sm:px-0 sm:py-3">
-        <div className="nav-rail-mark flex h-9 w-9 shrink-0 items-center justify-center sm:mb-1 sm:h-11 sm:w-11" title="TraceOmics">
+        <div className="nav-rail-mark flex h-9 w-9 shrink-0 items-center justify-center sm:mb-1 sm:h-11 sm:w-11" title={APP_NAME}>
           <Microscope size={22} strokeWidth={1.75} aria-hidden="true" />
         </div>
 
@@ -217,7 +218,7 @@ export default function Sidebar({
             <Menu size={16} />
           </button>
 
-        <span className="nav-rail-title min-w-0 flex-1 truncate text-sm font-semibold sm:hidden">{currentWorkspace?.name || 'TraceOmics'}</span>
+        <span className="nav-rail-title min-w-0 flex-1 truncate text-sm font-semibold sm:hidden">{currentWorkspace?.name || APP_NAME}</span>
         <div className="nav-rail-divider my-1 hidden h-px w-8 sm:block" />
 
         <div className="hidden flex-1 sm:block" />
@@ -276,7 +277,7 @@ export default function Sidebar({
           className="h-12 w-full shrink-0 flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
           onClick={() => setIsCollapsed(true)}
         >
-          <span className="nav-workspace-name text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'TraceOmics'}</span>
+          <span className="nav-workspace-name text-text truncate flex-1 leading-none">{currentWorkspace?.name || APP_NAME}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 

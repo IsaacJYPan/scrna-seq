@@ -423,9 +423,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                 className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'} ${!canUse3D ? 'cursor-not-allowed opacity-50' : ''}`}
               >3D</button>
             </div>
-            <p className="text-[10px] text-textMuted mt-1">2D for publications</p>
+            <p className="text-xs text-textMuted mt-1">2D for publications</p>
             {!canUse3D && (
-              <p id="umap-3d-unavailable" role="status" className="text-[10px] text-textMuted mt-1.5">
+              <p id="umap-3d-unavailable" role="status" className="text-xs text-textMuted mt-1.5">
                 3D UMAP requires WebGL. This renderer supports the 2D view only.
               </p>
             )}
@@ -439,7 +439,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               onChange={e => setNNeighborsInput(e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-textMuted mt-1">Local vs global structure</p>
+            <p className="text-xs text-textMuted mt-1">Local vs global structure</p>
           </div>
           <div>
             <label htmlFor="umap-dist" className="block text-xs text-textMuted mb-1.5 font-medium">Minimum Distance</label>
@@ -450,7 +450,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               onChange={e => setMinDistInput(e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-textMuted mt-1">Packing density</p>
+            <p className="text-xs text-textMuted mt-1">Packing density</p>
           </div>
           <div>
             <label htmlFor="umap-dims" className="block text-xs text-textMuted mb-1.5 font-medium">Input Dimensions (PCs)</label>
@@ -461,7 +461,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               onChange={e => setDimsInput(e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-textMuted mt-1">From PCA</p>
+            <p className="text-xs text-textMuted mt-1">From PCA</p>
           </div>
         </div>
         {umapValidationError && <p role="alert" className="mt-4 text-sm text-danger">{umapValidationError}</p>}

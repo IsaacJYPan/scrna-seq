@@ -1,4 +1,4 @@
-:root { color-scheme: light; font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; color: #15201e; background: #e8ecea; }
+:root { color-scheme: light; font-family: "Public Sans", "Segoe UI", system-ui, sans-serif; color: #15201e; background: #e8ecea; }
 * { box-sizing: border-box; }
 body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 32px; background: #e8ecea; }
 .setup-card { width: min(100%, 620px); padding: 32px; border: 1px solid #c3cdc9; border-radius: 4px; background: #fbfcfb; }
@@ -6,7 +6,7 @@ body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding
 .mark svg { width: 27px; height: 27px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 .mark circle { fill: currentColor; stroke: none; }
 .eyebrow { margin: 24px 0 8px; color: #4c5b57; font-size: 14px; font-weight: 600; }
-h1 { margin: 0; font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; font-weight: 600; letter-spacing: 0; font-size: 32px; line-height: 1.1; }
+h1 { margin: 0; font-weight: 600; letter-spacing: -.01em; font-size: 32px; line-height: 1.1; }
 .lede { margin: 16px 0 28px; color: #4c5b57; line-height: 1.5; }
 form { display: grid; gap: 10px; }
 label { font-size: 14px; font-weight: 600; }

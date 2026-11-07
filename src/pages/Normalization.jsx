@@ -112,7 +112,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
                 <option value="LogNormalize">LogNormalize</option>
                 <option value="SCTransform">SCTransform (v2)</option>
               </select>
-              <p className="text-[10px] text-slate-400 mt-1">SCTransform handles depth variance better</p>
+              <p className="text-xs text-slate-400 mt-1">SCTransform handles depth variance better</p>
             </div>
             <div>
               <label htmlFor="norm-scale-factor" className="block text-xs text-textMuted mb-1.5 font-medium">Scale Factor</label>
@@ -123,7 +123,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
                 disabled={method === 'SCTransform'}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary disabled:opacity-40"
               />
-              <p className="text-[10px] text-slate-400 mt-1">{method === 'SCTransform' ? 'Not used with SCTransform' : 'Global scaling factor'}</p>
+              <p className="text-xs text-slate-400 mt-1">{method === 'SCTransform' ? 'Not used with SCTransform' : 'Global scaling factor'}</p>
             </div>
             <div>
               <label htmlFor="norm-n-features" className="block text-xs text-textMuted mb-1.5 font-medium">Variable Features</label>
@@ -133,7 +133,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
                 onChange={e => setParam('nFeatures', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-400 mt-1">Number of HVGs to select</p>
+              <p className="text-xs text-slate-400 mt-1">Number of HVGs to select</p>
             </div>
           </div>
 
@@ -154,7 +154,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
                   placeholder="e.g. percent.mt, percent.rb, nCount_RNA"
                   className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
                 />
-                <p className="text-[10px] text-slate-400 mt-1">Comma-separated metadata columns to regress out</p>
+                <p className="text-xs text-slate-400 mt-1">Comma-separated metadata columns to regress out</p>
               </div>
             </div>
           </details>

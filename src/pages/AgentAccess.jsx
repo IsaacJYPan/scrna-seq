@@ -5,6 +5,7 @@ import {
 import PageHeader from '../components/PageHeader';
 import { publicErrorMessage } from '../publicError';
 import AgentWorkflows from './AgentWorkflows';
+import { APP_NAME } from '../brand';
 
 // Human governance for delegated agents (docs/spec.md phases 0-1). This page
 // only displays and changes delegations; every rule is enforced server-side.
@@ -186,7 +187,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
           <div className="mb-1 flex items-center gap-2 font-bold text-text"><ShieldCheck size={17} className="text-primary" /> What an agent can do here</div>
           <p>An agent acts with its own credential, never your session. Its authority is what you delegate, narrowed by your current project role and re-checked on every request.
             Agents can read bounded metadata, submit <span className="font-bold text-text">inert proposals</span>, and run <span className="font-bold text-text">approved workflows inside your studies</span>. They cannot run their own code or R, export data, approve workflows, or accept results.</p>
-          <p className="mt-2">Run the agent under a separate account or isolated runtime that cannot reach your browser, SSH keys, or password. If an agent can use your own login, TraceOmics cannot tell it apart from you.</p>
+          <p className="mt-2">Run the agent under a separate account or isolated runtime that cannot reach your browser, SSH keys, or password. If an agent can use your own login, {APP_NAME} cannot tell it apart from you.</p>
         </div>
 
         {error && (

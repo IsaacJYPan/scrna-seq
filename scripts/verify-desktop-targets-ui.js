@@ -239,13 +239,13 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
       'An incompatible same-service reconnect replaced the current authenticated workspace.');
     second.setCompatibility(null);
     await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
-    await setup.getByRole('alert').filter({ hasText: 'does not publish a TraceOmics compatibility descriptor' }).waitFor();
+    await setup.getByRole('alert').filter({ hasText: 'does not publish a TBD compatibility descriptor' }).waitFor();
     assert((await browserState(page)).target.status === 'connected', 'A missing compatibility descriptor displaced the current connection.');
     second.setCompatibility({ product: 'TraceOmics', serviceApiVersion: 1, minimumClientApiVersion: 1 });
     checks.push('same-service reconnect freshly rejects incompatible and legacy APIs while preserving the authenticated workspace');
     await setup.getByLabel('Server address', { exact: true }).fill(incompatible.origin);
     await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
-    await setup.getByRole('alert').filter({ hasText: 'not a compatible TraceOmics server' }).waitFor();
+    await setup.getByRole('alert').filter({ hasText: 'not a compatible TBD server' }).waitFor();
     assert(fs.readFileSync(settingsFile, 'utf8') === beforeFailure, 'Failed connection modified the selected target settings.');
     assert((await browserState(page)).target.endpoint === second.origin, 'Failed connection replaced the current workspace.');
     checks.push('failed connection preserves the open workspace and saved selection');

@@ -1,5 +1,7 @@
 'use strict';
 
+const { name: APP_NAME } = require('../shared/brand.json');
+
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell, session } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -79,7 +81,7 @@ function createWindow({ profile = null, parent = null, runtime = null } = {}) {
     width: isSetup ? 760 : 1440, height: isSetup ? 900 : 960,
     minWidth: isSetup ? 600 : 1024, minHeight: 720,
     show: false, ...(parent ? { parent, modal: true } : {}),
-    backgroundColor: '#f5f5f7', title: 'TraceOmics',
+    backgroundColor: '#e8ecea', title: APP_NAME,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(__dirname, 'preload.cjs'),
       partition: profile ? runtime?.partition || targetSessionPartition(profile) : 'traceomics-target-setup' },
@@ -289,13 +291,13 @@ async function openServer(value) {
 
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: 'TraceOmics', submenu: [
+    { label: APP_NAME, submenu: [
       { label: 'Execution Targets…', click: () => showSetup() },
       { type: 'separator' }, { role: 'quit' },
     ] },
     { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
-    { role: 'help', submenu: [{ label: 'About TraceOmics', click: () => dialog.showMessageBox(mainWindow, {
-      type: 'info', title: 'About TraceOmics', message: 'TraceOmics',
+    { role: 'help', submenu: [{ label: `About ${APP_NAME}`, click: () => dialog.showMessageBox(mainWindow, {
+      type: 'info', title: `About ${APP_NAME}`, message: APP_NAME,
       detail: 'Version ' + app.getVersion() + '\nCollaborative transcriptomic analysis workbench',
       buttons: ['OK'], defaultId: 0,
     }) }] },

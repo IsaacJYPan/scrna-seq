@@ -57,7 +57,7 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
   try {
     await page.goto(target.origin, { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Start temporary demo', exact: true }).click();
-    await page.getByRole('heading', { name: /^TraceOmics Workbench/ }).waitFor();
+    await page.getByRole('heading', { name: / Workbench — / }).waitFor();
     await page.getByText('Curated single-cell demo', { exact: true }).first().waitFor();
     const identity = await page.evaluate(async () => {
       const projects = await window.electronAPI.listProjects();

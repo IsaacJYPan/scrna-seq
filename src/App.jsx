@@ -47,6 +47,7 @@ import {
   persistAnalysisObjectSummary,
   reconcileAnalysisObjectMetadata,
 } from './backendWorkspaceModel';
+import { APP_NAME } from './brand';
 
 const Workspace = React.lazy(() => import('./pages/Workspace'));
 const ResearchAnalyses = React.lazy(() => import('./pages/ResearchAnalyses'));
@@ -1315,10 +1316,10 @@ export default function App() {
   if (!isLoggedIn && authResolution !== 'resolved') return (
     <div className="login-bg flex min-h-dvh items-center justify-center p-6 text-text">
       <div className="w-full max-w-sm text-center">
-        <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary">
-          <Microscope size={30} aria-hidden="true" />
+        <div className="nav-rail-mark mx-auto mb-4 flex h-10 w-10 items-center justify-center">
+          <Microscope size={20} strokeWidth={1.75} aria-hidden="true" />
         </div>
-        <h1 className="text-2xl font-bold tracking-tight">TraceOmics</h1>
+        <h1 className="login-wordmark">{APP_NAME}</h1>
         {authResolution === 'checking' ? (
           <div role="status" className="mt-4 flex items-center justify-center gap-2 text-sm text-textMuted">
             <Loader2 size={18} className="animate-spin" aria-hidden="true" />
@@ -1510,7 +1511,7 @@ export default function App() {
         deploymentPolicy={deploymentPolicy}
       />
       <main className="flex-1 flex flex-col relative overflow-hidden min-h-0 min-w-0">
-        <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
+        <h1 className="sr-only">{APP_NAME} Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
         <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} userId={user?.id} projectId={activeProjectIdForPipeline} />
         <SubmissionRecoveryNotice userId={user?.id} projectId={activeProjectIdForPipeline} onOpen={() => setActiveTab('history')} />
         {savedWorkflowNotice && activeTab.startsWith('workflow:') && <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">

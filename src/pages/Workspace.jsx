@@ -514,7 +514,7 @@ function LoadModal({
                   className="grid gap-x-4 gap-y-2 items-center p-3 rounded-xl bg-slate-800/60 border border-slate-700/50 group/row hover:bg-slate-800/80 transition-colors"
                   style={{ gridTemplateColumns: `auto minmax(200px, 2fr) ${'minmax(120px, 1fr) '.repeat(extraMetaCols.length)}auto` }}
                 >
-                  <span className="text-[10px] font-semibold text-cyan-400 w-6 text-center flex-shrink-0">{i + 1}</span>
+                  <span className="text-xs font-semibold text-cyan-400 w-6 text-center flex-shrink-0">{i + 1}</span>
                   <div className="min-w-0">
                     <input
                       type="text"
@@ -523,7 +523,7 @@ function LoadModal({
                       className="w-full bg-slate-900 border border-slate-700 text-sm text-white px-3 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500 font-bold mb-1"
                       placeholder={`Sample ${i + 1}`}
                     />
-                    <p className="text-[10px] text-slate-400 truncate pl-1">Selected local folder</p>
+                    <p className="text-xs text-slate-400 truncate pl-1">Selected local folder</p>
                   </div>
                   {extraMetaCols.map((c, colIdx) => (
                     <input
@@ -653,11 +653,11 @@ function LoadModal({
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2 mb-0.5">
                       <span className="font-bold text-text text-sm">{opt.title}</span>
-                      <span role={active ? 'status' : undefined} className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${opt.tagColor}`}>
+                      <span role={active ? 'status' : undefined} className={`text-xs font-semibold px-1.5 py-0.5 rounded border ${opt.tagColor}`}>
                         {active ? <>Loading…<span className="sr-only"> {opt.title}</span></> : opt.tag}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 leading-snug">{opt.desc}</p>
+                    <p className="text-xs text-slate-400 leading-snug">{opt.desc}</p>
                   </div>
                 </button>
               );
@@ -2002,7 +2002,7 @@ export default function Workspace({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-primary/20 text-primary' : 'bg-slate-900 text-slate-400'}`}>
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full ${isActive ? 'bg-primary/20 text-primary' : 'bg-slate-900 text-slate-400'}`}>
                         {projObjects.length}
                       </span>
                     </div>
@@ -2017,7 +2017,7 @@ export default function Workspace({
             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <h3 ref={analysisHeadingRef} tabIndex={-1} className="text-lg font-bold text-text flex items-center gap-3">
                 Saved analyses{' '}
-                <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
+                <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
                   {activeProjectObjects.length}
                 </span>
               </h3>
@@ -2112,7 +2112,7 @@ export default function Workspace({
                           <>
                             <div className="text-sm font-bold text-text break-words" title={obj.name}>{obj.name}</div>
                             {obj.isSubset && (
-                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/10 border-amber-500/20">
+                              <span className="text-xs font-semibold px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/10 border-amber-500/20">
                                 subset
                               </span>
                             )}
@@ -2135,18 +2135,18 @@ export default function Workspace({
                             : 'Dimensions unavailable'}
                         </span>
                         <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                        <span className="text-[10px] text-slate-400">
+                        <span className="text-xs text-slate-400">
                           {new Date(obj.timestamp).toLocaleDateString()}
                         </span>
                         {obj.isBackendAnalysisObject && (
                           <>
                             <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                            <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded border text-text bg-primary/10 border-primary/20">
+                            <span className="text-xs font-semibold px-1.5 py-0.5 rounded border text-text bg-primary/10 border-primary/20">
                               Saved
                             </span>
                           </>
                         )}
-                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${
+                        <span className={`text-xs font-semibold px-1.5 py-0.5 rounded border ${
                           obj.liveState === 'attached'
                             ? 'text-success bg-success/10 border-success/30'
                             : 'text-amber-400 bg-amber-500/10 border-amber-500/30'
@@ -2160,7 +2160,7 @@ export default function Workspace({
                     <div className="flex items-center gap-3 flex-shrink-0 relative">
 
                       {isSelected && (
-                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-semibold text-text shadow-sm">
+                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-xs font-semibold text-text shadow-sm">
                           <CheckCircle size={10} /> Selected
                         </div>
                       )}

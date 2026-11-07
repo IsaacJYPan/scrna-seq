@@ -19,6 +19,7 @@ module.exports = {
   files: [
     'dist/**/*',
     'desktop/**/*',
+    'shared/brand.json',
     'package.json',
   ],
   win: {

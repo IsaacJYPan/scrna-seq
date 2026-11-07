@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Microscope, Moon, Sun } from 'lucide-react';
 import { RetainedResultContent } from '../components/RetainedArtifactView';
 import { loadPublicExampleManifest, readPublicExampleFinding, readPublicExampleSource } from './publicSavedExampleApi';
+import { APP_NAME } from '../brand';
 
 const invalid = error => error?.code === 'INVALID_PUBLIC_SAVED_EXAMPLE';
 const findingProblem = kind => kind === 'invalid' ? 'This saved finding could not be verified. No preview is shown.'
@@ -150,7 +151,7 @@ export default function PublicSavedExample({ onOpenWorkspace }) {
   return <main aria-label="Public saved example" className="flex h-dvh min-h-0 min-w-0 flex-col bg-background text-text">
     <header className="shrink-0 border-b border-border bg-surface px-4 py-3 sm:px-8"><div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2"><Microscope size={22} className="text-primary" aria-hidden="true" /><div>
-        <p className="text-sm font-semibold">TraceOmics</p><p className="text-xs text-textMuted">Public saved example · Synthetic</p></div></div>
+        <p className="text-sm font-semibold">{APP_NAME}</p><p className="text-xs text-textMuted">Public saved example · Synthetic</p></div></div>
       <div className="flex flex-wrap items-center gap-4"><button type="button" className="btn btn-secondary flex items-center gap-2 text-xs"
         aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme(value => value === 'dark' ? 'light' : 'dark')}>
         {theme === 'dark' ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}<span>Appearance</span>

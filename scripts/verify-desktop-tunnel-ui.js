@@ -326,7 +326,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
       && (await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200,
     'A freshly incompatible same-target API displaced the old authenticated SSH workspace.');
     service.setCompatibilityResponse({ error: 'Legacy application.' }, 404);
-    await failedConnect(setup, /does not publish a TraceOmics compatibility descriptor/i);
+    await failedConnect(setup, /does not publish a TBD compatibility descriptor/i);
     assert((await workspace.evaluate(() => window.desktopShell.getCurrentTarget())).status === 'connected',
       'A missing same-target API descriptor tore down an existing verified tunnel.');
     service.setCompatibilityResponse(null);

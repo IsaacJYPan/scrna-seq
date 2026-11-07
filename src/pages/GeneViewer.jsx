@@ -184,7 +184,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
               >
                 {expandedCats[cat] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 <span className="">{cat}</span>
-                <span className="ml-auto text-slate-400 font-mono text-[10px]">{genes.length}</span>
+                <span className="ml-auto text-slate-400 font-mono text-xs">{genes.length}</span>
               </button>
               {expandedCats[cat] && (
                 <div className="flex flex-wrap gap-1 px-2 pb-2 pt-1">
@@ -204,7 +204,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
           ))}
         </div>
 
-        <div className="p-3 border-t border-border text-[10px] text-slate-400 text-center">
+        <div className="p-3 border-t border-border text-xs text-slate-400 text-center">
           {allGenes.length} suggested markers · search any dataset gene
         </div>
       </div>

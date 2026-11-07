@@ -31,8 +31,32 @@
   --color-blue-800: #093b41;
   --color-blue-900: #082f34;
 
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-condensed: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  /* One family everywhere. Hierarchy comes from weight and colour, not
+     from mixing faces or widths: 400 for reading, 500 for controls and
+     labels, 600 for headings and emphasis. Heavier utilities collapse to 600. */
+  --font-sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-weight-bold: 600;
+  --font-weight-extrabold: 600;
+  --font-weight-black: 600;
+
+  /* A tight, fixed type scale (roughly 1.125) for a dense analysis tool.
+     Every size used in the app comes from this list. */
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.625rem;
+  --text-2xl: 1.375rem;
+  --text-2xl--line-height: 1.875rem;
+  --text-3xl: 1.625rem;
+  --text-3xl--line-height: 2.125rem;
+  --text-4xl: 1.875rem;
+  --text-4xl--line-height: 2.375rem;
   --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 
   /* Tiered corners: controls are nearly square, panels slightly softer,
@@ -64,10 +88,10 @@
     --color-surfaceRaised: #ffffff;
     --accent-soft: rgba(13, 92, 102, 0.08);
     --accent-text: #0a4a52;
-    --rail: #0d3238;
-    --rail-ink: #b9d3d1;
-    --rail-ink-strong: #f2f7f6;
-    --rail-hover: rgba(255, 255, 255, 0.08);
+    --rail: #f1f4f2;
+    --rail-ink: #4c5b57;
+    --rail-ink-strong: #15201e;
+    --rail-hover: rgba(21, 32, 30, 0.06);
     --elev-1: none;
     --elev-2: 0 12px 32px -10px rgba(13, 40, 44, 0.28);
     --ring: 0 0 0 3px rgba(13, 92, 102, 0.28);
@@ -87,8 +111,8 @@
        accent text and icons on the dark bench. Accent text is lightened. */
     --accent-soft: rgba(124, 200, 206, 0.12);
     --accent-text: #7cc8ce;
-    --rail: #091113;
-    --rail-ink: #8fa9a6;
+    --rail: #111c1e;
+    --rail-ink: #9aada8;
     --rail-ink-strong: #e3ebe8;
     --rail-hover: rgba(255, 255, 255, 0.06);
     --elev-1: none;
@@ -102,12 +126,7 @@
     font-feature-settings: "tnum" 1;
   }
 
-  /* Headings use the condensed cut: instrument-label density, so long
-     analysis names fit and titles read as labels rather than marketing. */
-  h1, h2, h3 {
-    font-family: var(--font-condensed);
-    letter-spacing: 0;
-  }
+  h1, h2, h3, h4 { letter-spacing: -0.005em; }
 
   ::selection { background: color-mix(in srgb, var(--color-primary) 22%, transparent); }
 }
@@ -136,7 +155,7 @@
   }
   .page-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem 1.5rem; flex-shrink: 0; }
   .page-header-content { flex: 1 1 20rem; min-width: 0; }
-  .page-title { display: flex; align-items: center; gap: 0.625rem; font-family: var(--font-condensed); font-size: 1.875rem; line-height: 2.25rem; font-weight: 600; letter-spacing: -0.005em; color: var(--color-text); overflow-wrap: anywhere; }
+  .page-title { display: flex; align-items: center; gap: 0.5rem; font-size: 1.375rem; line-height: 1.875rem; font-weight: 600; letter-spacing: -0.01em; color: var(--color-text); overflow-wrap: anywhere; }
   .page-title svg { color: var(--accent-text); stroke-width: 1.75; }
   .page-description { margin-top: 0.25rem; max-width: 68ch; font-size: 0.875rem; line-height: 1.5rem; color: var(--color-textMuted); }
   .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; flex: 0 1 auto; }
@@ -177,7 +196,6 @@
     @apply px-4 py-3 border-b border-border flex items-center justify-between;
     background-color: color-mix(in srgb, var(--color-background) 55%, var(--color-surface));
   }
-  .card-header :is(h2, h3, h4) { font-family: var(--font-condensed); font-weight: 600; }
 
   /* Shared form controls used by the study design and branch forms. */
   .input {
@@ -462,45 +480,34 @@
 
 /* ── Navigation ─────────────────────────────────────────────────────
    Unlayered so it can restyle the Tailwind utilities the nav items carry.
-   The rail is the one dark, saturated surface in the app: it frames every
-   page in the same deep petrol so the workspace itself can stay quiet. */
-.nav-rail { background-color: var(--rail); color: var(--rail-ink); }
-.nav-rail-mark { color: var(--rail-ink-strong); border: 1px solid color-mix(in srgb, var(--rail-ink) 45%, transparent); border-radius: 3px; }
-.nav-rail-title { color: var(--rail-ink-strong); font-family: var(--font-condensed); font-size: 1rem; }
-.nav-rail-divider { background-color: color-mix(in srgb, var(--rail-ink) 30%, transparent); }
+   The icon rail and the page list read as one pane: the rail is a shade
+   darker than the list in both themes, separated by a single rule. */
+.nav-rail { background-color: var(--rail); color: var(--rail-ink); border-color: var(--color-border); }
+@media (min-width: 640px) { .nav-rail { border-right: 1px solid var(--color-border); } }
+@media (max-width: 639px) { .nav-rail { border-bottom: 1px solid var(--color-border); } }
+.nav-rail-mark { color: #ffffff; background-color: var(--color-primary); border-radius: 4px; }
+.nav-rail-title { color: var(--rail-ink-strong); font-size: 0.875rem; }
+.nav-rail-divider { background-color: var(--color-border); }
 .nav-rail-button { color: var(--rail-ink); background-color: transparent; }
 .nav-rail-button:hover { color: var(--rail-ink-strong); background-color: var(--rail-hover); }
-.nav-rail-button:focus-visible { outline: 2px solid var(--rail-ink-strong); outline-offset: -2px; }
-.nav-rail-button-active { color: var(--rail-ink-strong); box-shadow: inset 2px 0 0 var(--rail-ink-strong); background-color: var(--rail-hover); }
+.nav-rail-button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.nav-rail-button-active { color: var(--accent-text); background-color: var(--accent-soft); }
 .nav-rail-button-danger:hover { color: #ffffff; background-color: var(--color-danger); }
 
-.nav-workspace-name { font-family: var(--font-condensed); font-size: 1rem; font-weight: 600; }
-.nav-group-label { font-family: var(--font-condensed); font-size: 0.8125rem; font-weight: 500; letter-spacing: 0.01em; }
-.nav-item { font-weight: 400; border-radius: 2px; }
+.nav-workspace-name { font-size: 0.875rem; font-weight: 600; }
+.nav-group-label { font-size: 0.75rem; font-weight: 500; }
+.nav-item { font-size: 0.8125rem; font-weight: 400; border-radius: 3px; min-height: 2.25rem; }
 .nav-item.nav-item-active {
   border-color: transparent;
   background-color: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--color-primary);
+  color: var(--color-text);
   font-weight: 500;
 }
-:root[data-theme="dark"] .nav-item.nav-item-active { box-shadow: inset 2px 0 0 var(--accent-text); }
 
-/* ── Login screen background ───────────────────────────────────────────
-   The bench itself, with a faint haemocytometer-style counting grid so the
-   sign-in reads as a lab instrument rather than a marketing page. */
-.login-bg {
-  background-color: var(--color-background);
-  background-image:
-    linear-gradient(color-mix(in srgb, var(--color-text) 6%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--color-text) 6%, transparent) 1px, transparent 1px);
-  background-size: 24px 24px;
-  background-position: -1px -1px;
-}
-
-.login-panel { border-radius: 4px; }
-.login-brand { background-color: var(--rail); color: var(--rail-ink); }
-.login-brand svg { color: var(--rail-ink-strong); }
-.login-wordmark { font-family: var(--font-condensed); font-size: 1.75rem; line-height: 1; font-weight: 600; color: var(--rail-ink-strong); }
+/* ── Login screen ─────────────────────────────────────────────────── */
+.login-bg { background-color: var(--color-background); }
+.login-panel { border-radius: 6px; }
+.login-wordmark { font-size: 1.375rem; line-height: 1.875rem; font-weight: 600; letter-spacing: -0.01em; color: var(--color-text); }
 
 /* React Flow Controls & MiniMap Styling for Dark/Light Mode compatibility */
 .react-flow__controls {

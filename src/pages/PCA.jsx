@@ -279,7 +279,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
                       <tr key={rank} className="hover:bg-white/5">
                         <td className="p-3 font-mono text-slate-400">{rank + 1}</td>
                         {Object.values(loadings).map((genes, pi) => (
-                          <td key={pi} className="p-3 text-center font-mono text-text text-[11px]">
+                          <td key={pi} className="p-3 text-center font-mono text-text text-xs">
                             {genes[rank] || '—'}
                           </td>
                         ))}

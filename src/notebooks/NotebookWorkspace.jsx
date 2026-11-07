@@ -109,11 +109,11 @@ const NotebookCell = memo(function NotebookCell({
       : cell.type === 'raw' ? active
         ? <textarea aria-label={`${label} source`} readOnly={!canEdit} className="min-h-36 w-full rounded border border-border bg-background p-3 font-mono text-sm leading-relaxed text-text" value={cell.source}
           onChange={event => onEdit(cell.id, { source: event.target.value })} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); editButton.current?.focus(); } }} />
-        : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background p-3 font-mono text-[13px] leading-relaxed">{cell.source || '(empty raw text)'}</pre>
+        : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background p-3 font-mono text-sm leading-relaxed">{cell.source || '(empty raw text)'}</pre>
       : active ? <CodeEditor key={stateKey} value={cell.source} language={cell.language} theme={theme} label={`${label} source`} readOnly={!canEdit}
         initialState={editorStates.current.get(stateKey)} onStateChange={state => editorStates.current.set(stateKey, state)}
         onChange={source => onEdit(cell.id, { source })} onEscape={() => editButton.current?.focus()} />
-        : <pre className="max-h-72 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-[13px] leading-relaxed">{cell.source || <span className="text-textMuted">Write {cellLabel(cell)} here.</span>}</pre>}
+        : <pre className="max-h-72 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-sm leading-relaxed">{cell.source || <span className="text-textMuted">Write {cellLabel(cell)} here.</span>}</pre>}
     <ImportedNotebookOutputs cell={cell} scopeKey={stateKey} />
   </section>;
 });
@@ -284,7 +284,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     {docs.index.error && <p role="alert" className="text-xs text-danger">{docs.index.error}</p>}
     <ul className="space-y-1">{docs.index.items.map(item => <li key={item.id}><button type="button" aria-current={selectedId === item.id ? 'page' : undefined}
       className={`w-full break-words rounded p-2 text-left text-sm focus-visible:ring-2 focus-visible:ring-primary ${selectedId === item.id ? 'bg-primary/10 font-semibold text-text' : 'text-textMuted hover:bg-primary/5'}`} onClick={() => void docs.open(item.id)}>
-      {item.title}{' '}<span className="mt-1 block text-[11px] font-normal text-textMuted">{item.documentKind === 'script' || scriptInfo(docs.drafts[item.id]?.content || (selectedId === item.id ? draft?.content : null)) ? `${item.defaultLanguage === 'python' ? 'Python' : 'R'} script` : `${item.cellCount} cells`} · {docs.drafts[item.id]?.dirty ? 'Draft edited' : `v${item.version}`}</span>
+      {item.title}{' '}<span className="mt-1 block text-xs font-normal text-textMuted">{item.documentKind === 'script' || scriptInfo(docs.drafts[item.id]?.content || (selectedId === item.id ? draft?.content : null)) ? `${item.defaultLanguage === 'python' ? 'Python' : 'R'} script` : `${item.cellCount} cells`} · {docs.drafts[item.id]?.dirty ? 'Draft edited' : `v${item.version}`}</span>
     </button></li>)}</ul>
     {!docs.index.loading && !docs.index.items.length && <p className="text-xs leading-relaxed text-textMuted">No documents yet.</p>}
     {docs.index.nextCursor && <button type="button" className="text-xs text-primary underline" disabled={docs.index.loading} onClick={() => void docs.loadMore()}>More documents</button>}

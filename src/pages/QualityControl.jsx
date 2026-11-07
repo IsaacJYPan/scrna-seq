@@ -418,7 +418,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       {/* Manual Threshold Controls */}
       <fieldset disabled={!canMutate} className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden disabled:opacity-60">
         {(result || pipelineState?.qc) && (
-          <div className="absolute top-0 right-0 px-3 py-1 bg-success/10 text-success text-[9px] font-semibold rounded-bl-lg border-b border-l border-success/20">
+          <div className="absolute top-0 right-0 px-3 py-1 bg-success/10 text-success text-xs font-semibold rounded-bl-lg border-b border-l border-success/20">
             Active Filter Applied
           </div>
         )}
@@ -436,28 +436,28 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <input id="qc-mt" type="number" min="0.1" max="100" step="0.5" value={mtCutoff} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('mtCutoff', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells above this % are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells above this % are removed</p>
           </div>
           <div>
             <label htmlFor="qc-minf" className="block text-xs text-textMuted mb-1.5 font-medium">Min Features</label>
             <input id="qc-minf" type="number" min="0" step="1" value={minFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells with fewer detected genes are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells with fewer detected genes are removed</p>
           </div>
           <div>
             <label htmlFor="qc-maxf" className="block text-xs text-textMuted mb-1.5 font-medium">Max Features</label>
             <input id="qc-maxf" type="number" min="1" step="1" value={maxFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('maxFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells with more detected genes are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells with more detected genes are removed</p>
           </div>
           <div>
             <label htmlFor="qc-minc" className="block text-xs text-textMuted mb-1.5 font-medium">Min Counts</label>
             <input id="qc-minc" type="number" min="0" step="1" value={minCounts} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minCounts', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells with fewer RNA counts are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells with fewer RNA counts are removed</p>
           </div>
         </div>
         {validationError && <p className="mt-4 text-sm text-danger" role="alert">{validationError}</p>}
@@ -479,7 +479,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 placeholder="e.g. TRBV, IGH, IGK"
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-400 mt-1">Regex patterns of features/genes to remove before clustering</p>
+              <p className="text-xs text-slate-400 mt-1">Regex patterns of features/genes to remove before clustering</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-3 font-medium">Doublet Detection</label>
@@ -492,7 +492,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 />
                 <span className="text-sm text-white font-medium">Remove Doublets (scDblFinder)</span>
               </label>
-              <p className="text-[10px] text-slate-400 mt-1 ml-7">Increases runtime significantly</p>
+              <p className="text-xs text-slate-400 mt-1 ml-7">Increases runtime significantly</p>
             </div>
           </div>
         </details>

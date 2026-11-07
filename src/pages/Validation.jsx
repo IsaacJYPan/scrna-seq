@@ -40,7 +40,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
   };
 
   const pipelineCheck = (has) => (
-    <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded text-[8px] font-semibold tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
+    <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded text-xs font-semibold tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
       {has ? '✓ DONE' : 'PENDING'}
     </span>
   );

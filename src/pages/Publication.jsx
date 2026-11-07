@@ -70,7 +70,7 @@ function FigureCard({ figure, onDelete, compact }) {
           </div>
           <p className="text-sm font-semibold text-text truncate">{figure.title || figure.plotType}</p>
           {fileName && (
-            <p className="text-[10px] text-slate-500 truncate font-mono">{fileName}</p>
+            <p className="text-xs text-slate-500 truncate font-mono">{fileName}</p>
           )}
         </div>
         <div className={`flex gap-1 transition-opacity ${confirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}>
@@ -107,7 +107,7 @@ function FigureCard({ figure, onDelete, compact }) {
         ) : (
           <div className="text-center text-slate-300">
             <ImageIcon size={36} className="mx-auto mb-1 opacity-40" />
-            <p className="text-[10px] text-slate-400">No preview</p>
+            <p className="text-xs text-slate-400">No preview</p>
           </div>
         )}
         {/* Overlay actions */}
@@ -142,11 +142,11 @@ function FigureCard({ figure, onDelete, compact }) {
           <span className="text-xs text-slate-500 font-mono border border-border/50 rounded px-1.5 py-0.5">
             {(figure.fileFormat || 'png').toUpperCase()}
           </span>
-          <span className="text-[10px] text-slate-500">{dateStr}</span>
+          <span className="text-xs text-slate-500">{dateStr}</span>
         </div>
 
         {fileName && (
-          <p className="text-[10px] text-slate-500 truncate font-mono">
+          <p className="text-xs text-slate-500 truncate font-mono">
             {fileName}
           </p>
         )}
