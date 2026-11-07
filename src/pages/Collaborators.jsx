@@ -238,16 +238,12 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
           </button>}>
             <div className="mt-3 flex flex-wrap gap-2">
-              <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(actorRole)}`}>Your role: {actorRole || 'unknown'}</span>
+              {actorRole && <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(actorRole)}`}>Your role: {actorRole}</span>}
               <span className="rounded border border-border px-2 py-0.5 text-xs font-medium text-textMuted">{memberCountText}</span>
             </div>
         </PageHeader>
 
-        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
-          <div className="mb-1 flex items-center gap-2 font-bold text-text">
-            <ShieldCheck size={17} className="text-primary" />
-            Collaboration boundary
-          </div>
+        <div className="text-sm text-textMuted">
           Members can review project records and authorized results according to role. To continue another researcher&apos;s work, create your own private branch from a saved version.
         </div>
 

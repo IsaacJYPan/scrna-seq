@@ -206,7 +206,7 @@ function JobList({
   onRetry,
   retryState,
   emptyTitle = 'No analysis runs yet',
-  emptyCopy = 'No recorded analysis runs are associated with this analysis.',
+  emptyCopy = 'Runs started from this analysis will be listed here.',
 }) {
   if (!jobs.length) {
     return (
@@ -983,12 +983,12 @@ export default function ProjectHistory({
           </div>
         ) : (
           <>
-            <div role="group" aria-label="Selected analysis counts" className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border pb-3 text-xs text-textMuted">
+            {(selectedJobs.length + selectedArtifacts.length + historyState.provenance.length + (historyState.lineage?.edges?.length || 0)) > 0 && <div role="group" aria-label="Selected analysis counts" className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border pb-3 text-xs text-textMuted">
               <span><strong className="text-text">{selectedJobs.length}</strong> selected run{selectedJobs.length === 1 ? '' : 's'}</span>
               <span><strong className="text-text">{selectedArtifacts.length}</strong> selected result{selectedArtifacts.length === 1 ? '' : 's'}</span>
               <span><strong className="text-text">{historyState.provenance.length}</strong> project records</span>
               <span><strong className="text-text">{historyState.lineage?.edges?.length || 0}</strong> lineage links</span>
-            </div>
+            </div>}
 
             <Section title="Runs for this analysis">
               <JobList

@@ -291,7 +291,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
           {nextCursor && <button type="button" className="btn btn-secondary mt-4 shrink-0" disabled={loading} onClick={() => void load(nextCursor)}>Load more analyses</button>}
         </section>
         <section ref={detailScroller} aria-label="Selected analysis" className={`min-w-0 lg:min-h-0 lg:overflow-auto lg:pr-1 ${!detailOpen || creating ? 'hidden lg:block' : ''}`}>
-          {!selected ? <div className="px-2 py-9 text-sm text-textMuted"><FileText size={25} className="mb-4" /><p>Select an analysis to open its question and linked material.</p></div> : <div className="space-y-5">
+          {!selected ? <div className="px-2 py-9 text-sm text-textMuted"><p>Select an analysis to open its question and linked material.</p></div> : <div className="space-y-5">
             <button ref={detailBack} type="button" className="inline-flex items-center gap-2 rounded text-sm text-textMuted underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:hidden" onClick={() => setDetailOpen(false)}><ArrowLeft size={15} />All analyses</button>
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-textMuted">Version {selected.version} · {selected.status === 'archived' ? 'Archived' : 'Project analysis'}</span>
               {!canWrite && <span className="text-xs text-textMuted">View access</span>}{dirty && <span role="status" className="text-xs text-primary">Draft edited</span>}</div>

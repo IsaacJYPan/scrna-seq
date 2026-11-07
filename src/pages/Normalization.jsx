@@ -140,8 +140,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
           <details className="mt-6 border-t border-border/50 pt-4 group">
             <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
               <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" aria-hidden="true" />
-              <Settings size={15} className="text-primary" aria-hidden="true" />
-              <span>Advanced Options</span>
+              <span>Advanced options</span>
             </summary>
             <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-1 gap-6 md:grid-cols-2">
               <div>

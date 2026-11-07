@@ -179,6 +179,14 @@
     color: #ffffff !important;
     box-shadow: none;
   }
+  /* Disabled primary actions turn neutral instead of a faded accent, so
+     they read as "not yet available" rather than broken. */
+  .btn-primary:disabled,
+  .btn-primary[aria-disabled="true"] {
+    background-color: color-mix(in srgb, var(--color-border) 55%, var(--color-surface)) !important;
+    color: var(--color-textMuted) !important;
+    opacity: 1 !important;
+  }
   .btn-secondary {
     @apply bg-surface border border-border text-text focus-visible:ring-primary;
   }
@@ -503,6 +511,24 @@
   color: var(--color-text);
   font-weight: 500;
 }
+
+/* Segmented control for mutually exclusive modes. Deliberately unlike a
+   button row so a mode choice never reads as the page's main action. */
+.segmented { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--color-border); border-radius: 4px; background-color: var(--color-background); padding: 2px; gap: 2px; }
+.segmented-option { min-height: 34px; padding: 0 0.875rem; border-radius: 3px; font-size: 0.8125rem; font-weight: 500; color: var(--color-textMuted); background: transparent; }
+.segmented-option:hover { color: var(--color-text); }
+.segmented-option[aria-pressed="true"] { color: var(--color-text); background-color: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); }
+.segmented-option:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+
+/* Disclosure triangles: one consistent chevron instead of the browser's. */
+details > summary { list-style: none; cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary:not(.btn):not(.list-none)::before {
+  content: ""; display: inline-block; width: 0.4rem; height: 0.4rem; margin-right: 0.5rem; vertical-align: 0.15em;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+details[open] > summary:not(.btn):not(.list-none)::before { transform: rotate(45deg); }
 
 /* Every page uses the same frame: one scroll container with fixed gutters
    and one centred column width, so content edges never jump between pages. */

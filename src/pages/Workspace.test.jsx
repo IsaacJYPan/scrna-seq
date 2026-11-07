@@ -111,7 +111,7 @@ describe('Workspace backend-backed project/object UI', () => {
     const update = view.props.updateActiveWorkspace.mock.calls.at(-1)[0];
     expect(update.objects).toEqual([]);
     view.rerender(<Workspace {...view.props} currentWs={{ ...workspaceWithAnalysis, ...update }} />);
-    expect(screen.getByRole('heading', { name: 'Saved analyses 0' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Saved analyses' })).toHaveFocus();
   });
 
   it('does not show a fake Default Project when no projects exist', () => {

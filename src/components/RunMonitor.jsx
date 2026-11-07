@@ -210,9 +210,9 @@ export default function RunMonitor({ projectId, userId }) {
   return <section aria-label="Run monitoring" className="rounded-xl border border-border bg-surface/50 p-5 space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h3 className="text-lg font-semibold">Run monitoring</h3><p className="text-sm text-textMuted">Status of your server jobs and private R commands.</p></div>
-      <button type="button" className="btn btn-secondary text-sm" disabled={connection.blocked || loading || checking} onClick={refresh}>Refresh monitoring</button>
+      <button type="button" className="btn btn-ghost text-sm" disabled={connection.blocked || loading || checking} onClick={refresh}>Refresh monitoring</button>
     </div>
-    <p className="text-xs text-textMuted">Selected server connection: {connection.blocked ? 'Disconnected or unconfirmed' : stale ? 'Service status could not be checked' : 'Connected'}{connection.target?.sshTunnel ? ' · SSH tunnel' : ''}.</p>
+    {(connection.blocked || stale) && <p className="text-xs text-textMuted">Server connection: {connection.blocked ? 'disconnected or unconfirmed' : 'status could not be checked'}{connection.target?.sshTunnel ? ', SSH tunnel' : ''}.</p>}
     {connection.blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">The selected server connection is unavailable. Last confirmed observations remain visible; current computation status is unknown. Reconnect to check the same run. No work is resubmitted.</p>}
     {(stale || expired) && !connection.blocked && (visibleDetail || visibleItems.length > 0) && <p role="status" className="text-sm">{expired ? 'These active observations are no longer current.' : 'These observations could not be refreshed.'} The last confirmed server state and elapsed time remain visible.</p>}
     {error && scopeMatches && <p role="alert" className="text-sm text-danger">{error}</p>}

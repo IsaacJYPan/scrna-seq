@@ -78,12 +78,12 @@ export default function WorkbenchOverview({
     >
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm text-textMuted">{activeProject.name}</p>
-          <h3 className="mt-0.5 flex items-center gap-2 text-lg font-semibold text-text">
-            <span className="truncate">
-              {selectedObject?.name || selectedObject?.displayName || 'No analysis selected'}
-            </span>
-          </h3>
+          <h3 className="truncate text-lg font-semibold text-text">{activeProject.name}</h3>
+          <p className="mt-0.5 truncate text-sm text-text">
+            {selectedObject?.name || selectedObject?.displayName
+              ? <>Selected analysis: <span className="font-medium">{selectedObject.name || selectedObject.displayName}</span></>
+              : <span className="text-textMuted">No analysis selected</span>}
+          </p>
           {nextAction && <p className="mt-1 max-w-2xl text-sm leading-relaxed text-textMuted">{nextAction}</p>}
         </div>
         {action && (

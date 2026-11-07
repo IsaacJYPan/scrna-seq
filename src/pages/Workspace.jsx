@@ -1261,12 +1261,12 @@ export function SeuratPipelinePanel({
             hidden={analysisApproach !== 'automatic'} className="space-y-4">
             <p className="text-sm text-textMuted">Set every step below, then submit one job from input to UMAP. Inspect the results when it finishes.</p>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap gap-2" role="group" aria-label="Seurat workflow type">
+              <div className="segmented" role="group" aria-label="Seurat workflow type">
             <button
               type="button"
               aria-pressed={workflowMode === 'scrna'}
               onClick={() => selectWorkflowMode('scrna')}
-              className={`btn text-xs ${workflowMode === 'scrna' ? 'btn-primary' : 'btn-secondary'}`}
+              className="segmented-option"
             >
               Single-cell RNA
             </button>
@@ -1274,7 +1274,7 @@ export function SeuratPipelinePanel({
               type="button"
               aria-pressed={multiSampleMode}
               onClick={() => selectWorkflowMode('multisample')}
-              className={`btn text-xs ${multiSampleMode ? 'btn-primary' : 'btn-secondary'}`}
+              className="segmented-option"
             >
               Multiple conditions
             </button>
@@ -1282,20 +1282,20 @@ export function SeuratPipelinePanel({
               type="button"
               aria-pressed={spatialMode}
               onClick={() => selectWorkflowMode('spatial')}
-              className={`btn text-xs ${spatialMode ? 'btn-primary' : 'btn-secondary'}`}
+              className="segmented-option"
             >
               Spatial transcriptomics (Visium)
             </button>
               </div>
-              <button onClick={loadDatasets} disabled={datasetStatus.loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+              <button onClick={loadDatasets} disabled={datasetStatus.loading} className="btn btn-ghost">
                 {datasetStatus.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                 Refresh datasets
               </button>
             </div>
-            <div className="rounded border border-border bg-background/40 p-4">
+            <div className="border-t border-border pt-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h4 className="font-bold text-text">Dataset upload / selection</h4>
+                  <h4 className="font-semibold text-text">Dataset</h4>
                   <p className="mt-1 text-xs text-textMuted">Supported format: {workflow.formatLabel}.</p>
                   {spatialMode && <p className="mt-1 text-xs text-textMuted">Visium HD and Xenium are not accepted by this workflow.</p>}
                   {multiSampleMode && <p className="mt-1 text-xs text-textMuted">Use one file per biological sample and assign its condition below.</p>}
@@ -1317,9 +1317,9 @@ export function SeuratPipelinePanel({
                     onChange={uploadDataset}
                   />
                 </label> : (
-                  <span className="rounded border border-border px-3 py-2 text-xs text-textMuted">
+                  <span className="text-sm text-textMuted">
                     {canWriteProject
-                      ? 'Public demo uses curated data; uploads are disabled.'
+                      ? 'Uploads are turned off on this server.'
                       : 'Read-only project; uploads are disabled for your role.'}
                   </span>
                 )}
@@ -1874,10 +1874,7 @@ export default function Workspace({
           <header className="page-header">
             <div className="page-header-content">
               <h2 className="page-title min-w-0">
-                <span className="truncate">{currentWs.name}</span>
-                {currentWs.type === 'personal'
-                  ? <Lock size={15} className="text-textMuted" aria-label="Private workspace" />
-                  : <Globe size={15} className="text-textMuted" aria-label="Shared workspace" />}
+                Data workspace
               </h2>
             </div>
           </header>
@@ -1947,9 +1944,9 @@ export default function Workspace({
               ) : (
                 <button
                   onClick={() => setIsCreatingProject(true)}
-                  className="btn btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm transition-colors"
+                  className="btn btn-secondary"
                 >
-                  <Plus size={14} /> New project
+                  <Plus size={15} aria-hidden="true" /> New project
                 </button>
               )}
             </div>
@@ -1992,11 +1989,7 @@ export default function Workspace({
                       {proj.role && <span className="mt-0.5 self-start text-xs capitalize px-1.5 rounded-sm border border-primary/40 text-primary">{proj.role}</span>}
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className={`text-xs px-1.5 py-0.5 rounded-full ${isActive ? 'bg-primary/20 text-primary' : 'bg-slate-900 text-slate-400'}`}>
-                        {projObjects.length}
-                      </span>
-                    </div>
+                    {projObjects.length > 0 && <span className="text-sm text-textMuted" aria-label={`${projObjects.length} saved analyses`}>{projObjects.length}</span>}
                   </button>
                 );
               })}
@@ -2007,10 +2000,8 @@ export default function Workspace({
           <div className="pt-2">
             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <h3 ref={analysisHeadingRef} tabIndex={-1} className="text-lg font-bold text-text flex items-center gap-3">
-                Saved analyses{' '}
-                <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
-                  {activeProjectObjects.length}
-                </span>
+                Saved analyses
+                {activeProjectObjects.length > 0 && <>{' '}<span className="ml-1 text-sm font-normal text-textMuted">{activeProjectObjects.length}</span></>}
               </h3>
               {activeProjectObjects.length > 0 && <button
                 onClick={() => setShowLoadModal(true)}

@@ -167,8 +167,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
 
         <details className="mt-6 border-t border-border/50 pt-4 group">
           <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-textMuted hover:text-text transition-colors list-none">
-            <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" />
-            <SlidersHorizontal size={14} className="text-primary" /> Advanced Options
+            <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" /> Advanced options
           </summary>
           <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 analysis-advanced-grid">
             <div>
