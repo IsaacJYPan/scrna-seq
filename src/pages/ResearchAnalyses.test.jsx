@@ -349,6 +349,5 @@ describe('durable project analyses', () => {
     await screen.findByRole('button', { name: new RegExp(second.name) });
     await act(async () => { reply({ analyses: [first], nextCursor: null }); });
     expect(screen.queryByRole('button', { name: new RegExp(first.name) })).toBeNull();
-    expect(screen.getByText('Different cohort')).toBeVisible();
   });
 });

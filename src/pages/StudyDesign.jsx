@@ -251,11 +251,10 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
         <PageHeader
           title="Study Design"
           icon={FlaskConical}
-          description="Define conditions, register samples, and choose comparisons."
           actions={
             <button
               type="button"
-              className="btn btn-secondary"
+              className="btn btn-ghost"
               onClick={() => void refresh()}
               disabled={!!busy}
             >
@@ -272,7 +271,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           </div>
         )}
         {!canWriteStudyDesign && (
-          <div className="rounded-lg border border-border bg-surface p-3 text-sm text-textMuted">
+          <div className="panel text-sm text-textMuted">
             Study design is read-only for your project role. An owner, administrator, or analyst can
             change conditions, samples, mappings, and comparisons.
           </div>

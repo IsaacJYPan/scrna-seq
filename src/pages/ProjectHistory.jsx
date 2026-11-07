@@ -238,7 +238,7 @@ function JobList({
         const canRetry = Boolean(onRetry) && retryEligible;
         const activeRetry = retryState?.sourceJobId === job.id ? retryState : null;
         return (
-        <div key={job.id} className="rounded-lg border border-border bg-surface p-4">
+        <div key={job.id} className="panel">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex flex-wrap items-center gap-2">
@@ -438,7 +438,7 @@ function ProvenanceList({ provenance }) {
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       {provenance.map(record => (
-        <div key={record.id} className="rounded-lg border border-border bg-surface p-4">
+        <div key={record.id} className="panel">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-bold text-text">Recorded analysis step</p>
             <StatusBadge tone="blue">{displayProvenanceLabel(record.operation)}</StatusBadge>
@@ -473,7 +473,7 @@ function LineageSummary({ lineage, selectedObjectId }) {
 
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      <div className="rounded-lg border border-border bg-surface p-4">
+      <div className="panel">
         <div className="mb-3 flex items-center justify-between gap-3">
           <h4 className="text-sm font-bold text-text">Saved analyses</h4>
           <StatusBadge tone={lineage.truncated ? 'amber' : 'green'}>{lineage.truncated ? 'truncated' : 'bounded'}</StatusBadge>
@@ -491,7 +491,7 @@ function LineageSummary({ lineage, selectedObjectId }) {
           </div>
         )}
       </div>
-      <div className="rounded-lg border border-border bg-surface p-4">
+      <div className="panel">
         <h4 className="mb-3 text-sm font-bold text-text">Edges</h4>
         {edges.length === 0 ? (
           <p className="text-sm text-textMuted">No recorded relationships for this analysis.</p>
@@ -523,7 +523,7 @@ function FigureList({ figures }) {
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       {figures.map(figure => (
-        <div key={figure.id} className="rounded-lg border border-border bg-surface p-4">
+        <div key={figure.id} className="panel">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-bold text-text">{figure.title || 'Saved figure'}</p>
             <StatusBadge tone="blue">{figure.plotType || 'Figure'}</StatusBadge>
@@ -885,11 +885,11 @@ export default function ProjectHistory({
   return (
     <div className="page-scroll custom-scrollbar">
       <div className="page-column space-y-5">
-        <PageHeader title="Runs & Results" icon={Briefcase} description="Review recorded analysis history, saved results, and reproducible branches." actions={
+        <PageHeader title="Runs & Results" icon={Briefcase} actions={
           <button
             onClick={loadHistory}
             disabled={historyState.loading}
-            className="btn btn-secondary inline-flex items-center gap-2 text-sm"
+            className="btn btn-ghost"
           >
             {historyState.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Refresh
@@ -897,22 +897,10 @@ export default function ProjectHistory({
 
         } />
 
-        <div className="rounded-lg border border-border bg-surface/40 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-3 text-sm">
-            <div>
-              <div className="text-xs font-medium text-textMuted">Project</div>
-              <div className="font-bold text-text">{activeProject?.name || 'Selected project'}</div>
-            </div>
-            <div>
-              <div className="text-xs font-medium text-textMuted">Selected analysis</div>
-              <div className="text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
-            </div>
-            <details className="text-sm">
-              <summary className="cursor-pointer text-primary hover:underline">Visibility &amp; privacy</summary>
-              <p className="mt-2 max-w-md text-xs text-textMuted">History access does not open another researcher’s private workspace.</p>
-            </details>
-          </div>
-        </div>
+        <p className="text-sm text-textMuted">
+          Selected analysis: <span className="font-medium text-text">{selectedObject?.displayName || selectedObject?.name || 'none'}</span>.
+          {' '}Viewing history never opens another researcher’s private workspace.
+        </p>
 
         <SubmissionRecovery projectId={activeProjectId} userId={userId} />
 
@@ -1018,7 +1006,7 @@ export default function ProjectHistory({
 
             {!historyState.loading && <RunMonitor key={`monitor:${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />}
 
-            <div className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="panel">
               <button
                 type="button"
                 aria-expanded={executionHistoryOpen}
@@ -1042,14 +1030,14 @@ export default function ProjectHistory({
               </div>
             </div>
 
-            <details className="rounded-lg border border-border bg-surface/40 p-4">
+            <details className="panel">
               <summary className="cursor-pointer font-medium text-text">Inspect or import artifact files</summary>
               <p className="mt-2 mb-4 text-sm text-textMuted">Imports stay private. Inspect exact saved versions or add a file without changing earlier contents.</p>
               <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
             </details>
 
             {(otherJobs.length > 0 || otherArtifacts.length > 0) && (
-              <details className="rounded-lg border border-border bg-surface/50 p-4">
+              <details className="panel">
                 <summary className="cursor-pointer font-bold text-text">
                   Other project activity ({otherJobs.length} runs, {otherArtifacts.length} results)
                 </summary>
@@ -1066,17 +1054,7 @@ export default function ProjectHistory({
               </details>
             )}
 
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-5 text-sm text-textMuted">
-              <div className="mb-2 flex items-center gap-2 font-bold text-text">
-                <GitBranch size={17} className="text-primary" />
-                How branches support parallel, reproducible work
-              </div>
-              <p>
-                The source analysis and saved version remain unchanged. Creating a branch opens that version in a new analysis owned by the collaborator, within only that collaborator&apos;s private analysis workspace. Both branches can then evolve independently while preserving their shared lineage.
-              </p>
-            </div>
-
-            <Section title="Lineage" subtitle="Recorded relationships between saved analyses.">
+            <Section title="Lineage" subtitle="How saved analyses relate. Branching from a saved version creates a new analysis in your own workspace and leaves the original unchanged.">
               <LineageSummary lineage={historyState.lineage} selectedObjectId={selectedObjectId} />
             </Section>
 

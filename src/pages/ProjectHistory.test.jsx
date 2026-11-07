@@ -148,10 +148,7 @@ describe('ProjectHistory', () => {
 
     expect(screen.getByText('Runs & results')).toBeInTheDocument();
     expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
-    const privacy = screen.getByText('Visibility & privacy');
-    expect(privacy.closest('details')).not.toHaveAttribute('open');
-    fireEvent.click(privacy);
-    expect(screen.getByText(/History access does not open another researcher’s private workspace/i)).toBeInTheDocument();
+    expect(screen.getByText(/Viewing history never opens another researcher’s private workspace/i)).toBeInTheDocument();
     expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
     expect(screen.getByText(/Inspect or import artifact files/i)).toBeInTheDocument();
 
@@ -342,7 +339,7 @@ describe('ProjectHistory', () => {
       expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_fork123');
       expect(setActiveTab).toHaveBeenCalledWith('workspace');
     });
-    expect(screen.getByText(/source analysis and saved version remain unchanged/i)).toBeInTheDocument();
+    expect(screen.getByText(/leaves the original unchanged/i)).toBeInTheDocument();
   });
 
   it('shows a project-scoped empty state when no project is selected', () => {
@@ -620,7 +617,6 @@ describe('ProjectHistory', () => {
 
     expect(screen.queryAllByText('PBMC preprocessing')).toHaveLength(0);
     expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
-    expect(screen.getByText('Project B')).toBeInTheDocument();
 
     await act(async () => {
       resolveB([{ id: 'job_project_b', status: 'completed', jobType: 'deg.find_markers.v1' }]);

@@ -2,7 +2,7 @@ import WorkbenchOverview from '../components/WorkbenchOverview';
 import DetailsPopover from '../components/DetailsPopover';
 import SeuratPipelineSettings from '../components/SeuratPipelineSettings';
 import React, { useRef, useState } from 'react';
-import { Database, FileUp, Zap, CheckCircle, Info, Globe, Lock, LayoutGrid, Edit2, FolderOpen, HardDrive, FlaskConical, X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2, FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive } from 'lucide-react';
+import { Database, FileUp, Zap, CheckCircle, Info, LayoutGrid, Edit2, FolderOpen, HardDrive, FlaskConical, X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2, FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive } from 'lucide-react';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 import { publicErrorMessage } from '../publicError';
 
@@ -1233,8 +1233,8 @@ export function SeuratPipelinePanel({
   }, [multiSampleMode, multiSampleRows]);
 
   return (
-    <section className="rounded-lg border border-border bg-surface/70 p-4 sm:p-5" data-testid="seurat-pipeline-panel">
-      <h3 className="text-xl font-bold tracking-tight text-text">Seurat analysis</h3>
+    <section data-testid="seurat-pipeline-panel">
+      <h3 className="text-lg font-semibold text-text">Seurat analysis</h3>
       <div className="mt-4 flex border-b border-border" role="tablist" aria-label="Analysis approach">
         {[['automatic', 'Run whole pipeline'], ['guided', 'Inspect step by step']].map(([mode, label]) => (
           <button key={mode} type="button" role="tab" id={`${approachId}-${mode}-tab`}
@@ -1330,9 +1330,9 @@ export function SeuratPipelinePanel({
                 </div>
               )}
               {datasets.length === 0 ? (
-                <div className="rounded border border-dashed border-border p-4 text-sm text-textMuted">
-                  No compatible {workflow.shortFormatLabel} datasets are recorded for this project yet.
-                </div>
+                <p className="text-sm text-textMuted">
+                  This project has no {workflow.shortFormatLabel} datasets yet.
+                </p>
               ) : (
                 <div className="space-y-2">
                   {datasets.map(dataset => {
@@ -1391,7 +1391,7 @@ export function SeuratPipelinePanel({
               )}
             </div>
 
-            <div className="overflow-hidden rounded border border-border bg-background/40">
+            <div className="overflow-hidden rounded border border-border bg-surface">
               <h4 className="border-b border-border px-4 py-3 font-semibold text-text sm:px-5">Pipeline settings</h4>
               <SeuratPipelineSettings params={params} setParams={setParams} controls={SEURAT_NUMERIC_CONTROLS} />
               <div className="border-t border-border p-4 sm:p-5">

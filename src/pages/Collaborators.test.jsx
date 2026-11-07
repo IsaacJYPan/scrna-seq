@@ -161,7 +161,6 @@ describe('Collaborators', () => {
     const projectBEmail = screen.getByLabelText('Account email');
     expect(projectBEmail).not.toBe(projectAEmail);
     expect(projectBEmail).toHaveValue('');
-    expect(screen.getByText('Project B')).toBeInTheDocument();
     await screen.findByText('analyst@example.org');
   });
 
@@ -191,7 +190,6 @@ describe('Collaborators', () => {
     });
 
     expect(screen.queryByText(/Project A role update rejected/i)).not.toBeInTheDocument();
-    expect(screen.getByText('Project B')).toBeInTheDocument();
     await screen.findByText('analyst@example.org');
   });
 });

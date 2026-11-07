@@ -1,8 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle, Loader2, RefreshCw, ShieldCheck, Trash2,
-  UserPlus, Users,
-} from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 
@@ -233,8 +230,8 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
     <div className="page-scroll custom-scrollbar">
       <div className="page-column space-y-7">
         <PageHeader title="Collaborators" icon={Users} className="border-b border-border pb-5"
-          description={<>Manage access to <span className="font-bold text-text">{activeProject?.name || 'the selected project'}</span>.</>}
-          actions={<button onClick={loadMembers} disabled={interactionBlocked} className="btn btn-secondary">
+          description="Who can see and change this project."
+          actions={<button onClick={loadMembers} disabled={interactionBlocked} className="btn btn-ghost">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
           </button>}>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -255,7 +252,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
         )}
 
         {canManage && (
-          <form onSubmit={addMember} className="rounded-lg border border-border bg-surface p-5">
+          <form onSubmit={addMember} className="panel">
             <div className="mb-4">
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">Add existing user</h3>
               <p className="mt-1 text-sm text-textMuted">The user must already have an account. This is immediate membership, not an emailed invitation.</p>
@@ -307,7 +304,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
                 const confirming = confirmRemoveKey === removeKey;
                 const roleOptions = actorRole === 'owner' ? ROLES : ROLES.filter(role => role !== 'owner');
                 return (
-                  <div key={member.userId} className="rounded-lg border border-border bg-surface p-4">
+                  <div key={member.userId} className="panel">
                     <div className="flex flex-wrap items-center justify-between gap-4">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">

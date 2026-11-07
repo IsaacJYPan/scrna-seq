@@ -248,7 +248,7 @@ export default function PipelineManager({
   return (
     <div className="page-scroll custom-scrollbar">
       <div className="page-column space-y-8">
-        <PageHeader title="Pipelines" icon={Layers} description="Run a complete analysis or inspect each step as you go." className="border-b border-border pb-5" actions={<button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+        <PageHeader title="Pipelines" icon={Layers} actions={<button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-ghost">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Refresh
           </button>} />
@@ -260,8 +260,6 @@ export default function PipelineManager({
           </div>
         ) : (
           <>
-            <p className="text-sm text-textMuted">Project: <span className="font-medium text-text">{activeProject?.name || 'Selected project'}</span></p>
-
             {error && (
               <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
                 <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Workflow selection unavailable</div>

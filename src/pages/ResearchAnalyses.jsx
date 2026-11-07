@@ -256,8 +256,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
     <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen || attachmentsOpen || preparationOpen || publicationsOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
     <div className="page-column lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <header className="mb-7 flex shrink-0 flex-wrap items-start justify-between gap-4">
-        <div><p className="mb-0.5 text-sm text-textMuted">{projectName || 'Current project'}</p><h2 className="page-title">Analyses</h2>
-          <p className="page-description">Keep a scientific question and its supporting work together.</p></div>
+        <div><h2 className="page-title">Analyses</h2></div>
         <div className="flex flex-wrap gap-3"><button ref={adoptionButton} type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" disabled={!!mutation || connection.blocked || !!pendingCreate.current}
           onClick={() => { setAdoptionVisited(true); setAdoptionOpen(true); }}><FileText size={16} />Bring saved work</button>
           {canWrite && <button type="button" className="btn btn-primary inline-flex items-center gap-2" disabled={!!mutation || connection.blocked}

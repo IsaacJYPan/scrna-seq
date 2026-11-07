@@ -269,7 +269,7 @@ export default function Sidebar({
         aria-modal={isNarrow && !isCollapsed ? true : undefined}
         aria-hidden={isCollapsed || undefined}
         inert={isCollapsed}
-        className={`fixed bottom-0 left-0 top-14 z-40 w-[min(320px,100vw)] overflow-hidden bg-surface shadow-xl transition-[width,transform] duration-200 ease-out motion-reduce:transition-none sm:left-[72px] sm:top-0 sm:w-60 lg:static lg:h-full lg:shadow-none lg:border-r lg:border-border ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0 lg:translate-x-0' : 'translate-x-0 lg:w-60'}`}
+        className={`fixed bottom-0 left-0 top-14 z-40 w-[min(320px,100vw)] overflow-hidden bg-surface transition-[width,transform] duration-200 ease-out motion-reduce:transition-none sm:left-[72px] sm:top-0 sm:w-60 lg:static lg:h-full lg:shadow-none lg:border-r lg:border-border ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0 lg:translate-x-0' : 'translate-x-0 shadow-xl lg:w-60'}`}
       >
         <div className="flex h-full w-[min(320px,100vw)] flex-col sm:w-60">
         <button
@@ -283,7 +283,7 @@ export default function Sidebar({
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 
-        <div className="shrink-0 border-b border-border p-2">
+        <div className="shrink-0 border-b border-border py-2 pl-2 pr-4">
           <NavButton {...navProps} item={{ id: 'analyses', label: 'Analyses', icon: FileText }} disabled={!hasProject} />
           <NavButton {...navProps} item={{ id: 'workspace', label: 'Data workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
         </div>
@@ -305,6 +305,7 @@ export default function Sidebar({
 
           {pipelineSections.map(section => (
             <NavSection key={section.id} id={section.id} label={researcherLabel(section.label)} active={groupActive(section.items)} open={!closedGroups.has(section.id) || groupActive(section.items)} onToggle={() => toggleGroup(section.id, groupActive(section.items))}>
+              {!hasData && section.items.some(item => item.requiresObject) && <p className="px-3 pb-1 text-xs text-textMuted">Select a saved analysis to use these steps.</p>}
               {section.items.map(item => {
                 const blockedLegacyMutation = deploymentPolicy.legacyLiveMutationToolsEnabled !== true
                   && item.id === 'integrate';

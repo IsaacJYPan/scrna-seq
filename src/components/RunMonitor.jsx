@@ -207,7 +207,7 @@ export default function RunMonitor({ projectId, userId }) {
   if (!projectId) return null;
   const timing = visibleDetail?.timing;
   const logs = visibleDetail?.logs;
-  return <section aria-label="Run monitoring" className="rounded-xl border border-border bg-surface/50 p-5 space-y-4">
+  return <section aria-label="Run monitoring" className="panel space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h3 className="text-lg font-semibold">Run monitoring</h3><p className="text-sm text-textMuted">Status of your server jobs and private R commands.</p></div>
       <button type="button" className="btn btn-ghost text-sm" disabled={connection.blocked || loading || checking} onClick={refresh}>Refresh monitoring</button>

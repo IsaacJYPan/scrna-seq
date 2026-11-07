@@ -536,6 +536,9 @@ details[open] > summary:not(.btn):not(.list-none)::before { transform: rotate(45
 @media (min-width: 640px) { .page-scroll { padding: 2rem 2rem; } }
 .page-column { width: 100%; max-width: 72rem; margin-inline: auto; }
 
+/* Bordered panel: the one container style for grouped content. */
+.panel { padding: 1rem 1.25rem; border: 1px solid var(--color-border); border-radius: 4px; background-color: var(--color-surface); }
+
 /* Empty and placeholder states: a plain, left-aligned note in the flow of
    the page, not a centred dashed drop zone with a faded icon. */
 .empty-note {

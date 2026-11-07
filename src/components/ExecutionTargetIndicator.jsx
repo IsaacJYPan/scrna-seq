@@ -13,7 +13,7 @@ const R_STATUS = {
   'demo-disabled': 'Guided demo',
 };
 
-export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projectId, userId }) {
+export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projectId, projectName = '', userId }) {
   const { target, blocked, error: connectionError } = useExecutionTarget();
   const [error, setError] = useState('');
   const [readinessOpen, setReadinessOpen] = useState(false);
@@ -24,8 +24,9 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projec
     || (deploymentPolicy.demoMode ? 'Guided demo' : deploymentPolicy.expertREnabled ? 'Custom R available' : 'Custom R status unavailable');
   const disconnected = target?.sshTunnel?.state && target.sshTunnel.state !== 'connected';
   return <><div aria-label="Execution target" className="shrink-0 h-12 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
-    <div className="min-w-0 flex-1">
-      <span className="block truncate font-medium">{target?.name || 'Analysis server'}</span>
+    <div className="min-w-0 flex-1 truncate text-sm font-semibold" title={projectName || undefined}>{projectName || 'No project selected'}</div>
+    <div className="min-w-0 text-right">
+      <span className="block truncate text-textMuted">{target?.name || 'Analysis server'}</span>
       {target?.sshTunnel && <span role="status" className={`block truncate ${disconnected ? 'text-amber-800 dark:text-amber-200' : 'text-textMuted'}`}>
         {disconnected ? 'SSH tunnel disconnected' : 'SSH tunnel connected'}
       </span>}

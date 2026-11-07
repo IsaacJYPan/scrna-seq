@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
+import { Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
 import { APP_NAME, APP_TAGLINE } from '../brand';
 import auth from '../auth';
 import passwordPolicy from '../../shared/passwordPolicyContract.json';
@@ -114,7 +114,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
   };
 
   const inputBase =
-    'w-full rounded-lg border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
+    'w-full rounded-lg border bg-background py-2.5 px-3 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
   const tabBase =
     'py-2 rounded-lg text-sm font-medium transition-colors';
 
@@ -190,7 +190,6 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
               <div className="space-y-1.5">
                 <label htmlFor="signup-name" className="text-sm font-medium text-textMuted ml-0.5">Full name</label>
                 <div className="relative group">
-                  <User className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                   <input
                   id="signup-name"
                   type="text"
@@ -208,7 +207,6 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             <div className="space-y-1.5">
               <label htmlFor="login-email" className="text-sm font-medium text-textMuted ml-0.5">Email</label>
               <div className="relative group">
-                <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
                   id="login-email"
                   type="email"
@@ -227,7 +225,6 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             <div className="space-y-1.5">
               <label htmlFor="login-password" className="text-sm font-medium text-textMuted ml-0.5">Password</label>
               <div className="relative group">
-                <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
                   id="login-password"
                   type={showPassword ? 'text' : 'password'}
@@ -261,7 +258,6 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
                   Confirm password
                 </label>
                 <div className="relative group">
-                  <Shield className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                   <input
                     id="signup-password-confirmation"
                     type={showPassword ? 'text' : 'password'}
