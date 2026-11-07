@@ -56,7 +56,7 @@ export default function ProvenanceDrawer({ provId, chain, onClose }) {
         <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
           
           <div className="rounded-lg border border-border bg-black/20 p-4">
-            <span className="block text-[10px] text-textMuted mb-2 font-semibold tracking-wider uppercase">Recorded analysis</span>
+            <span className="block text-xs text-textMuted mb-2 font-semibold">Recorded analysis</span>
             <p className="text-sm text-slate-300">This record summarizes an approved analysis step. Technical implementation details and source text are not shown here.</p>
           </div>
 

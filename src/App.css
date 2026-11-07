@@ -3,16 +3,57 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  --color-primary: #0071e3;
-  --color-background: #f5f5f7;
-  --color-surface: #ffffff;
-  --color-border: #d2d2d7;
-  --color-text: #1d1d1f;
-  /* Keep supporting copy and compact status labels comfortably above AA on
-     both white and lightly tinted surfaces. */
-  --color-textMuted: #5c5c62;
-  --color-success: #1f6f35;
-  --color-danger: #b91c1c;
+  /* Bench palette: a cool grey-green lab bench, white specimen surfaces, and a
+     deep methylene-teal accent. Ink is a green-tinted near-black so text sits
+     with the bench colour rather than on top of it. */
+  --color-primary: #0d5c66;
+  --color-background: #e8ecea;
+  --color-surface: #fbfcfb;
+  --color-border: #c3cdc9;
+  --color-text: #15201e;
+  /* Supporting copy and compact status labels stay comfortably above AA on
+     the bench, the surface, and lightly tinted panels. */
+  --color-textMuted: #4c5b57;
+  --color-success: #276b38;
+  --color-danger: #b3261e;
+
+  /* Stray Tailwind blues (selection chips, info notes) follow the teal accent
+     so no leftover system blue competes with it. Plot colours are set in
+     code and are unaffected. */
+  --color-blue-50: #eef6f6;
+  --color-blue-100: #d5e9ea;
+  --color-blue-200: #acd3d6;
+  --color-blue-300: #7cb9be;
+  --color-blue-400: #4a9aa1;
+  --color-blue-500: #1f7c85;
+  --color-blue-600: #0d5c66;
+  --color-blue-700: #0a4a52;
+  --color-blue-800: #093b41;
+  --color-blue-900: #082f34;
+
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-condensed: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+
+  /* Tiered corners: controls are nearly square, panels slightly softer,
+     overlays softest. Pills (rounded-full) stay round for dots and avatars. */
+  --radius: 3px;
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 6px;
+  --radius-3xl: 8px;
+
+  /* Panels are flat and bordered; only floating layers cast a shadow. */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: 0 6px 18px -6px rgb(13 40 44 / 0.22);
+  --shadow-lg: 0 10px 28px -8px rgb(13 40 44 / 0.26);
+  --shadow-xl: 0 16px 40px -12px rgb(13 40 44 / 0.30);
+  --shadow-2xl: 0 22px 52px -14px rgb(13 40 44 / 0.34);
 }
 
 @layer base {
@@ -21,33 +62,54 @@
      --color-surfaceRaised is a slightly lifted panel for nested cards. */
   :root {
     --color-surfaceRaised: #ffffff;
-    --accent-soft: rgba(0, 113, 227, 0.08);
-    --elev-1: 0 1px 2px rgba(0, 0, 0, 0.04);
-    --elev-2: 0 10px 28px rgba(0, 0, 0, 0.08);
-    --ring: 0 0 0 3px rgba(0, 113, 227, 0.24);
+    --accent-soft: rgba(13, 92, 102, 0.08);
+    --accent-text: #0a4a52;
+    --rail: #0d3238;
+    --rail-ink: #b9d3d1;
+    --rail-ink-strong: #f2f7f6;
+    --rail-hover: rgba(255, 255, 255, 0.08);
+    --elev-1: none;
+    --elev-2: 0 12px 32px -10px rgba(13, 40, 44, 0.28);
+    --ring: 0 0 0 3px rgba(13, 92, 102, 0.28);
   }
 
   :root[data-theme="dark"] {
-    --color-background: #0e1626;
-    --color-surface: #182236;
-    --color-surfaceRaised: #1f2b43;
-    --color-border: #30405c;
-    --color-text: #f1f5f9;
-    --color-textMuted: #9fb0c9;
-    --color-success: #4ade80;
-    --color-danger: #f2565b;
-    /* Brand blue is legible as a large fill, but too dark for small accent
-       text/icons on the dark canvas. Accent text is lightened separately. */
-    --accent-soft: rgba(96, 160, 255, 0.14);
-    --elev-1: 0 1px 2px rgba(0, 0, 0, 0.40), 0 2px 6px rgba(0, 0, 0, 0.28);
-    --elev-2: 0 10px 28px -8px rgba(0, 0, 0, 0.55), 0 4px 10px -4px rgba(0, 0, 0, 0.4);
-    --ring: 0 0 0 3px rgba(96, 160, 255, 0.30);
+    --color-primary: #1b7a85;
+    --color-background: #0e1719;
+    --color-surface: #142023;
+    --color-surfaceRaised: #1a292c;
+    --color-border: #2b3d40;
+    --color-text: #e3ebe8;
+    --color-textMuted: #9aada8;
+    --color-success: #6fcf8a;
+    --color-danger: #f0736b;
+    /* The teal fill is legible behind white text, but too dark for small
+       accent text and icons on the dark bench. Accent text is lightened. */
+    --accent-soft: rgba(124, 200, 206, 0.12);
+    --accent-text: #7cc8ce;
+    --rail: #091113;
+    --rail-ink: #8fa9a6;
+    --rail-ink-strong: #e3ebe8;
+    --rail-hover: rgba(255, 255, 255, 0.06);
+    --elev-1: none;
+    --elev-2: 0 12px 32px -10px rgba(0, 0, 0, 0.6);
+    --ring: 0 0 0 3px rgba(124, 200, 206, 0.32);
   }
 
   body {
     @apply bg-background text-text font-sans antialiased m-0 p-0 h-screen w-screen overflow-hidden;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    font-feature-settings: "tnum" 1;
   }
+
+  /* Headings use the condensed cut: instrument-label density, so long
+     analysis names fit and titles read as labels rather than marketing. */
+  h1, h2, h3 {
+    font-family: var(--font-condensed);
+    letter-spacing: 0;
+  }
+
+  ::selection { background: color-mix(in srgb, var(--color-primary) 22%, transparent); }
 }
 
 @layer components {
@@ -67,15 +129,16 @@
     .pipeline-parameter .input, .pipeline-qc-toggle { min-height: 44px; }
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
     min-height: 40px;
     font-size: 0.875rem;
     line-height: 1.25rem;
   }
   .page-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem 1.5rem; flex-shrink: 0; }
   .page-header-content { flex: 1 1 20rem; min-width: 0; }
-  .page-title { display: flex; align-items: center; gap: 0.625rem; font-size: 1.5rem; line-height: 2rem; font-weight: 700; letter-spacing: -0.025em; color: var(--color-text); overflow-wrap: anywhere; }
-  .page-description { margin-top: 0.375rem; font-size: 0.875rem; line-height: 1.5rem; color: var(--color-textMuted); }
+  .page-title { display: flex; align-items: center; gap: 0.625rem; font-family: var(--font-condensed); font-size: 1.875rem; line-height: 2.25rem; font-weight: 600; letter-spacing: -0.005em; color: var(--color-text); overflow-wrap: anywhere; }
+  .page-title svg { color: var(--accent-text); stroke-width: 1.75; }
+  .page-description { margin-top: 0.25rem; max-width: 68ch; font-size: 0.875rem; line-height: 1.5rem; color: var(--color-textMuted); }
   .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; flex: 0 1 auto; }
   .page-header-actions > button { white-space: nowrap; }
   .page-header-actions svg { flex-shrink: 0; }
@@ -93,26 +156,28 @@
   }
   .btn-primary:hover {
     /* White text stays above 4.5:1 through the transition and at rest. */
-    background-color: #006edb;
+    background-color: color-mix(in srgb, var(--color-primary) 82%, #000);
     color: #ffffff !important;
     box-shadow: none;
   }
   .btn-secondary {
     @apply bg-surface border border-border text-text focus-visible:ring-primary;
   }
-  .btn-secondary:hover { background-color: var(--accent-soft); border-color: var(--color-primary); }
+  .btn-secondary:hover { background-color: var(--accent-soft); border-color: color-mix(in srgb, var(--color-primary) 55%, var(--color-border)); }
   .btn-ghost {
     @apply bg-transparent text-textMuted focus-visible:ring-primary;
   }
   .btn-ghost:hover { background-color: var(--accent-soft); color: var(--color-text); }
   .card {
     @apply bg-surface border border-border overflow-hidden flex flex-col;
-    border-radius: 12px;
-    box-shadow: var(--elev-1);
+    border-radius: 4px;
+    box-shadow: none;
   }
   .card-header {
-    @apply px-4 py-3 border-b border-border flex items-center justify-between bg-black/5 dark:bg-white/5;
+    @apply px-4 py-3 border-b border-border flex items-center justify-between;
+    background-color: color-mix(in srgb, var(--color-background) 55%, var(--color-surface));
   }
+  .card-header :is(h2, h3, h4) { font-family: var(--font-condensed); font-weight: 600; }
 
   /* Shared form controls used by the study design and branch forms. */
   .input {
@@ -123,7 +188,7 @@
     color: var(--color-text);
     background-color: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 0.5rem;
+    border-radius: 3px;
     font: inherit;
   }
   .input::placeholder { color: var(--color-textMuted); opacity: 1; }
@@ -134,7 +199,7 @@
     max-width: 100%;
     padding: 0.25rem 0.625rem;
     border: 1px solid var(--color-border);
-    border-radius: 9999px;
+    border-radius: 2px;
     background-color: var(--accent-soft);
     color: var(--color-text);
     font-size: 0.75rem;
@@ -239,12 +304,12 @@
 
   :root:not([data-theme="dark"]) table thead.bg-slate-800,
   :root:not([data-theme="dark"]) thead.bg-slate-800 {
-    background-color: #eef2f7 !important;
+    background-color: color-mix(in srgb, var(--color-background) 60%, #fff) !important;
   }
 
   :root:not([data-theme="dark"]) .shadow-2xl,
   :root:not([data-theme="dark"]) .shadow-lg {
-    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12) !important;
+    box-shadow: var(--elev-2) !important;
   }
 
   :root:not([data-theme="dark"]) .btn.btn-primary,
@@ -257,7 +322,7 @@
   }
 
   :root[data-theme="dark"] .btn-secondary:hover {
-    background-color: #334155 !important;
+    background-color: var(--color-surfaceRaised) !important;
   }
 
   /* text-slate-100/50 are near-white "emphasis" text authored for dark
@@ -301,7 +366,7 @@
      title therefore needs a dark blue foreground in light mode rather than
      the generic near-white fallback authored for the older dark dashboard. */
   :root:not([data-theme="dark"]) .bg-primary\/10.text-white {
-    color: #1e3a8a !important;
+    color: var(--accent-text) !important;
   }
 
   /* Accent text/icons: the brand blue (#3371e3) only reaches ~3.9:1 on the
@@ -309,7 +374,7 @@
      in dark mode (this does NOT touch bg-primary fills, which keep the brand
      blue with white text). Applies to text-primary spans and icon fills. */
   :root[data-theme="dark"] .text-primary {
-    color: #93c5fd !important;
+    color: var(--accent-text) !important;
   }
   /* Error text needs contrast against its tinted alert surface. Keep solid
      danger fills independent so their button foregrounds are unchanged. */
@@ -328,11 +393,11 @@
     max-width: none !important;
     margin-bottom: 0.5rem !important;
     border: 1px solid var(--color-border) !important;
-    border-radius: 0.75rem !important;
+    border-radius: 4px !important;
     background: var(--color-surface) !important;
     color: var(--color-text) !important;
     box-shadow: var(--elev-2);
-    font: 0.875rem/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    font: 0.875rem/1.5 var(--font-sans) !important;
     hyphens: none !important;
     overflow-wrap: anywhere !important;
   }
@@ -374,7 +439,7 @@
   :root:not([data-theme="dark"]) .text-blue-300,
   :root:not([data-theme="dark"]) .text-blue-400,
   :root:not([data-theme="dark"]) .text-blue-500 {
-    color: #1e3a8a !important;
+    color: var(--accent-text) !important;
   }
   :root:not([data-theme="dark"]) .text-indigo-300,
   :root:not([data-theme="dark"]) .text-indigo-400,
@@ -391,32 +456,59 @@
      accent text in light mode so even the small chips clear AA; the button
      fill (.bg-primary) is untouched and keeps the brand blue. */
   :root:not([data-theme="dark"]) .text-primary {
-    color: #1e3a8a !important;
+    color: var(--accent-text) !important;
   }
 }
 
+/* ── Navigation ─────────────────────────────────────────────────────
+   Unlayered so it can restyle the Tailwind utilities the nav items carry.
+   The rail is the one dark, saturated surface in the app: it frames every
+   page in the same deep petrol so the workspace itself can stay quiet. */
+.nav-rail { background-color: var(--rail); color: var(--rail-ink); }
+.nav-rail-mark { color: var(--rail-ink-strong); border: 1px solid color-mix(in srgb, var(--rail-ink) 45%, transparent); border-radius: 3px; }
+.nav-rail-title { color: var(--rail-ink-strong); font-family: var(--font-condensed); font-size: 1rem; }
+.nav-rail-divider { background-color: color-mix(in srgb, var(--rail-ink) 30%, transparent); }
+.nav-rail-button { color: var(--rail-ink); background-color: transparent; }
+.nav-rail-button:hover { color: var(--rail-ink-strong); background-color: var(--rail-hover); }
+.nav-rail-button:focus-visible { outline: 2px solid var(--rail-ink-strong); outline-offset: -2px; }
+.nav-rail-button-active { color: var(--rail-ink-strong); box-shadow: inset 2px 0 0 var(--rail-ink-strong); background-color: var(--rail-hover); }
+.nav-rail-button-danger:hover { color: #ffffff; background-color: var(--color-danger); }
+
+.nav-workspace-name { font-family: var(--font-condensed); font-size: 1rem; font-weight: 600; }
+.nav-group-label { font-family: var(--font-condensed); font-size: 0.8125rem; font-weight: 500; letter-spacing: 0.01em; }
+.nav-item { font-weight: 400; border-radius: 2px; }
+.nav-item.nav-item-active {
+  border-color: transparent;
+  background-color: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--color-primary);
+  font-weight: 500;
+}
+:root[data-theme="dark"] .nav-item.nav-item-active { box-shadow: inset 2px 0 0 var(--accent-text); }
+
 /* ── Login screen background ───────────────────────────────────────────
-   Theme-aware, token-driven surface with soft radial accents. Light-mode
-   first; a deeper, cooler wash renders under [data-theme="dark"]. */
+   The bench itself, with a faint haemocytometer-style counting grid so the
+   sign-in reads as a lab instrument rather than a marketing page. */
 .login-bg {
   background-color: var(--color-background);
   background-image:
-    radial-gradient(48rem 48rem at 12% -12%, rgba(51, 113, 227, 0.10), transparent 60%),
-    radial-gradient(42rem 42rem at 108% 112%, rgba(51, 113, 227, 0.07), transparent 58%);
+    linear-gradient(color-mix(in srgb, var(--color-text) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--color-text) 6%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: -1px -1px;
 }
-:root[data-theme="dark"] .login-bg {
-  background-image:
-    radial-gradient(48rem 48rem at 12% -12%, rgba(51, 113, 227, 0.22), transparent 60%),
-    radial-gradient(42rem 42rem at 108% 112%, rgba(139, 92, 246, 0.18), transparent 58%);
-}
+
+.login-panel { border-radius: 4px; }
+.login-brand { background-color: var(--rail); color: var(--rail-ink); }
+.login-brand svg { color: var(--rail-ink-strong); }
+.login-wordmark { font-family: var(--font-condensed); font-size: 1.75rem; line-height: 1; font-weight: 600; color: var(--rail-ink-strong); }
 
 /* React Flow Controls & MiniMap Styling for Dark/Light Mode compatibility */
 .react-flow__controls {
   background-color: var(--color-surface) !important;
   border: 1px solid var(--color-border) !important;
-  border-radius: 8px !important;
+  border-radius: 4px !important;
   overflow: hidden !important;
-  box-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.18) !important;
+  box-shadow: var(--elev-2) !important;
 }
 
 .react-flow__controls-button {
@@ -428,7 +520,7 @@
 }
 
 .react-flow__controls-button:hover {
-  background-color: rgba(51, 113, 227, 0.08) !important;
+  background-color: var(--accent-soft) !important;
   color: var(--color-text) !important;
 }
 
@@ -439,8 +531,8 @@
 .react-flow__minimap {
   background-color: var(--color-surface) !important;
   border: 1px solid var(--color-border) !important;
-  border-radius: 8px !important;
-  box-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.18) !important;
+  border-radius: 4px !important;
+  box-shadow: var(--elev-2) !important;
 }
 
 .react-flow__minimap-mask {

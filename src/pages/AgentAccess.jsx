@@ -38,7 +38,7 @@ function StatusBadge({ status }) {
   const tone = status === 'active'
     ? 'border-success/30 bg-success/10 text-success'
     : 'border-border bg-surface text-textMuted';
-  return <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${tone}`}>{status}</span>;
+  return <span className={`rounded border px-2 py-0.5 text-xs font-medium ${tone}`}>{status}</span>;
 }
 
 export default function AgentAccess(props) {
@@ -294,7 +294,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
                 <div className="min-w-0 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="font-bold text-text">{d.agent.displayName}</p>
-                    <span className="rounded border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-bold uppercase text-violet-700 dark:text-violet-300">agent</span>
+                    <span className="rounded border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-700 dark:text-violet-300">agent</span>
                     <StatusBadge status={d.status} />
                   </div>
                   <p className="text-textMuted">Sponsor: {d.sponsor.displayName}{Number(d.sponsor.userId) === Number(userId) ? ' (you)' : ''}{d.agent.clientLabel ? ` · Client: ${d.agent.clientLabel}` : ''}</p>
@@ -381,7 +381,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
             <ul className="divide-y divide-border rounded-lg border border-border bg-surface text-xs">
               {audit.map(e => (
                 <li key={e.id} className="flex flex-wrap items-center gap-2 px-4 py-2 text-textMuted">
-                  <span className={`rounded border px-1.5 py-0.5 font-bold uppercase ${e.actor.kind === 'agent' ? 'border-violet-500/30 text-violet-700 dark:text-violet-300' : 'border-border'}`}>{e.actor.kind}</span>
+                  <span className={`rounded border px-1.5 py-0.5 font-medium ${e.actor.kind === 'agent' ? 'border-violet-500/30 text-violet-700 dark:text-violet-300' : 'border-border'}`}>{e.actor.kind}</span>
                   <span className="text-text">{e.actor.displayName || e.actor.principalId || e.actor.userId}</span>
                   <code>{e.action}</code>
                   <span className={e.decision === 'denied' ? 'text-danger' : ''}>{e.decision}{e.reasonCode ? ` (${e.reasonCode})` : ''}</span>

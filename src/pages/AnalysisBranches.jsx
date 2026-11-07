@@ -176,7 +176,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
         <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-5">
           <section className="space-y-3">
             <div className="rounded-xl border border-border bg-surface p-4">
-              <div className="text-xs font-bold uppercase tracking-wider text-textMuted">Final project analysis</div>
+              <div className="text-xs font-medium text-textMuted">Final project analysis</div>
               {finalProjectAnalysis ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-text">
                   <ShieldCheck size={18} className="text-success" />

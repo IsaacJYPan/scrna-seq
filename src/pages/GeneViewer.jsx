@@ -183,7 +183,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
                 aria-expanded={!!expandedCats[cat]} className="gene-category w-full flex items-center gap-2 px-2 py-1.5 text-xs font-bold text-slate-400 hover:text-text rounded hover:bg-white/5 transition-colors"
               >
                 {expandedCats[cat] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                <span className="uppercase tracking-wider">{cat}</span>
+                <span className="">{cat}</span>
                 <span className="ml-auto text-slate-400 font-mono text-[10px]">{genes.length}</span>
               </button>
               {expandedCats[cat] && (
@@ -192,7 +192,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
                     <button
                       key={g}
                       onClick={() => selectGene(g)}
-                      aria-pressed={activeGene === g} className={`gene-chip rounded font-bold uppercase tracking-wider transition-all border
+                      aria-pressed={activeGene === g} className={`gene-chip rounded font-medium transition-all border
                         ${activeGene === g 
                           ? 'bg-primary/20 border-primary text-primary' 
                           : 'bg-surface border-border text-textMuted hover:border-primary hover:text-text'}`}
@@ -259,7 +259,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
           <div className="flex-1 flex items-center justify-center ">
             <div className="text-center">
               <BarChart3 size={64} className="mx-auto mb-4" />
-              <p className="text-xl font-black text-slate-300 tracking-tight">Select a gene to visualize</p>
+              <p className="text-xl font-semibold text-slate-300 tracking-tight">Select a gene to visualize</p>
               <p className="text-sm text-slate-400 mt-2">Search by gene symbol or browse marker categories.</p>
             </div>
           </div>
@@ -271,10 +271,10 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
           <div className="flex-1">
             <div className="card p-3 sm:p-6 bg-surface">
               <div className="flex items-center gap-3 mb-4">
-                <span className="text-[10px] font-black text-primary uppercase tracking-[.2em]">
+                <span className="text-xs font-semibold text-primary">
                   {viewMode === 'violin' ? 'Violin Plot' : 'Feature Plot'}
                 </span>
-                <span className="text-lg font-black text-text">{activeGene}</span>
+                <span className="text-lg font-semibold text-text">{activeGene}</span>
               </div>
               <div ref={chart.ref} className="w-full h-[340px] sm:h-[440px]">
                 <Plot 

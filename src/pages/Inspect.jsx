@@ -254,7 +254,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         {legacyLiveMutationToolsEnabled && (
           <button
             onClick={() => { setMode('csv'); setResult(null); setError(null); }}
-            className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
+            className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-all ${
               mode === 'csv' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
             }`}
           >
@@ -263,7 +263,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         )}
         <button
           onClick={() => { setMode('map'); setResult(null); setError(null); }}
-          className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
+          className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-all ${
             mode === 'map' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
           }`}
         >
@@ -309,7 +309,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         <>
           {/* Key column */}
           <div>
-            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
               Barcode / Key Column
             </label>
             <select
@@ -323,7 +323,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
 
           {/* Value columns */}
           <div>
-            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+            <label className="block text-xs font-medium text-slate-400 mb-2">
               Columns to Import
             </label>
             <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
@@ -366,7 +366,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
 
           <div className="flex gap-4">
             <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
                 Source Column
               </label>
               <select
@@ -382,7 +382,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
             </div>
             
             <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
                 New Column Name
               </label>
               <input
@@ -397,7 +397,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
 
           {sourceCol && (
             <div>
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
                 Value Mapping
               </label>
               {loadingVals ? (
@@ -535,7 +535,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       </div>
 
       <div>
-        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">
           Subset by Column
         </label>
         <select
@@ -551,7 +551,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       {column && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+            <label className="text-xs font-medium text-slate-400">
               Select Values
             </label>
             {selected.length > 0 && (
@@ -601,7 +601,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       )}
 
       <div>
-        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">
           New analysis name
         </label>
         <input

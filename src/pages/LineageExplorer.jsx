@@ -114,7 +114,7 @@ function LineageNode({ data }) {
           <p className="truncate text-sm font-bold text-text">{data.label}</p>
         </div>
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold uppercase tracking-wide text-textMuted">
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-textMuted">
         <span>Saved analysis</span>
         <span className="normal-case tracking-normal" title={`Recorded analysis ID: ${data.id}`}>
           {data.recordedDate || `ID …${String(data.id).slice(-6)}`}
@@ -416,7 +416,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
               <div className="space-y-5">
                 <div>
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Selected analysis</p>
+                    <p className="text-xs font-semibold text-primary">Selected analysis</p>
                     {graph?.rootObjectId && nodeById.has(graph.rootObjectId) && selectedNodeId !== graph.rootObjectId && (
                       <button type="button" onClick={() => setSelectedNodeId(graph.rootObjectId)} className="text-xs font-bold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">Jump to root</button>
                     )}

@@ -102,7 +102,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
           </h3>
           <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
             <div>
-              <label htmlFor="norm-method" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Method</label>
+              <label htmlFor="norm-method" className="block text-xs text-textMuted mb-1.5 font-medium">Method</label>
               <select
                 id="norm-method"
                 value={method}
@@ -115,7 +115,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
               <p className="text-[10px] text-slate-400 mt-1">SCTransform handles depth variance better</p>
             </div>
             <div>
-              <label htmlFor="norm-scale-factor" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Scale Factor</label>
+              <label htmlFor="norm-scale-factor" className="block text-xs text-textMuted mb-1.5 font-medium">Scale Factor</label>
               <input
                 id="norm-scale-factor"
                 type="number" min="1" step="1" value={scaleFactor} aria-invalid={Boolean(validationError)}
@@ -126,7 +126,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
               <p className="text-[10px] text-slate-400 mt-1">{method === 'SCTransform' ? 'Not used with SCTransform' : 'Global scaling factor'}</p>
             </div>
             <div>
-              <label htmlFor="norm-n-features" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Variable Features</label>
+              <label htmlFor="norm-n-features" className="block text-xs text-textMuted mb-1.5 font-medium">Variable Features</label>
               <input
                 id="norm-n-features"
                 type="number" min="1" max="100000" step="1" value={nFeatures} aria-invalid={Boolean(validationError)}
@@ -145,7 +145,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
             </summary>
             <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-1 gap-6 md:grid-cols-2">
               <div>
-                <label htmlFor="norm-regress" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Vars to Regress</label>
+                <label htmlFor="norm-regress" className="block text-xs text-textMuted mb-1.5 font-medium">Vars to Regress</label>
                 <input
                   id="norm-regress"
                   type="text" 
@@ -182,15 +182,15 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
           </div>
           <div className="grid grid-cols-1 gap-4 font-mono text-sm sm:grid-cols-3">
             <div className="p-4 bg-black/5 dark:bg-black/20 border border-border/50 rounded text-center shadow-inner">
-              <div className="text-[10px] text-textMuted uppercase tracking-wider mb-1">Method</div>
+              <div className="text-xs text-textMuted mb-1">Method</div>
               <div className="text-primary font-bold">{result.result?.method || method}</div>
             </div>
             <div className="p-4 bg-black/5 dark:bg-black/20 border border-border/50 rounded text-center shadow-inner">
-              <div className="text-[10px] text-textMuted uppercase tracking-wider mb-1">Scale Factor</div>
+              <div className="text-xs text-textMuted mb-1">Scale Factor</div>
               <div className="text-text font-bold">{result.result?.scale_factor?.toLocaleString() || scaleFactor}</div>
             </div>
             <div className="p-4 bg-black/5 dark:bg-black/20 border border-border/50 rounded text-center shadow-inner">
-              <div className="text-[10px] text-textMuted uppercase tracking-wider mb-1">Variable Features</div>
+              <div className="text-xs text-textMuted mb-1">Variable Features</div>
               <div className="text-success font-bold">{result.result?.n_variable_features?.toLocaleString() || nFeatures}</div>
             </div>
           </div>

@@ -239,8 +239,8 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
           </button>}>
             <div className="mt-3 flex flex-wrap gap-2">
-              <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${roleBadge(actorRole)}`}>Your role: {actorRole || 'unknown'}</span>
-              <span className="rounded border border-border px-2 py-0.5 text-[10px] font-bold uppercase text-textMuted">{memberCountText}</span>
+              <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(actorRole)}`}>Your role: {actorRole || 'unknown'}</span>
+              <span className="rounded border border-border px-2 py-0.5 text-xs font-medium text-textMuted">{memberCountText}</span>
             </div>
         </PageHeader>
 
@@ -319,7 +319,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="truncate font-bold text-text">{member.displayName || member.email}</p>
                           {Number(member.userId) === Number(userId) && <span className="text-xs text-textMuted">(you)</span>}
-                          <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${roleBadge(member.role)}`}>{member.role}</span>
+                          <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(member.role)}`}>{member.role}</span>
                         </div>
                         <p className="mt-1 truncate text-sm text-textMuted">{member.email}</p>
                         <p className="mt-2 text-xs text-textMuted">{ROLE_HELP[member.role]}</p>

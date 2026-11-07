@@ -94,7 +94,7 @@ function badgeClass(tone = 'slate') {
 
 function StatusBadge({ children, tone = 'slate' }) {
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${badgeClass(tone)}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${badgeClass(tone)}`}>
       {children}
     </span>
   );
@@ -331,7 +331,7 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
     <div tabIndex={0} role="region" aria-label="Saved results table"
       className="overflow-x-auto rounded-lg border border-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2">
       <table className="min-w-[560px] w-full text-left text-xs">
-        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-slate-800 text-xs font-medium text-textMuted">
           <tr>
             <th className="p-3">Saved result</th>
             <th className="p-3">Status</th>
@@ -906,11 +906,11 @@ export default function ProjectHistory({
         <div className="rounded-lg border border-border bg-surface/40 p-3">
           <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-3 text-sm">
             <div>
-              <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
+              <div className="text-xs font-medium text-textMuted">Project</div>
               <div className="font-bold text-text">{activeProject?.name || 'Selected project'}</div>
             </div>
             <div>
-              <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Selected analysis</div>
+              <div className="text-xs font-medium text-textMuted">Selected analysis</div>
               <div className="text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
             </div>
             <details className="text-sm">

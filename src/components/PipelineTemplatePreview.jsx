@@ -119,7 +119,7 @@ export default function PipelineTemplatePreview({ manifest }) {
               <summary className="cursor-pointer px-4 py-3 font-bold text-text">{tab.label}</summary>
               <div className="grid gap-4 border-t border-border p-4 lg:grid-cols-2">
                 <fieldset disabled className="space-y-3">
-                  <legend className="mb-2 text-[10px] font-bold uppercase tracking-widest text-textMuted">Parameters</legend>
+                  <legend className="mb-2 text-xs font-medium text-textMuted">Parameters</legend>
                   {(tab.parameterSchema || []).length > 0 ? (tab.parameterSchema || []).map(parameter => (
                     <ParameterControl
                       key={parameter.key}
@@ -129,7 +129,7 @@ export default function PipelineTemplatePreview({ manifest }) {
                   )) : <p className="text-sm text-textMuted">No settings are needed for this step.</p>}
                 </fieldset>
                 <div>
-                  <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-textMuted">Result views</div>
+                  <div className="mb-2 text-xs font-medium text-textMuted">Result views</div>
                   <div className="space-y-3">
                     {(tab.resultViews || []).length > 0 ? (tab.resultViews || []).map((view, index) => (
                       <ResultView key={`${typeof view === 'string' ? view : view.type}-${index}`} view={view} />

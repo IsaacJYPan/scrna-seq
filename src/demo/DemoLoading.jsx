@@ -3,7 +3,7 @@ import { ArrowRight, Dna, Loader2 } from 'lucide-react';
 import './demo.css';
 
 export function DemoBrand() {
-  return <div className="demo-brand"><Dna size={23} /><span>TraceOmics</span><span className="demo-badge">DEMO</span></div>;
+  return <div className="demo-brand"><Dna size={23} /><span>TraceOmics</span><span className="demo-badge">Demo</span></div>;
 }
 
 export default function DemoLoading({ error, onRetry, message = 'Loading counts and QC metrics…' }) {

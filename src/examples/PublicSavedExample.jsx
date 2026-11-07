@@ -109,7 +109,7 @@ function ExampleContent({ manifest }) {
   const record = useCallback((id, value) => { records.current.set(id, value); }, []);
   const select = id => { setSelected(id); requestAnimationFrame(() => heading.current?.focus({ preventScroll: true })); };
   return <>
-    <section className="space-y-3"><p className="text-xs font-medium uppercase tracking-wide text-textMuted">Synthetic illustration · Version {manifest.version} · {manifest.provenance.license}</p>
+    <section className="space-y-3"><p className="text-xs font-medium text-textMuted">Synthetic illustration · Version {manifest.version} · {manifest.provenance.license}</p>
       <h1 className="break-words text-2xl font-semibold">{manifest.title}</h1>
       <h2 className="text-sm font-semibold">Research question</h2><p className="whitespace-pre-wrap break-words text-sm">{manifest.question}</p>
       <p className="text-sm text-textMuted">{manifest.provenance.notice}</p>

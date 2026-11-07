@@ -69,8 +69,7 @@ export default function AccountSecurity({ user, onPasswordChanged, onSessionInva
     <div className="h-full overflow-y-auto bg-background p-6 lg:p-10">
       <div className="mx-auto max-w-3xl space-y-6">
         <header>
-          <p className="mb-2 text-xs font-bold uppercase tracking-[0.16em] text-primary">Account</p>
-          <h2 className="text-2xl font-bold tracking-tight text-text">Security</h2>
+          <h2 className="page-title">Account security</h2>
           <p className="mt-2 text-sm leading-6 text-textMuted">
             Manage the credential for <span className="font-medium text-text">{user?.email}</span>.
           </p>

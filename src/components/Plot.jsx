@@ -94,11 +94,11 @@ export function isWebGLFailure(error) {
 export function getPlotHoverStyle(theme = 'light') {
   const isDark = theme === 'dark';
   return {
-    bgcolor: isDark ? '#182236' : '#ffffff',
-    bordercolor: isDark ? '#34445d' : '#cbd5e1',
+    bgcolor: isDark ? '#142023' : '#ffffff',
+    bordercolor: isDark ? '#2b3d40' : '#c3cdc9',
     font: {
-      color: isDark ? '#f1f5f9' : '#334155',
-      family: 'Inter, system-ui',
+      color: isDark ? '#e3ebe8' : '#15201e',
+      family: '"IBM Plex Sans", system-ui, sans-serif',
       size: 12,
     },
   };

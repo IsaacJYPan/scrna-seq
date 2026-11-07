@@ -272,7 +272,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
         {studies.length === 0 ? <p className="text-sm text-textMuted">No studies yet.</p> : studies.map((s) => (
           <article key={s.id} className="rounded-lg border border-border bg-surface p-4 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="font-bold text-text">{s.name} <span className="ml-1 text-xs uppercase text-textMuted">{s.status}</span></p>
+              <p className="font-bold text-text">{s.name} <span className="ml-1 text-xs text-textMuted">{s.status}</span></p>
               {s.status === 'open' && canWrite && <button type="button" disabled={Boolean(busy)} onClick={() => act(`close:${s.id}`, () => api.closeStudy(projectId, s.id))} className="btn btn-secondary text-sm">Close study</button>}
             </div>
             <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours · Runs on {s.executionTarget === 'slurm' ? 'Slurm' : 'this installation'}{s.sourceStudyId ? ` · Builds on ${studyName(s.sourceStudyId)}` : ''}</p>
@@ -310,9 +310,9 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
                       {choiceKeys.map((k) => <td key={k} className="py-2 pr-3 text-text">{r.choices?.[k] === undefined ? 'default' : String(r.choices[k])}</td>)}
                       {metrics.map((k) => <td key={k} className="py-2 pr-3 text-text">{formatMetric(r.summary?.[k])}</td>)}
                       <td className="py-2 pr-3 text-textMuted">{r.agent.displayName}</td>
-                      <td className="py-2 pr-3"><span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span></td>
+                      <td className="py-2 pr-3"><span className={`rounded border px-2 py-0.5 text-xs font-medium ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span></td>
                       <td className="space-x-2 whitespace-nowrap py-2 text-right">
-                        {recommended === r.id && <span className="rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-bold uppercase text-primary">Best by rule</span>}
+                        {recommended === r.id && <span className="rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">Best by rule</span>}
                         {r.resultAnalysisObjectId && onOpenResult && (
                           <button type="button" onClick={() => onOpenResult(r.resultAnalysisObjectId)} className="btn btn-secondary text-xs">Open in workspace</button>
                         )}

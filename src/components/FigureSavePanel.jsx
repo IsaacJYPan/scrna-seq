@@ -41,7 +41,7 @@ function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true })
         className="w-full flex items-center gap-2 px-4 py-3 bg-surface/60 hover:bg-surface text-left transition-colors"
       >
         {Icon && <Icon size={14} className="text-primary shrink-0" />}
-        <span className="text-xs font-bold text-text uppercase tracking-wider flex-1">{title}</span>
+        <span className="text-xs font-medium text-text flex-1">{title}</span>
         {open ? <ChevronDown size={14} className="text-textMuted" /> : <ChevronRight size={14} className="text-textMuted" />}
       </button>
       {open && <div className="p-4 space-y-4">{children}</div>}
@@ -492,7 +492,7 @@ export default function FigureSavePanel({
                     <button
                       key={f}
                       onClick={() => setFormat(f)}
-                      className={`flex-1 py-1.5 rounded text-xs font-bold uppercase border transition-all ${
+                      className={`flex-1 py-1.5 rounded text-xs font-medium border transition-all ${
                         format === f ? 'border-primary bg-primary/10 text-primary' : 'border-border text-textMuted'
                       }`}
                     >{f}</button>
@@ -544,7 +544,7 @@ export default function FigureSavePanel({
             {/* Preview card — white background mimics publication */}
             <div className="flex-1 relative flex flex-col">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-bold text-textMuted uppercase tracking-wider">Preview (white background)</span>
+                <span className="text-xs font-medium text-textMuted">Preview (white background)</span>
                 <button
                   onClick={() => refreshPreview(buildParams())}
                   disabled={previewLoading || Boolean(previewUnavailableReason)}

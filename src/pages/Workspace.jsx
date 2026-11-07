@@ -411,7 +411,7 @@ function LoadModal({
             {/* Header */}
             <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800 flex-shrink-0">
               <div>
-                <h3 id="multi-sample-loader-title" className="text-lg font-black text-white tracking-tight flex items-center gap-2">
+                <h3 id="multi-sample-loader-title" className="text-lg font-semibold text-white tracking-tight flex items-center gap-2">
                   <FolderTree size={18} className="text-cyan-400" />
                   Configure Multi-Sample Merge
                 </h3>
@@ -435,18 +435,18 @@ function LoadModal({
             {/* Metadata column + filter params */}
             <div className="px-7 pt-5 pb-3 flex flex-col gap-3 border-b border-slate-800 flex-shrink-0">
               <div className="flex justify-between items-center mb-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Global Settings</label>
+                <label className="text-xs font-semibold text-slate-400">Global Settings</label>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={scanRoot10X}
                     title="Pick a root folder and auto-discover all nested 10X data directories"
-                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-violet-500/10 border border-violet-500/20 text-violet-400 text-[10px] font-black uppercase hover:bg-violet-500/20 transition-colors"
+                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs font-semibold hover:bg-violet-500/20 transition-colors"
                   >
                     <Search size={12} /> Scan Root Folder
                   </button>
                   <button
                     onClick={addMore10X}
-                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-[10px] font-black uppercase hover:bg-cyan-500/20 transition-colors"
+                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-xs font-semibold hover:bg-cyan-500/20 transition-colors"
                   >
                     <Plus size={12} /> Add Manually
                   </button>
@@ -485,7 +485,7 @@ function LoadModal({
             {/* Sample list */}
             <div className="flex-1 overflow-x-auto overflow-y-auto custom-scrollbar px-7 py-4 space-y-2">
               <div 
-                className="grid gap-x-4 gap-y-2 items-center text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 px-1 pb-2 border-b border-slate-700/50"
+                className="grid gap-x-4 gap-y-2 items-center text-xs font-medium text-slate-400 mb-2 px-1 pb-2 border-b border-slate-700/50"
                 style={{ gridTemplateColumns: `auto minmax(200px, 2fr) ${'minmax(120px, 1fr) '.repeat(extraMetaCols.length)}auto` }}
               >
                 <span className="w-6 text-center">#</span>
@@ -514,7 +514,7 @@ function LoadModal({
                   className="grid gap-x-4 gap-y-2 items-center p-3 rounded-xl bg-slate-800/60 border border-slate-700/50 group/row hover:bg-slate-800/80 transition-colors"
                   style={{ gridTemplateColumns: `auto minmax(200px, 2fr) ${'minmax(120px, 1fr) '.repeat(extraMetaCols.length)}auto` }}
                 >
-                  <span className="text-[10px] font-black text-cyan-400 w-6 text-center flex-shrink-0">{i + 1}</span>
+                  <span className="text-[10px] font-semibold text-cyan-400 w-6 text-center flex-shrink-0">{i + 1}</span>
                   <div className="min-w-0">
                     <input
                       type="text"
@@ -582,7 +582,7 @@ function LoadModal({
           {/* Header */}
           <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800">
             <div>
-              <h3 id="dataset-loader-title" className="text-lg font-black text-white tracking-tight">Load saved analysis</h3>
+              <h3 id="dataset-loader-title" className="text-lg font-semibold text-white tracking-tight">Load saved analysis</h3>
               <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a saved analysis and open a private analysis workspace.</p>
             </div>
             <button onClick={requestClose} disabled={isLoading} aria-label="Close demo loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
@@ -602,7 +602,7 @@ function LoadModal({
           <div className="px-7 pt-4">
             <button
               onClick={() => setShowFilters(v => !v)}
-              className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white transition"
+              className="flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white transition"
             >
               <SlidersHorizontal size={11} />
               Filter Parameters
@@ -653,7 +653,7 @@ function LoadModal({
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2 mb-0.5">
                       <span className="font-bold text-text text-sm">{opt.title}</span>
-                      <span role={active ? 'status' : undefined} className={`text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide ${opt.tagColor}`}>
+                      <span role={active ? 'status' : undefined} className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${opt.tagColor}`}>
                         {active ? <>Loading…<span className="sr-only"> {opt.title}</span></> : opt.tag}
                       </span>
                     </div>
@@ -680,7 +680,7 @@ function StatusPill({ label, tone = 'slate' }) {
     slate: 'bg-slate-800 text-slate-300 border-slate-700',
   };
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${tones[tone] || tones.slate}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold ${tones[tone] || tones.slate}`}>
       {label}
     </span>
   );
@@ -1540,7 +1540,7 @@ export function SeuratPipelinePanel({
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
                     <div key={key} className="rounded border border-border bg-surface p-2">
-                      <div className="font-bold uppercase tracking-wide text-textMuted">{key}</div>
+                      <div className="font-medium text-textMuted">{key}</div>
                       <div className="mt-1 truncate text-text">{Array.isArray(value) ? value.join(', ') : String(value)}</div>
                     </div>
                   ))}
@@ -1998,7 +1998,7 @@ export default function Workspace({
                   >
                     <div className="flex flex-col">
                       <span className="font-bold text-sm">{proj.name}</span>
-                      {proj.role && <span className="text-[9px] font-semibold uppercase px-1.5 py-px rounded bg-blue-600 text-on-accent">{proj.role}</span>}
+                      {proj.role && <span className="mt-0.5 self-start text-xs capitalize px-1.5 rounded-sm border border-primary/40 text-primary">{proj.role}</span>}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -2112,7 +2112,7 @@ export default function Workspace({
                           <>
                             <div className="text-sm font-bold text-text break-words" title={obj.name}>{obj.name}</div>
                             {obj.isSubset && (
-                              <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-amber-400 bg-amber-500/10 border-amber-500/20">
+                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/10 border-amber-500/20">
                                 subset
                               </span>
                             )}
@@ -2129,7 +2129,7 @@ export default function Workspace({
                         )}
                       </div>
                       <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                        <span className="text-[10px] text-primary font-bold uppercase">
+                        <span className="text-xs text-primary font-medium">
                           {Number.isFinite(obj.cells) && Number.isFinite(obj.features)
                             ? `${obj.cells.toLocaleString()} cells × ${obj.features.toLocaleString()} features`
                             : 'Dimensions unavailable'}
@@ -2141,12 +2141,12 @@ export default function Workspace({
                         {obj.isBackendAnalysisObject && (
                           <>
                             <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-text bg-primary/10 border-primary/20">
+                            <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded border text-text bg-primary/10 border-primary/20">
                               Saved
                             </span>
                           </>
                         )}
-                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide ${
+                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${
                           obj.liveState === 'attached'
                             ? 'text-success bg-success/10 border-success/30'
                             : 'text-amber-400 bg-amber-500/10 border-amber-500/30'
@@ -2160,7 +2160,7 @@ export default function Workspace({
                     <div className="flex items-center gap-3 flex-shrink-0 relative">
 
                       {isSelected && (
-                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-text uppercase shadow-sm">
+                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-semibold text-text shadow-sm">
                           <CheckCircle size={10} /> Selected
                         </div>
                       )}
@@ -2188,7 +2188,7 @@ export default function Workspace({
                             {!obj.isBackendAnalysisObject && currentWs.projects?.length > 1 && (
                               <>
                                 <div className="h-px bg-slate-700/50 my-1" />
-                                <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                <div className="px-3 py-1.5 text-xs font-medium text-slate-400">
                                   Move to Project
                                 </div>
                                 {currentWs.projects.map(p => (

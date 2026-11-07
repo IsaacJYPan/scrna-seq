@@ -113,7 +113,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
   };
 
   const inputBase =
-    'w-full rounded-xl border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
+    'w-full rounded-lg border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
   const tabBase =
     'py-2 rounded-lg text-sm font-medium transition-colors';
 
@@ -125,34 +125,35 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
         aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         onClick={() => setTheme?.(isDark ? 'light' : 'dark')}
-        className="absolute top-5 right-5 z-20 w-10 h-10 rounded-full border border-border bg-surface/80 backdrop-blur text-textMuted hover:text-text hover:border-primary/40 transition-colors flex items-center justify-center"
+        className="absolute top-5 right-5 z-20 w-10 h-10 rounded-lg border border-border bg-surface/80 backdrop-blur text-textMuted hover:text-text hover:border-primary/40 transition-colors flex items-center justify-center"
       >
         {isDark ? <Sun size={18} /> : <Moon size={18} />}
       </button>
 
       <div className="w-full max-w-sm relative z-10 my-auto shrink-0">
-        {/* Brand */}
-        <div className="flex flex-col items-center text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 border border-primary/20 mb-4">
-            <Microscope size={30} className="text-primary" />
+        <div className="login-panel overflow-hidden border border-border bg-surface">
+        {/* Brand: the same petrol band that frames the workbench */}
+        <div className="login-brand px-6 pb-5 pt-6 sm:px-7">
+          <div className="flex items-center gap-2.5">
+            <Microscope size={22} strokeWidth={1.75} aria-hidden="true" />
+            <h1 className="login-wordmark">TraceOmics</h1>
           </div>
-          <h1 className="text-2xl font-bold text-text tracking-tight">TraceOmics</h1>
-          <p className="text-textMuted text-sm mt-1.5">Reproducible Single-Cell Analysis Workbench</p>
+          <p className="mt-2 text-sm">Seurat analysis with every run, setting, and figure on record.</p>
         </div>
 
         {/* Card */}
-        <div className="bg-surface border border-border rounded-2xl shadow-xl shadow-slate-900/5 p-6 sm:p-7">
+        <div className="p-6 sm:p-7">
           {/* Mode Toggle — segmented control */}
-          {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-xl">
+          {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-lg">
             <button
               onClick={() => { setMode('login'); setPasswordConfirmation(''); setError(''); setSuccess(''); }}
-              className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
+              className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text ring-1 ring-border' : 'text-textMuted hover:text-text'}`}
             >
               Log In
             </button>
               <button
                 onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
-                className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
+                className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text ring-1 ring-border' : 'text-textMuted hover:text-text'}`}
               >
                 Sign Up
               </button>
@@ -165,7 +166,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           )}
 
           {demoMode && allowDemo && (
-            <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 p-4 text-center">
+            <div className="mb-5 rounded-lg border border-primary/25 bg-primary/5 p-4 text-center">
               <p className="text-xs text-textMuted">Explore a curated, temporary single-cell project. Uploads and Expert R are disabled.</p>
               <button
                 type="button"
@@ -179,7 +180,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           )}
 
           {notice && (
-            <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+            <div role="status" className="mb-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
               <AlertTriangle size={15} className="flex-shrink-0" />
               {notice}
             </div>
@@ -281,14 +282,14 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             )}
 
             {error && (
-              <div role="alert" className="flex items-center gap-2 p-3 bg-danger/10 border border-danger/30 rounded-xl text-xs text-danger">
+              <div role="alert" className="flex items-center gap-2 p-3 bg-danger/10 border border-danger/30 rounded-lg text-xs text-danger">
                 <AlertTriangle size={15} className="flex-shrink-0" />
                 {error}
               </div>
             )}
 
             {success && (
-              <div role="status" className="flex items-center gap-2 p-3 bg-success/10 border border-success/30 rounded-xl text-xs text-success">
+              <div role="status" className="flex items-center gap-2 p-3 bg-success/10 border border-success/30 rounded-lg text-xs text-success">
                 <CheckCircle size={15} className="flex-shrink-0" />
                 {success}
               </div>
@@ -297,7 +298,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             <button
               type="submit"
               disabled={loading || !emailValid || !password || (mode === 'signup' && (!passwordMeetsLength || !passwordsMatch))}
-              className="w-full bg-primary hover:bg-[#0077ed] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold py-3.5 rounded-xl transition-colors flex items-center justify-center gap-2.5"
+              className="btn-primary w-full bg-primary disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2.5"
             >
               {loading ? <>
                 <div aria-hidden="true" className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -311,9 +312,10 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           </form>
           {publicExampleUrl && <div className="mt-5 border-t border-border pt-4 text-center">
             <a href={publicExampleUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-primary underline">Inspect a public saved example</a>
-            <p className="mt-1 text-xs text-textMuted">Synthetic findings · No sign-in or compute session · Opens a new tab</p>
+            <p className="mt-1 text-xs text-textMuted">Synthetic findings. No sign-in or compute session needed; opens in a new tab.</p>
           </div>}
 
+        </div>
         </div>
       </div>
     </div>

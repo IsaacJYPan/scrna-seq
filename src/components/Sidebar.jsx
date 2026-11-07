@@ -30,11 +30,11 @@ function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }
     aria-describedby={item.lockReason ? `${item.id}-dependency` : undefined}
     title={item.status || researcherLabel(item.label)}
     aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
-    className={`relative w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] font-medium transition-colors group
+    className={`nav-item relative w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] transition-colors group
       ${isDisabled ? 'cursor-not-allowed' : ''} ${isDisabled && !item.lockReason ? 'opacity-45' : ''}
-      ${isActive ? 'border-primary/30 bg-primary/10 text-text' : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
+      ${isActive ? 'nav-item-active border-primary/30 bg-primary/10 text-text' : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
   >
-    {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
+    {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-textMuted'} group-hover:text-text flex-shrink-0`} strokeWidth={1.75} />}
     <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
     {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
     {item.lockReason && <>
@@ -50,7 +50,7 @@ function NavSection({ id, label, open, active, onToggle, children }) {
   return <section className="space-y-1">
     <button type="button" onClick={onToggle} aria-expanded={open} aria-controls={`navigation-group-${id}`}
       aria-disabled={active || undefined} title={active ? 'This group contains the current page' : undefined}
-      className="flex min-h-9 w-full items-center gap-2 rounded px-2 text-left text-xs font-semibold text-textMuted hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+      className="nav-group-label flex min-h-9 w-full items-center gap-2 rounded px-2 text-left text-textMuted hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
       <ChevronDown size={14} className={`shrink-0 transition-transform motion-reduce:transition-none ${open ? '' : '-rotate-90'}`} aria-hidden="true" />
       <span className="min-w-0 flex-1 break-words leading-relaxed">{label}</span>
     </button>
@@ -198,9 +198,9 @@ export default function Sidebar({
 
   return (
     <div ref={shellRef} onKeyDown={handleDrawerKeyDown} className="relative z-20 flex h-14 w-full shrink-0 sm:h-full sm:w-[72px] lg:w-auto">
-      <nav aria-label="Account and navigation controls" inert={isNarrow && !isCollapsed} className="relative z-50 flex h-14 w-full shrink-0 items-center gap-2 border-b border-border bg-background px-3 sm:h-full sm:w-[72px] sm:flex-col sm:border-b-0 sm:border-r sm:px-0 sm:py-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary shadow-sm sm:mb-1 sm:h-11 sm:w-11" title="TraceOmics">
-          <Microscope size={22} className="text-on-accent" />
+      <nav aria-label="Account and navigation controls" inert={isNarrow && !isCollapsed} className="nav-rail relative z-50 flex h-14 w-full shrink-0 items-center gap-2 px-3 sm:h-full sm:w-[72px] sm:flex-col sm:px-0 sm:py-3">
+        <div className="nav-rail-mark flex h-9 w-9 shrink-0 items-center justify-center sm:mb-1 sm:h-11 sm:w-11" title="TraceOmics">
+          <Microscope size={22} strokeWidth={1.75} aria-hidden="true" />
         </div>
 
           <button
@@ -211,14 +211,14 @@ export default function Sidebar({
             aria-controls="workspace-navigation"
             aria-expanded={!isCollapsed}
             hidden={!isCollapsed}
-            className={`h-11 w-11 shrink-0 rounded-md bg-surface border border-border text-textMuted hover:bg-black/5 hover:text-text dark:hover:bg-slate-700 transition-colors items-center justify-center shadow-sm ${isCollapsed ? 'flex' : 'hidden'}`}
+            className={`nav-rail-button h-11 w-11 shrink-0 rounded-md transition-colors items-center justify-center ${isCollapsed ? 'flex' : 'hidden'}`}
             title="Expand sidebar"
           >
             <Menu size={16} />
           </button>
 
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-text sm:hidden">{currentWorkspace?.name || 'TraceOmics'}</span>
-        <div className="my-1 hidden h-0.5 w-8 rounded-full bg-black/10 dark:bg-slate-800 sm:block" />
+        <span className="nav-rail-title min-w-0 flex-1 truncate text-sm font-semibold sm:hidden">{currentWorkspace?.name || 'TraceOmics'}</span>
+        <div className="nav-rail-divider my-1 hidden h-px w-8 sm:block" />
 
         <div className="hidden flex-1 sm:block" />
 
@@ -226,7 +226,7 @@ export default function Sidebar({
           <div className="relative mb-2 mt-auto hidden w-full flex-col items-center gap-2 sm:flex">
             <button
               aria-label="Account security"
-              className={`w-11 h-11 rounded-xl transition-colors duration-150 flex items-center justify-center ${activeTab === 'account' ? 'bg-primary/10 text-primary' : 'bg-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
+              className={`nav-rail-button w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center ${activeTab === 'account' ? 'nav-rail-button-active' : ''}`}
               onClick={() => { setActiveTab('account'); collapseAfterMobileNavigation(); }}
               title="Account security"
             >
@@ -234,7 +234,7 @@ export default function Sidebar({
             </button>
             <button
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="w-11 h-11 rounded-xl bg-transparent hover:bg-black/5 transition-colors duration-150 flex items-center justify-center text-textMuted hover:text-text"
+              className="nav-rail-button w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
               onClick={() => setTheme?.(theme === 'dark' ? 'light' : 'dark')}
               title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
             >
@@ -242,7 +242,7 @@ export default function Sidebar({
             </button>
             <button
               aria-label="Log out"
-              className="w-11 h-11 rounded-xl bg-transparent hover:bg-danger hover:text-on-accent transition-colors duration-150 flex items-center justify-center text-textMuted"
+              className="nav-rail-button nav-rail-button-danger w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
               onClick={onLogout}
               title="Log Out"
             >
@@ -266,7 +266,7 @@ export default function Sidebar({
         aria-modal={isNarrow && !isCollapsed ? true : undefined}
         aria-hidden={isCollapsed || undefined}
         inert={isCollapsed}
-        className={`fixed bottom-0 left-0 top-14 z-40 w-[min(320px,100vw)] overflow-hidden bg-surface shadow-xl transition-[width,transform] duration-200 ease-out motion-reduce:transition-none sm:left-[72px] sm:top-0 sm:w-60 lg:static lg:h-full lg:shadow-none ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0 lg:translate-x-0' : 'translate-x-0 lg:w-60'}`}
+        className={`fixed bottom-0 left-0 top-14 z-40 w-[min(320px,100vw)] overflow-hidden bg-surface shadow-xl transition-[width,transform] duration-200 ease-out motion-reduce:transition-none sm:left-[72px] sm:top-0 sm:w-60 lg:static lg:h-full lg:shadow-none lg:border-r lg:border-border ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0 lg:translate-x-0' : 'translate-x-0 lg:w-60'}`}
       >
         <div className="flex h-full w-[min(320px,100vw)] flex-col sm:w-60">
         <button
@@ -276,7 +276,7 @@ export default function Sidebar({
           className="h-12 w-full shrink-0 flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
           onClick={() => setIsCollapsed(true)}
         >
-          <span className="text-[15px] font-semibold text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'TraceOmics'}</span>
+          <span className="nav-workspace-name text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'TraceOmics'}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 

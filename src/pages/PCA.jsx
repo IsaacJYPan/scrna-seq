@@ -175,7 +175,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
             <BarChart3 size={18} className="text-primary" /> PCA Parameters
           </h3>
           <div className="max-w-xs">
-            <label htmlFor="pca-npcs" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of PCs</label>
+            <label htmlFor="pca-npcs" className="block text-xs text-textMuted mb-1.5 font-medium">Number of PCs</label>
             <input
               id="pca-npcs"
               type="number" value={inputNpcs} min={5} max={100} step={1}
@@ -262,11 +262,11 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           {activeView === 'loadings' && (
             <div className="card overflow-hidden">
               <div className="p-4 border-b border-border bg-black/5 dark:bg-slate-800/40">
-                <h4 className="font-bold text-text text-xs uppercase tracking-widest">Top Gene Loadings per PC</h4>
+                <h4 className="font-medium text-text text-xs">Top Gene Loadings per PC</h4>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-black/5 dark:bg-black/20 text-textMuted font-bold uppercase border-b border-border">
+                  <thead className="bg-black/5 dark:bg-black/20 text-textMuted font-medium border-b border-border">
                     <tr>
                       <th className="p-3">Rank</th>
                       {Object.keys(loadings).map(pc => (
