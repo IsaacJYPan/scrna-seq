@@ -8,7 +8,7 @@ export function ConditionsForm({ conditions, conditionName, setConditionName, bu
       <div className="flex flex-wrap gap-2">
         {conditions.map((item) => (
           <span
-            className="max-w-full break-words rounded-full border border-border bg-background px-3 py-1 text-sm"
+            className="max-w-full break-words rounded border border-border bg-background px-2.5 py-1 text-sm"
             key={item.id}
           >
             {item.name}

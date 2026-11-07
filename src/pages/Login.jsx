@@ -188,7 +188,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
           <form onSubmit={handleSubmit} aria-busy={loading} className="space-y-4">
             {mode === 'signup' && (
               <div className="space-y-1.5">
-                <label htmlFor="signup-name" className="text-sm font-medium text-textMuted ml-0.5">Full name</label>
+                <label htmlFor="signup-name" className="text-sm font-medium text-text">Full name</label>
                 <div className="relative group">
                   <input
                   id="signup-name"
@@ -205,7 +205,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             )}
 
             <div className="space-y-1.5">
-              <label htmlFor="login-email" className="text-sm font-medium text-textMuted ml-0.5">Email</label>
+              <label htmlFor="login-email" className="text-sm font-medium text-text">Email</label>
               <div className="relative group">
                 <input
                   id="login-email"
@@ -223,7 +223,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="login-password" className="text-sm font-medium text-textMuted ml-0.5">Password</label>
+              <label htmlFor="login-password" className="text-sm font-medium text-text">Password</label>
               <div className="relative group">
                 <input
                   id="login-password"
@@ -234,7 +234,6 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   className={`${inputBase} pr-11 ${(mode === 'signup' && password && !passwordMeetsLength) ? 'border-danger focus:border-danger' : 'border-border focus:border-primary'}`}
-                  placeholder="••••••••••••"
                 />
                 <button
                   type="button"
@@ -254,7 +253,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
 
             {mode === 'signup' && (
               <div className="space-y-1.5">
-                <label htmlFor="signup-password-confirmation" className="text-sm font-medium text-textMuted ml-0.5">
+                <label htmlFor="signup-password-confirmation" className="text-sm font-medium text-text">
                   Confirm password
                 </label>
                 <div className="relative group">

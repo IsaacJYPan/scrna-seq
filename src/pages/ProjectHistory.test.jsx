@@ -148,7 +148,6 @@ describe('ProjectHistory', () => {
 
     expect(screen.getByText('Runs & results')).toBeInTheDocument();
     expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Viewing history never opens another researcher’s private workspace/i)).toBeInTheDocument();
     expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
     expect(screen.getByText(/Inspect or import artifact files/i)).toBeInTheDocument();
 
@@ -339,7 +338,7 @@ describe('ProjectHistory', () => {
       expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_fork123');
       expect(setActiveTab).toHaveBeenCalledWith('workspace');
     });
-    expect(screen.getByText(/leaves the original unchanged/i)).toBeInTheDocument();
+    expect(screen.getByText(/the original is unchanged/i)).toBeInTheDocument();
   });
 
   it('shows a project-scoped empty state when no project is selected', () => {

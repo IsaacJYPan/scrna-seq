@@ -236,7 +236,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
           </button>}>
             <div className="mt-3 flex flex-wrap gap-2">
               {actorRole && <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(actorRole)}`}>Your role: {actorRole}</span>}
-              <span className="rounded border border-border px-2 py-0.5 text-xs font-medium text-textMuted">{memberCountText}</span>
+              {members.length > 0 && <span className="rounded border border-border px-2 py-0.5 text-xs font-medium text-textMuted">{memberCountText}</span>}
             </div>
         </PageHeader>
 
@@ -292,7 +292,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
           {loading && members.length === 0 ? (
             <div className="flex h-40 items-center justify-center rounded-lg border border-border bg-surface"><Loader2 size={28} className="animate-spin text-primary" /></div>
           ) : members.length === 0 ? (
-            <div className="empty-note text-sm text-textMuted">No member list is available.</div>
+            <p className="text-sm text-textMuted">The member list could not be loaded. Refresh to try again.</p>
           ) : (
             <div className="space-y-2">
               {members.map(member => {

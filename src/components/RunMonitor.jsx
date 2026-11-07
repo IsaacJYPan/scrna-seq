@@ -227,7 +227,7 @@ export default function RunMonitor({ projectId, userId }) {
         </button></li>)}
         </ul>
         {loading && <p role="status" className="text-sm">Loading run observations…</p>}
-        {!loading && !visibleItems.length && <p className="text-sm text-textMuted">No jobs or private R commands are available for your account in this project.</p>}
+        {!loading && !visibleItems.length && <p className="text-sm text-textMuted">You have no server jobs or R commands in this project.</p>}
         {scopeMatches && cursor && <button type="button" className="btn btn-secondary text-xs" disabled={connection.blocked || loading} onClick={() => readList(cursor)}>More monitored runs</button>}
       </div>
       <section aria-label="Selected run monitoring" className="min-w-0 space-y-3">
@@ -267,7 +267,7 @@ export default function RunMonitor({ projectId, userId }) {
             {visibleDetail.kernel && <><dt>Kernel</dt><dd className="break-all">{visibleDetail.kernel.id}</dd><dt>Generation</dt><dd className="break-all">{visibleDetail.kernel.generation}</dd><dt>Command order</dt><dd>{visibleDetail.kernel.order}</dd></>}
           </dl></details>}
         </>}
-        {!visibleDetail && !checking && <p className="text-sm text-textMuted">Select your run to inspect its current server observations.</p>}
+        {!visibleDetail && !checking && visibleItems.length > 0 && <p className="text-sm text-textMuted">Select your run to inspect its current server observations.</p>}
       </section>
     </div>
   </section>;

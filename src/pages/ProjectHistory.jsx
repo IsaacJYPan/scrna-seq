@@ -186,9 +186,9 @@ function Section({ title, subtitle, children }) {
 
 function EmptyState({ title, children }) {
   return (
-    <div className="empty-note">
-      <p className="font-semibold text-text">{title}</p>
-      <p className="mt-1 text-sm text-textMuted">{children}</p>
+    <div className="border-t border-border pt-3 text-sm">
+      <p className="font-medium text-text">{title}</p>
+      <p className="mt-0.5 text-textMuted">{children}</p>
     </div>
   );
 }
@@ -898,8 +898,7 @@ export default function ProjectHistory({
         } />
 
         <p className="text-sm text-textMuted">
-          Selected analysis: <span className="font-medium text-text">{selectedObject?.displayName || selectedObject?.name || 'none'}</span>.
-          {' '}Viewing history never opens another researcher’s private workspace.
+          Selected analysis: <span className="font-medium text-text">{selectedObject?.displayName || selectedObject?.name || 'none'}</span>
         </p>
 
         <SubmissionRecovery projectId={activeProjectId} userId={userId} />
@@ -988,7 +987,7 @@ export default function ProjectHistory({
               />
             </Section>
 
-            <Section title="Saved results for this analysis" subtitle="Reviewed result tables and R bundles can be downloaded. Saved versions stay on the server.">
+            <Section title="Saved results for this analysis" subtitle="Reviewed result tables and R bundles can be downloaded.">
               <ArtifactList
                 artifacts={selectedArtifacts}
                 jobs={historyState.jobs}
@@ -1018,10 +1017,10 @@ export default function ProjectHistory({
                 className="flex min-h-10 w-full items-center justify-between gap-3 text-left"
               >
                 <span>
-                  <span className="block font-semibold text-text">Execution history</span>
-                  <span className="block text-xs text-textMuted">Recorded inputs, methods, environments, and results</span>
+                  <span className="block text-lg font-semibold text-text">Execution history</span>
+                  <span className="block text-sm text-textMuted">Recorded inputs, methods, environments, and results.</span>
                 </span>
-                <span className="text-sm text-primary">{executionHistoryOpen ? 'Hide details' : 'Show details'}</span>
+                <span className="btn btn-ghost pointer-events-none">{executionHistoryOpen ? 'Hide details' : 'Show details'}</span>
               </button>
               <div id="execution-history-panel" hidden={!executionHistoryOpen} className="mt-3">
                 {executionHistoryMounted && (
@@ -1054,7 +1053,7 @@ export default function ProjectHistory({
               </details>
             )}
 
-            <Section title="Lineage" subtitle="How saved analyses relate. Branching from a saved version creates a new analysis in your own workspace and leaves the original unchanged.">
+            <Section title="Lineage" subtitle="How saved analyses relate. A branch is a new analysis in your workspace; the original is unchanged.">
               <LineageSummary lineage={historyState.lineage} selectedObjectId={selectedObjectId} />
             </Section>
 
