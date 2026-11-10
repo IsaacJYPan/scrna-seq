@@ -527,6 +527,18 @@ async function exploratoryAnalysisHandler(ctx) {
     logger: ctx.logger,
     callR: ctx.callR,
   });
+  if(descriptor.figureBundle){
+    const fs=require('node:fs'),crypto=require('node:crypto');
+    const key=require('../storage').projectStorageFileKey(job.projectId,'checkpoints',job.id,'standard-figure.json');
+    const target=ctx.resolveStorageWritePath(key);fs.mkdirSync(require('node:path').dirname(target),{recursive:true});
+    const bytes=Buffer.from(JSON.stringify({...descriptor.figureBundle,provenance:{jobId:job.id,inputAnalysisObjectId:objectId,parameters:params}}));
+    const temporary=target+'.'+crypto.randomBytes(8).toString('hex')+'.tmp';
+    try{
+      fs.writeFileSync(temporary,bytes,{flag:'wx'});fs.renameSync(temporary,target);
+      const artifact=await ctx.createCheckpointArtifact({artifactType:'exploration_summary',name:descriptor.name,description:descriptor.description,storageKind:'local_internal',mimeType:'application/vnd.traceomics.figure+json',internalStorageKey:key,checksumSha256:crypto.createHash('sha256').update(bytes).digest('hex'),sizeBytes:bytes.length,metadata:{kind:'standard_figure',summary:{recipe:params.recipe,nCells:descriptor.figureBundle.nCells,features:descriptor.figureBundle.features||[],investigation:descriptor.figureBundle.scientificSummary||null},resolvedParams:params}});
+      return {result:{ok:true,summaryArtifactId:artifact.id}};
+    }catch(error){try{fs.rmSync(temporary,{force:true});}catch{/* retain original error */}throw error;}
+  }
   const artifact = await ctx.createArtifact({
     artifactType: 'exploration_summary',
     name: descriptor.name,

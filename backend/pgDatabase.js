@@ -6977,7 +6977,13 @@ async function createLineageEdgesForChild(actorUserId, childObjectId, parents = 
   return rows.map(rowToAnalysisObjectEdge);
 }
 
+async function getAgentRunTrustForJob(jobId) {
+  const {rows}=await query('SELECT ep.canonical_json FROM agent_runs ar JOIN execution_plans ep ON ep.id=ar.plan_id WHERE ar.job_id=$1',[jobId]);
+  return rows[0] ? JSON.parse(rows[0].canonical_json) : null;
+}
+
 module.exports = {
+  getAgentRunTrustForJob,
   // lifecycle
   isConfigured,
   connect,

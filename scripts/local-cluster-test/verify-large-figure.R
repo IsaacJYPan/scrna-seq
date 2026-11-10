@@ -1,0 +1,7 @@
+suppressPackageStartupMessages({library(Seurat);library(Matrix);library(ggplot2);library(jsonlite)})
+source('/source/r-backend/lib/standardFigures.R')
+set.seed(42);n<-88304L;m<-sparseMatrix(i=rep(1L,n),j=seq_len(n),x=1,dims=c(1,n),dimnames=list('GENE',paste0('C',seq_len(n))))
+obj<-CreateSeuratObject(m);embedding<-matrix(rnorm(n*2),ncol=2,dimnames=list(colnames(obj),c('UMAP_1','UMAP_2')));obj[['umap']]<-CreateDimReducObject(embedding,key='UMAP_',assay='RNA');Idents(obj)<-factor(rep(0:19,length.out=n))
+raster_test<-'--raster-preview'%in%commandArgs(TRUE)
+result<-tryCatch({b<-if(raster_test)encode_study_figure(DimPlot(obj,raster=TRUE,raster.dpi=c(2048,2048),label=TRUE,repel=TRUE,pt.size=.3)+theme_classic(11),'figure_umap',obj)$figureBundle else standard_study_figure(obj,'figure_umap')$figureBundle;list(status='passed',svgBytes=length(base64enc::base64decode(b$svg)))},error=function(e)list(status='failed',error=conditionMessage(e)))
+result$syntheticOnly<-TRUE;result$cells<-n;result$rasterPreview<-raster_test;write_json(result,if(raster_test)'/output/large-figure-raster-r-test.json' else '/output/large-figure-r-test.json',auto_unbox=TRUE,pretty=TRUE);print(result)

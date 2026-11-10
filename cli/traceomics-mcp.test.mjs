@@ -120,4 +120,21 @@ describe('traceomics MCP server', () => {
       expect.objectContaining({ id: 2, result: expect.objectContaining({ content: expect.any(Array) }) }),
     ]));
   });
+
+  it('returns standard figures as native MCP media with metadata separate', async () => {
+    const args={projectId:'proj_1',runId:`run_${'a'.repeat(24)}`,artifactId:`art_${'b'.repeat(24)}`};
+    const fetchImpl=recordingFetch(200,{artifactId:args.artifactId,mimeType:'image/png',imageBase64:'aGVsbG8=',provenance:{jobId:'job_1'}}).fetchImpl;
+    const reply=await createMcpServer({env:ENV,fetchImpl}).callTool('preview_artifact',args);
+    expect(reply.result.content).toContainEqual({type:'image',mimeType:'image/png',data:'aGVsbG8='});
+    expect(JSON.parse(reply.result.content[0].text)).not.toHaveProperty('imageBase64');
+    const vector=await createMcpServer({env:ENV,fetchImpl:recordingFetch(200,{artifactId:args.artifactId,mimeType:'application/pdf',blob:'aGVsbG8='}).fetchImpl}).callTool('preview_artifact',{...args,format:'pdf'});
+    expect(vector.result.content[1].resource).toMatchObject({mimeType:'application/pdf',blob:'aGVsbG8='});
+  });
+
+  it('rejects code, paths and oversized inspection pages before sending a request', async () => {
+    const {calls,fetchImpl}=recordingFetch();const server=createMcpServer({env:ENV,fetchImpl});
+    const args={projectId:'proj_1',runId:`run_${'a'.repeat(24)}`,artifactId:`art_${'b'.repeat(24)}`};
+    for(const extra of [{limit:101},{offset:10001},{path:'/private'},{code:'system(1)'},{format:'html'}])expect((await server.callTool('preview_artifact',{...args,...extra})).result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
 });

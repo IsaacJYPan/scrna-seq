@@ -1,0 +1,28 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);
+const work=path.resolve('scratch/blind-study');
+Object.assign(process.env,{DATABASE_URL:'postgres://postgres:local-fixture-only@127.0.0.1:45432/tro_blind_test',NODE_ENV:'test',DISABLE_RATE_LIMIT:'true',SESSION_SECRET:crypto.randomBytes(32).toString('hex'),STORAGE_ROOT:path.join(work,'storage'),VAULT_ROOT:path.join(work,'vault'),R_BACKEND_URL:'http://127.0.0.1:48000',R_API_TOKEN:'local-test-r-token-0123456789abcdef',API_TOKEN:'local-test-r-token-0123456789abcdef',SLURM_SSH_TARGET:'root@127.0.0.1',SLURM_SSH_PORT:'43222',SLURM_SSH_KEY:path.resolve('scratch/local-cluster-test/client'),SLURM_SSH_KNOWN_HOSTS:path.resolve('scratch/local-cluster-test/known_hosts'),SLURM_REMOTE_ROOT:'/cluster',SLURM_RSCRIPT:'/usr/local/bin/Rscript',SLURM_POLL_SECONDS:'1'});
+const db=require('../../backend/pgDatabase');
+const storage=require('../../backend/storage');
+const {startServer,createUserWithToken}=require('../../backend/_http-test-utils');
+const {createJobWorker}=require('../../backend/jobWorker');
+const server=await startServer();
+const account=await createUserWithToken({email:`blinded-${Date.now()}@example.invalid`,displayName:'Blinded test researcher'});
+const org=await db.createOrganization('Independent local study',account.user.id);
+const project=await db.createProject(org.id,'Uncharacterized sample A',account.user.id);
+const ds=await db.createDatasetForProject(account.user.id,project.id,{fileType:'tenx_h5',originalFilename:'sample-A.h5'});
+const provider=storage.createLocalStorageProvider();
+const key=storage.projectStorageFileKey(project.id,'datasets',ds.id,'sample-A.h5');
+fs.mkdirSync(path.dirname(provider.resolveKey(key)),{recursive:true});fs.copyFileSync(path.join(work,'sample-A.h5'),provider.resolveKey(key));
+const bytes=fs.readFileSync(provider.resolveKey(key));
+await db.markDatasetUploaded(project.id,ds.id,{internalStorageKey:key,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),fileSizeBytes:bytes.length});
+const input=await db.createProjectAnalysisObject(account.user.id,project.id,{objectType:'matrix',datasetId:ds.id,displayName:'Sample A counts',metadata:{source:'dataset',cells:902,features:16468}});
+fs.writeFileSync(path.join(work,'app-access.json'),JSON.stringify({origin:`http://127.0.0.1:${server.address().port}`,cookieName:require('../../backend/config').sessionCookieName(),sessionToken:account.token,projectId:project.id,datasetId:ds.id,inputObjectId:input.id}));
+const worker=createJobWorker({db,storageProvider:provider,deriveRObjectStateKey:require('../../backend/rStateKeys').deriveRObjectStateKey,logger:console});
+worker.start();
+console.log('Blinded app fixture ready. Input: sample A; 902 cells; 16468 genes.');
+async function stop(){await worker.stop();await new Promise(r=>server.close(r));await db.close();process.exit(0);}
+process.on('SIGINT',stop);process.on('SIGTERM',stop);

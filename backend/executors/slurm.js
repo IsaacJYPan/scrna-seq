@@ -305,7 +305,7 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
 
   // Runs the Seurat pipeline on the cluster and returns the R result body, after
   // copying the checkpoint to `checkpointPath` and verifying its checksum.
-  async function runSeurat({ jobId, inputs, params, resources, checkpointPath, heartbeat, log, isCanceled }) {
+  async function runSeurat({ jobId, inputs, params, resources, checkpointPath, heartbeat, log, isCanceled, workflowTrust }) {
     const runDir = runDirFor(jobId);
     const slurmJobId = await submitAndWait({ jobId, runDir, heartbeat, log, isCanceled, stage: async (write) => {
       await transport.exec(['mkdir', '-p', `${runDir}/input`, `${runDir}/output`, `${runDir}/lib`]);
@@ -318,6 +318,7 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
           donor_code: input.donorCode, batch: input.batch });
       }
       await write('params.json', JSON.stringify(params));
+      if (workflowTrust) await write('workflow-trust.json', JSON.stringify(workflowTrust));
       await write('inputs.json', JSON.stringify(manifest));
       await write('job.sh', jobScript(config, { jobId, runDir, resources }));
     } });
@@ -408,8 +409,12 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
     if (dispatch?.slurm_job_id) await transport.exec(['scancel', dispatch.slurm_job_id]).catch(() => {});
   }
 
+  async function attestRuntime(){
+    const code='p<-installed.packages(noCache=TRUE);p<-p[!duplicated(p[,"Package"]),,drop=FALSE];i<-Sys.getenv("TRACEOMICS_RUNTIME_IMAGE_DIGEST");if(!nzchar(i)&&file.exists("/run/traceomics/image-digest"))i<-readLines("/run/traceomics/image-digest",warn=FALSE)[1];cat(jsonlite::toJSON(list(schema="traceomics.workflow-runtime.v1",imageDigest=i,rVersion=as.character(getRversion()),packages=lapply(seq_len(nrow(p)),function(n)list(name=unname(p[n,"Package"]),version=unname(p[n,"Version"])))),auto_unbox=TRUE))';
+    return JSON.parse(await transport.exec([...config.rscript,'--vanilla','-e',code]));
+  }
   return {
-    config, status, runSeurat, runExpertR, cancel, transport, jobState, submitAndWait, runDirFor,
+    config, status, runSeurat, runExpertR, attestRuntime, cancel, transport, jobState, submitAndWait, runDirFor,
     jobScript: (args) => jobScript(config, args),
   };
 }

@@ -189,7 +189,7 @@ export function readToken(options, env, readFile) {
   return token;
 }
 
-async function readBounded(response) {
+async function readBounded(response, maximum = MAX_RESPONSE_BYTES) {
   const reader = response.body?.getReader();
   if (!reader) return '';
   const chunks = [];
@@ -198,7 +198,7 @@ async function readBounded(response) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.length;
-    if (size > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error('Response exceeded the size limit.'); }
+    if (size > maximum) { await reader.cancel(); throw new Error('Response exceeded the size limit.'); }
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -237,7 +237,8 @@ export async function sendRequest(request, { env = process.env, token, fetchImpl
     return { failure: 'the server could not be reached; the outcome is unknown. Re-run the same command to check.', exit: EXIT.UNAVAILABLE };
   }
   let text;
-  try { text = await readBounded(response); } catch (error) { return { failure: error.message, exit: EXIT.ERROR }; }
+  const maximum = request.method === 'GET' && /^\/projects\/[^/]+\/runs\/[^/]+\/artifacts\//.test(request.path) ? 6 * 1024 * 1024 : MAX_RESPONSE_BYTES;
+  try { text = await readBounded(response, maximum); } catch (error) { return { failure: error.message, exit: EXIT.ERROR }; }
   let data;
   try { data = text ? JSON.parse(text) : null; } catch { data = null; }
   if (data === null || typeof data !== 'object') {

@@ -108,6 +108,14 @@ export const TOOLS = [
   tool('cancel_run', 'Cancel one of this agent\'s runs. The reserved budget is not refunded.',
     { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
     (a) => ({ method: 'POST', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/cancel`, body: {} }), { readOnly: false }),
+  tool('inspect_run','Bounded QC/stage diagnostics and scientific artifact metadata for your completed run. Requires results.inspect and labels disclosure.',{...projectProp,runId:{type:'string'}},['projectId','runId'],a=>({method:'GET',path:`${project(a)}/runs/${str(a,'runId',ID.run)}/inspection`})),
+  tool('preview_artifact','Verified bounded table page or standard PNG/SVG/PDF figure from your completed run. Set table to a named investigation table from inspect_run, or group to a cluster/cell-type label for marker/condition-DE CSV pages. Never accepts a path or source code.',{...projectProp,runId:{type:'string'},artifactId:{type:'string'},table:{type:'string'},group:{type:'string'},offset:{type:'integer',minimum:0,maximum:10000},limit:{type:'integer',minimum:1,maximum:100},format:{type:'string',enum:['png','svg','pdf']}},['projectId','runId','artifactId'],a=>{
+    const offset=a.offset??0,limit=a.limit??50;if(!Number.isInteger(offset)||offset<0||offset>10000||!Number.isInteger(limit)||limit<1||limit>100)throw new ToolInputError('Invalid artifact page.');
+    const format=a.format||'png';if(!['png','svg','pdf'].includes(format))throw new ToolInputError('Invalid figure format.');
+    if(a.group!==undefined&&(typeof a.group!=='string'||!/^[A-Za-z0-9 ._+()-]{1,80}$/.test(a.group)))throw new ToolInputError('Invalid result group.');
+    if(a.table!==undefined&&(typeof a.table!=='string'||!/^[a-z_]{1,40}$/.test(a.table)))throw new ToolInputError('Invalid investigation table.');
+    return {method:'GET',path:`${project(a)}/runs/${str(a,'runId',ID.run)}/artifacts/${str(a,'artifactId',/^art_[a-f0-9]+$/)}?offset=${offset}&limit=${limit}&format=${format}${a.table===undefined?'':`&table=${encodeURIComponent(a.table)}`}${a.group===undefined?'':`&group=${encodeURIComponent(a.group)}`}`};
+  }),
   tool('create_proposal', 'Submit an inert proposal (code diff, method change, or workflow) for a person to review. Nothing is executed.',
     { ...projectProp, kind: { type: 'string', enum: ['code', 'method', 'workflow'] }, title: { type: 'string' },
       summary: { type: 'string' }, body: { type: 'string', description: 'For example a unified diff.' }, requestId: { type: 'string' } },
@@ -230,6 +238,10 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
     if (reply.response.ok && definition.render) {
       const rendered = definition.render(reply.data);
       if (rendered) return { result: rendered };
+    }
+    if(reply.response.ok&&name==='preview_artifact'&&(reply.data.imageBase64||reply.data.blob)){
+      const {imageBase64,blob,...metadata}=reply.data;
+      return {result:{content:[{type:'text',text:JSON.stringify(metadata)},...(imageBase64?[{type:'image',data:imageBase64,mimeType:'image/png'}]:[{type:'resource',resource:{uri:`traceomics:figure/${metadata.artifactId}.${metadata.format}`,mimeType:metadata.mimeType,blob}}])]}};
     }
     return { result: textResult(reply.data, !reply.response.ok) };
   }

@@ -3,9 +3,11 @@
 const { codedError } = require('./codedError');
 
 const EXPLORATORY_ANALYSIS_RECIPES = Object.freeze([
+  'figure_qc','figure_pca','figure_umap','figure_heatmap','figure_dot','figure_feature',
   'overview',
   'feature_by_group',
   'metadata_distribution',
+  'study_composition','study_expression','study_qc','study_de','study_pathways','study_communication',
 ]);
 const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
   'recipe',
@@ -14,6 +16,7 @@ const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
   'metadataField',
   'maxGroups',
   'histogramBins',
+  'featureNames','groupMap','conditionName','numerator','denominator','targetGroup',
 ]);
 
 function requirePlainObject(value) {
@@ -60,6 +63,8 @@ function validateExploratoryAnalysisParams(input) {
     maxGroups: boundedInteger(raw.maxGroups, 'maxGroups', 24, 2, 32),
     histogramBins: boundedInteger(raw.histogramBins, 'histogramBins', 24, 8, 50),
   };
+  for(const [name,kind] of [['featureNames','geneList'],['groupMap','groupMap']])if(raw[name]!==undefined)params[name]=require('./scientificChoices').scientificText(kind,raw[name]);
+  for(const name of ['conditionName','numerator','denominator','targetGroup'])if(raw[name]!==undefined){if(typeof raw[name]!=='string'||(raw[name]!==''&&!/^[A-Za-z0-9_.-]{1,80}$/.test(raw[name])))throw codedError('INVALID_PARAMETER',`Invalid ${name}.`);params[name]=raw[name];}
 
   if (recipe === 'feature_by_group') {
     if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {

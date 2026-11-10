@@ -18,6 +18,24 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 if (!requireNamespace("hdf5r", quietly = TRUE)) stop("R package 'hdf5r' is required to read 10x HDF5 inputs.")
+trust_file<-file.path(run_dir,"workflow-trust.json")
+if(file.exists(trust_file)){
+  trust<-jsonlite::fromJSON(trust_file,simplifyVector=FALSE)
+  if(!identical(trust$runtime$rVersion,as.character(getRversion())))stop("Pinned R version mismatch")
+  image<-Sys.getenv("TRACEOMICS_RUNTIME_IMAGE_DIGEST")
+  if(!nzchar(image)&&file.exists("/run/traceomics/image-digest"))image<-readLines("/run/traceomics/image-digest",warn=FALSE)[1]
+  if(!identical(image,trust$runtime$imageDigest))stop("Pinned image mismatch")
+  installed<-installed.packages(noCache=TRUE)
+  installed<-installed[!duplicated(installed[,"Package"]),,drop=FALSE]
+  actual<-setNames(unname(installed[,"Version"]),installed[,"Package"])
+  expected<-setNames(vapply(trust$runtime$packages,function(pkg)pkg$version,character(1)),vapply(trust$runtime$packages,function(pkg)pkg$name,character(1)))
+  if(!identical(actual[order(names(actual))],expected[order(names(expected))]))stop("Pinned package inventory mismatch")
+  for(relative in c("r-backend/hpc-runner.R","r-backend/lib/seuratPipelineCore.R")){
+    expected<-Filter(function(x)identical(x$path,relative),trust$source)
+    file<-if(grepl("hpc-runner",relative))file.path(script_dir,"hpc-runner.R")else file.path(script_dir,"lib/seuratPipelineCore.R")
+    if(length(expected)!=1L||!identical(digest::digest(file=file,algo="sha256"),expected[[1]]$sha256))stop("Staged source mismatch")
+  }
+}
 source(file.path(script_dir, "lib", "seuratPipelineCore.R"))
 
 params <- jsonlite::fromJSON(file.path(run_dir, "params.json"), simplifyVector = FALSE)

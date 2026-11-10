@@ -47,14 +47,20 @@ local({
   }, source_files)
   if (!length(source_files)) stop("Cannot locate the Plumber source directory.")
   runtime_dir <- dirname(normalizePath(source_files[[1L]], winslash = "/", mustWork = TRUE))
+  runtime_env$workflow_runtime_root <- runtime_dir
   for (module in c("sessionState.R", "storage.R", "publicParameters.R",
-                   "enrichmentGsea.R", "cellChatInference.R", "conditionComparison.R",
-                   "seuratPipelineCore.R")) {
+                   "enrichmentGsea.R", "cellChatInference.R", "conditionComparison.R", "conditionStudy.R",
+                   "seuratPipelineCore.R", "workflowTrust.R", "standardFigures.R")) {
     sys.source(file.path(runtime_dir, "lib", module), envir = runtime_env)
   }
 })
 
 # ── Validation Helpers ──────────────────────────────────────────────
+
+#* @get /runtime/workflow-trust
+function(res) {
+  tryCatch(workflow_runtime_manifest(),error=function(e){res$status<-503;list(error="Workflow runtime identity unavailable; restart and reapprove.")})
+}
 
 # Figure-export format whitelist. `format` is used as the output filename
 # extension in /export-figure, so it must be one of these exact values and must
@@ -1390,6 +1396,7 @@ function(req, res) {
       checksum_verified <- TRUE
     }
 
+    invisible(gc(full=TRUE))
     bundle <- readRDS(safe_path)
 
     # Validate bundle shape: the pbmc checkpoint saves list(global=<Seurat>, raw=...).
@@ -1434,6 +1441,10 @@ function(req, res) {
     # postroute hook persists global_obj/raw_obj for that key only — no other object key
     # is mutated.
     sid <- validate_internal_state_key(req$HTTP_X_OBJECT_ID)
+    if(hydration_only&&!is.null(job_scoped_active_session_key(sid))) {
+      loaded_obj<-prepare_job_hydration_object(loaded_obj,isTRUE(body$expression_only))
+      raw_loaded<-NULL
+    }
     prior_global <- global_obj
     prior_raw <- raw_obj
     prior_revision <- live_revision
@@ -1509,7 +1520,7 @@ function(req, res) {
   recipe <- if (is.list(params)) as.character(params$recipe)[1] else "overview"
   max_groups <- if (is.list(params)) suppressWarnings(as.integer(params$maxGroups)[1]) else 24L
   histogram_bins <- if (is.list(params)) suppressWarnings(as.integer(params$histogramBins)[1]) else 24L
-  if (!(recipe %in% c("overview", "feature_by_group", "metadata_distribution")) ||
+  if (!(recipe %in% c("overview", "feature_by_group", "metadata_distribution", "figure_qc", "figure_pca", "figure_umap", "figure_heatmap", "figure_dot", "figure_feature", "study_composition", "study_expression", "study_qc", "study_de", "study_pathways", "study_communication")) ||
       is.na(max_groups) || max_groups < 2L || max_groups > 32L ||
       is.na(histogram_bins) || histogram_bins < 8L || histogram_bins > 50L) {
     res$status <- 400
@@ -1532,6 +1543,8 @@ function(req, res) {
   }
   tryCatch({
     if (!inherits(global_obj, "Seurat")) stop("Seurat object required")
+    if(startsWith(recipe,"figure_"))return(standard_study_figure(global_obj,recipe))
+    if(startsWith(recipe,"study_"))return(condition_study_analysis(global_obj,params))
     meta <- global_obj@meta.data
     panels <- list()
     if (identical(recipe, "overview")) {

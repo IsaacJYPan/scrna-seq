@@ -1,0 +1,12 @@
+suppressPackageStartupMessages({library(Seurat);library(Matrix);library(jsonlite)})
+definitions<-parse('/source/r-backend/lib/sessionState.R')
+for(expr in definitions)if(is.call(expr)&&identical(expr[[1]],as.name('<-'))&&identical(expr[[2]],as.name('prepare_job_hydration_object')))eval(expr)
+set.seed(73);x<-matrix(rpois(500*300,3),nrow=500);x[1:40,1:100]<-x[1:40,1:100]+8;rownames(x)<-paste0('G',1:500);colnames(x)<-paste0('C',1:300)
+obj<-CreateSeuratObject(as(x,'CsparseMatrix'));obj<-NormalizeData(obj,verbose=FALSE);obj<-FindVariableFeatures(obj,nfeatures=200,verbose=FALSE);obj<-ScaleData(obj,verbose=FALSE);obj<-RunPCA(obj,npcs=10,verbose=FALSE);obj$seurat_clusters<-rep(0:2,each=100);Idents(obj)<-obj$seurat_clusters
+trimmed<-prepare_job_hydration_object(obj,TRUE)
+stopifnot(identical(LayerData(obj,layer='counts'),LayerData(trimmed,layer='counts')),identical(LayerData(obj,layer='data'),LayerData(trimmed,layer='data')),identical(Embeddings(obj,'pca'),Embeddings(trimmed,'pca')),length(Layers(trimmed[['RNA']],search='^scale.data'))==0L,length(Layers(obj[['RNA']],search='^scale.data'))==1L)
+original<-FindAllMarkers(obj,only.pos=FALSE,min.pct=0,logfc.threshold=0,return.thresh=1,verbose=FALSE)
+reduced<-FindAllMarkers(trimmed,only.pos=FALSE,min.pct=0,logfc.threshold=0,return.thresh=1,verbose=FALSE)
+stopifnot(isTRUE(all.equal(original,reduced,tolerance=1e-12)),identical(prepare_job_hydration_object(obj,FALSE),obj))
+write_json(list(status='passed',syntheticOnly=TRUE,countsAndNormalizedExpressionUnchanged=TRUE,pcaUnchanged=TRUE,fullCellMarkersAgree=TRUE,tolerance=1e-12,untrimmedProfileUnchanged=TRUE),'/output/hydration-memory-r-tests.json',auto_unbox=TRUE,pretty=TRUE)
+cat('PASS counts, expression, PCA and full-cell marker results unchanged by read-only workspace trimming\n')

@@ -83,7 +83,7 @@ function runState(row) {
 }
 
 const RUN_SELECT = `
-  SELECT ar.*, j.status AS job_status, j.result_analysis_object_id, j.started_at, j.completed_at, j.canceled_at,
+  SELECT ar.*, j.status AS job_status, j.error_json AS job_error, j.result_analysis_object_id, j.started_at, j.completed_at, j.canceled_at,
          ep.canonical_json, ad.revoked_at AS delegation_revoked_at, ap.display_name AS agent_display_name,
          se.accepted_run_id, se.name AS study_name,
          (SELECT a.id FROM job_artifacts a WHERE a.job_id = j.id AND a.artifact_type = ANY('${'{'}${RESULT_ARTIFACT_TYPES.join(',')}${'}'}'::text[])
@@ -99,6 +99,8 @@ const RUN_SELECT = `
 function publicRun(row) {
   const plan = JSON.parse(row.canonical_json);
   const state = runState(row);
+  const failureCode=parseMetadata(row.job_error).code;
+  const failureMessage=require('../jobs/jobErrors').SAFE_HANDLER_DOMAIN_MESSAGES[failureCode];
   return {
     id: row.id,
     projectId: row.project_id,
@@ -116,6 +118,7 @@ function publicRun(row) {
     inputs: plan.inputs,
     choices: plan.choices,
     state,
+    ...(state==='failed'?{failure:{code:failureMessage?failureCode:'ANALYSIS_FAILED',message:failureMessage||'Analysis failed. Ask the operator for a bounded technical diagnosis.'}}:{}),
     jobStatus: row.job_status,
     reservation: {
       cpus: row.reserved_cpus, memoryMiB: row.reserved_memory_mib,
@@ -167,7 +170,7 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     return release;
   }
 
-  async function pinnedInput(client, study, datasetId, release) {
+  async function pinnedInput(client, study, datasetId, release, { secondary = false } = {}) {
     const input = study.inputs_json.find((entry) => entry.datasetId === datasetId);
     if (!input) throw codedError('STUDY_AMENDMENT_REQUIRED', 'That dataset is not an input of this study.', 409);
     const { rows } = await client.query('SELECT * FROM datasets WHERE id = $1 AND project_id = $2', [datasetId, study.project_id]);
@@ -183,7 +186,7 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       // The job reads every dataset in the sample sheet: all must be unchanged,
       // and the plan's dataset must be the sheet's primary (first) sample.
       const sheet = study.protected_json.samples || [];
-      if (sheet[0]?.datasetId !== datasetId) {
+      if (!secondary && sheet[0]?.datasetId !== datasetId) {
         throw codedError('STUDY_AMENDMENT_REQUIRED', 'Plan multi-sample runs on the first dataset of the sample sheet.', 409);
       }
       for (const entry of study.inputs_json) {
@@ -205,7 +208,7 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     return { input, dataset: rows[0] };
   }
 
-  function resolveChoices(study, choices = {}) {
+  function resolveChoices(study, choices = {}, schema = {}) {
     if (!choices || typeof choices !== 'object' || Array.isArray(choices)) {
       throw codedError('INVALID_INPUT', 'choices must be an object.', 400);
     }
@@ -218,7 +221,9 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     }
     for (const [key, allowed] of Object.entries(variations)) {
       const value = Object.prototype.hasOwnProperty.call(choices, key) ? choices[key] : allowed[0];
-      if (!allowed.some((candidate) => sameValue(candidate, value))) {
+      const freeText=allowed.includes('*')&&['geneList','groupMap','populationLabel'].includes(schema[key]?.type);
+      if(freeText){try{require('../scientificChoices').scientificText(schema[key].type,value);}catch(error){throw codedError('STUDY_CONSTRAINT_VIOLATION',error.message,409);}}
+      if (!freeText && !allowed.some((candidate) => sameValue(candidate, value))) {
         throw codedError('STUDY_AMENDMENT_REQUIRED', `That value of '${key}' is outside the study's permitted options.`, 409);
       }
       resolved[key] = value;
@@ -232,9 +237,10 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       await liveDelegation(client, actor);
       const study = await studyForAgent(client, actor, body.studyId);
       const release = await approvedRelease(client, study);
+        if (!(study.execution_target==='slurm'?release.definition.trust.slurmRuntime:release.definition.trust.runtime)) throw codedError('WORKFLOW_RUNTIME_REQUIRED', 'Configure and approve a pinned workflow runtime before planning.', 409);
       if (typeof body.datasetId !== 'string') throw codedError('INVALID_INPUT', 'datasetId is required.', 400);
       const { input } = await pinnedInput(client, study, body.datasetId, release);
-      const choices = resolveChoices(study, body.choices);
+      const choices = resolveChoices(study, body.choices, release.definition.parameterSchema);
       let parameters;
       try {
         parameters = release.validateParameters({ ...study.protected_json, ...choices });
@@ -253,6 +259,12 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       }
       const { rows: clock } = await client.query(`SELECT now() + ($1 || ' seconds')::interval AS expires_at`, [String(PLAN_TTL_SECONDS)]);
       const expiresAt = new Date(clock[0].expires_at).toISOString();
+      let sampleInputs;
+      if(release.jobType==='seurat.multisample.v1') {
+        if(parameters.samples[0].datasetId!==input.datasetId)throw codedError('INVALID_INPUT','Use the first registered sample as the dataset anchor.',400);
+        sampleInputs=[];
+        for(const sample of parameters.samples)sampleInputs.push((await pinnedInput(client,study,sample.datasetId,release,{secondary:true})).input);
+      }
       const spec = {
         schema: 'traceomics.execution-plan.v1',
         projectId: actor.delegation.projectId,
@@ -264,13 +276,15 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         release: { id: release.id, key: release.key, version: release.version, digest: release.digest, jobType: release.jobType },
         approvalId: study.approval_id,
         study: { id: study.id },
-        inputs: { datasetId: input.datasetId, datasetSha256: input.datasetSha256, analysisObjectId: input.analysisObjectId },
+        inputs: { datasetId: input.datasetId, datasetSha256: input.datasetSha256, analysisObjectId: input.analysisObjectId, ...(sampleInputs?{samples:sampleInputs}:{}) },
         choices,
         parameters,
+        ...(release.jobType==='condition.pseudobulk_de.v1'?{design:await require('../workflowTrust/design').pinDesign(client,actor.delegation.projectId,input.analysisObjectId,parameters.contrastId)}:{}),
         resources: release.definition.resources,
         executionTarget: study.execution_target || 'local',
         outputs: release.definition.outputs,
         validation: release.definition.validation,
+        trust: {...release.definition.trust,runtime:study.execution_target==='slurm'?release.definition.trust.slurmRuntime:release.definition.trust.runtime},
         expiresAt,
       };
       const canonical = canonicalJson(spec);
@@ -360,6 +374,7 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         throw codedError('PLAN_STALE', 'The approved release changed after planning. Create a new plan.', 409);
       }
       const { dataset } = await pinnedInput(client, study, plan.inputs.datasetId, release);
+      for(const pinned of plan.inputs.samples||[]){const current=await pinnedInput(client,study,pinned.datasetId,release,{secondary:true});if(current.input.datasetSha256!==pinned.datasetSha256)throw codedError('INPUT_CHANGED','A multi-sample input changed.',409);}
 
       const executionTarget = plan.executionTarget || 'local';
       if (executionTarget === 'slurm' && !slurmConfig().enabled) {

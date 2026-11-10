@@ -1,0 +1,17 @@
+# Hand-specified non-biological classification fixture for the independent scorer.
+suppressPackageStartupMessages({library(Seurat);library(Matrix);library(jsonlite)})
+dir.create('/fixture/scorer-test',showWarnings=FALSE);root<-'/fixture/scorer-test'
+suffix<-c('AA','AC','AG','AT','CA','CC','CG','CT','GA');bc<-paste0(strrep('A',14),suffix)
+cells<-paste0('sample01_',bc[1:8]);counts<-Matrix(matrix(1,3,8),sparse=TRUE);dimnames(counts)<-list(c('G1','G2','G3'),cells)
+obj<-CreateSeuratObject(counts,min.cells=0,min.features=0);obj$sample_id<-'S01';obj$seurat_clusters<-as.character(0:7)
+saveRDS(list(global=obj),file.path(root,'checkpoint.rds'))
+labels<-setNames(c('B','T cells; innate-like subtype unresolved','NK','Monocytes; CD14/FCGR3A subtype unresolved','DC','T/NK mixture unresolved','B','Unknown'),as.character(0:7))
+finer<-setNames(c('B','CD4 T cells; naive subtype unresolved','NK','Classical_Monocyte','cDC','T/NK mixture unresolved','B','Unknown'),as.character(0:7))
+write_json(list(selectedRunId='synthetic',clusterToPopulation=as.list(labels),finerStateMap=as.list(finer)),file.path(root,'annotation.json'),auto_unbox=TRUE)
+write_json(list(list(sampleName='S01',sourcePrefix='library_A')),file.path(root,'manifest.json'),auto_unbox=TRUE)
+truth<-data.frame(NAME=paste0('library_A_',bc[c(1:7,9)]),CellType=c('B cell','CD4+ T cell','Natural killer cell','CD14+ monocyte','Dendritic cell','Megakaryocyte','Unassigned','B cell'))
+truth<-rbind(truth,data.frame(NAME=paste0('unselected_library_',bc[1]),CellType='B cell'))
+write.table(truth,file.path(root,'truth.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+write_json(list(checkpoint='/fixture/checkpoint.rds',annotation='/fixture/annotation.json',sourceManifest='/fixture/manifest.json',reference='/fixture/truth.tsv'),file.path(root,'evaluation-input.json'),auto_unbox=TRUE)
+write_json(list(syntheticTestOnly=TRUE),file.path(root,'author-freeze-lock.json'),auto_unbox=TRUE)
+cat('Prepared synthetic software-test fixture; not a real author freeze or study.\n')

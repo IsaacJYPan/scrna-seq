@@ -1,0 +1,21 @@
+suppressPackageStartupMessages({library(Seurat);library(Matrix);library(jsonlite)})
+source('/source/r-backend/lib/seuratPipelineCore.R')
+set.seed(42)
+counts<-as(matrix(rpois(600,5),nrow=60),'CsparseMatrix')
+rownames(counts)<-c('MT-TEST',paste0('GENE',2:60));colnames(counts)<-paste0('cell',1:10)
+output<-tempfile(fileext='.rds');on.exit(unlink(output))
+p<-list(stopAfter='qc',minFeatures=0,minCells=0,applyQcFilter=FALSE,seed=42)
+inputs<-list(list(storage_key='a'),list(storage_key='b'))
+result<-run_seurat_pipeline_core(p,function(key)counts,output,dataset_inputs=inputs,sample_names=c('a','b'),condition_names=c('x','y'))
+obj<-readRDS(output)$global
+stopifnot(result$summary$completed_stage=='qc',result$summary$n_cells==20,result$summary$n_pcs==0,
+          length(Reductions(obj))==0,!('seurat_clusters'%in%colnames(obj@meta.data)),
+          length(Layers(obj[['RNA']],search='^counts'))==1,
+          isTRUE(result$summary$diagnostics$checks$integer_counts),
+          !result$summary$diagnostics$checks$contains_nonfinite_counts,
+          !result$summary$diagnostics$checks$negative_counts)
+counts@x[1]<-counts@x[1]+.5
+fractional<-run_seurat_pipeline_core(p,function(key)counts,output,single_input='fractional')
+stopifnot(!fractional$summary$diagnostics$checks$integer_counts)
+cat('PASS: QC stops before PCA/clustering, joins both sample count inputs, and flags noninteger counts.\n')
+write_json(list(status='passed',multipleSampleInputsJoined=TRUE,stopsBeforePcaAndClustering=TRUE,nonintegerCountsFlagged=TRUE),'/output/stepwise-r-tests.json',auto_unbox=TRUE,pretty=TRUE)

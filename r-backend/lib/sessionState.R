@@ -256,11 +256,23 @@ job_scoped_active_session_key <- function(value) {
   sid
 }
 
+prepare_job_hydration_object <- function(obj, expression_only=FALSE) {
+  # Private read-only expression jobs need counts/data, not the PCA scaling
+  # workspace. Canonical interactive checkpoint loads never call this helper.
+  if(isTRUE(expression_only))for(assay in Assays(obj)) {
+    assay_obj<-obj[[assay]]
+    if(inherits(assay_obj,'Assay5'))for(layer in Layers(assay_obj,search='^scale.data'))LayerData(assay_obj,layer=layer)<-NULL
+    obj[[assay]]<-assay_obj
+  }
+  obj
+}
+
 release_job_scoped_active_session <- function(req, sid) {
   sid <- job_scoped_active_session_key(sid)
   if (is.null(sid)) return(invisible(FALSE))
   # The postroute hook must not re-save the just-released globals.
   req$traceomics_session_persist <- FALSE
+  if('ggplot2'%in%loadedNamespaces())ggplot2::set_last_plot(NULL)
   restore_active_session()
   if (exists(sid, envir = active_sessions, inherits = FALSE)) {
     rm(list = sid, envir = active_sessions)

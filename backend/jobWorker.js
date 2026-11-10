@@ -1176,6 +1176,7 @@ function createJobWorker(options = {}) {
 
       let outcome;
       try {
+        await require('./workflowTrust/manifest').verifyJobTrust(db,job,ctx.callR,slurmExecutor);
         outcome = await handler(ctx);
       } catch (handlerErr) {
         let effectiveHandlerErr = handlerErr;

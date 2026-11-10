@@ -1,0 +1,8 @@
+suppressPackageStartupMessages({library(Seurat);library(Matrix);library(jsonlite)})
+set.seed(141);m<-as(matrix(rpois(500*600,3),nrow=500),'CsparseMatrix');rownames(m)<-paste0('G',1:500);colnames(m)<-paste0('C',1:600)
+obj<-CreateSeuratObject(m);obj<-NormalizeData(obj,verbose=FALSE);obj<-FindVariableFeatures(obj,nfeatures=300,verbose=FALSE)
+old<-ScaleData(obj,features=VariableFeatures(obj),block.size=1000,verbose=FALSE);new<-ScaleData(obj,features=VariableFeatures(obj),block.size=256,verbose=FALSE)
+stopifnot(isTRUE(all.equal(LayerData(old,layer='scale.data'),LayerData(new,layer='scale.data'),tolerance=1e-12)))
+old<-RunPCA(old,npcs=15,seed.use=42,verbose=FALSE);new<-RunPCA(new,npcs=15,seed.use=42,verbose=FALSE)
+stopifnot(isTRUE(all.equal(Embeddings(old,'pca'),Embeddings(new,'pca'),tolerance=1e-12)))
+write_json(list(status='passed',syntheticOnly=TRUE,blockSizeBefore=1000,blockSizeAfter=256,scaledValuesAndPcaAgree=TRUE,tolerance=1e-12),'/output/scaling-memory-r-tests.json',auto_unbox=TRUE,pretty=TRUE)

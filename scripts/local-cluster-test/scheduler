@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/local/bin:/usr/bin:/bin
+state=/scheduler
+case "$(basename "$0")" in
+  sinfo) echo 'local* up 1';;
+  sbatch)
+    script="${@: -1}"
+    id=$(( $(cat "$state/counter" 2>/dev/null || echo 1000) + 1 ))
+    echo "$id" > "$state/counter"
+    name=$(sed -n 's/^#SBATCH --job-name=//p' "$script")
+    echo "$name $id" >> "$state/names"
+    echo "$id $script" >> "$state/submissions"
+    echo PENDING > "$state/$id"
+    nohup bash -c '
+      state=$1; id=$2; script=$3
+      echo RUNNING > "$state/$id"
+      bash "$script" > "$(dirname "$script")/slurm.out" 2>&1 &
+      pid=$!; echo "$pid" > "$state/$id.pid"
+      if wait "$pid"; then echo COMPLETED > "$state/$id"; else
+        if [ "$(cat "$state/$id")" != CANCELLED ]; then echo FAILED > "$state/$id"; fi
+      fi
+    ' bash "$state" "$id" "$script" </dev/null >/dev/null 2>&1 &
+    echo "$id;local"
+    ;;
+  sacct|squeue)
+    id=''; name=''; field=''
+    while [ $# -gt 0 ]; do
+      case "$1" in -j) id="$2"; shift;; --name|-n) name="$2"; shift;; -o) field="$2"; shift;; esac
+      shift
+    done
+    if [ -n "$id" ]; then cat "$state/$id" 2>/dev/null || true
+    elif [ -n "$name" ]; then awk -v name="$name" '$1==name {print $2}' "$state/names" 2>/dev/null || true; fi
+    ;;
+  scancel)
+    echo CANCELLED > "$state/$1"
+    if [ -f "$state/$1.pid" ]; then kill "$(cat "$state/$1.pid")" 2>/dev/null || true; fi
+    echo "$1" >> "$state/cancellations"
+    ;;
+esac

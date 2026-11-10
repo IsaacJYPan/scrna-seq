@@ -299,6 +299,8 @@ function validateReceiptPayloadSchema(jobType, payload) {
       payload.summary,
       [
         'n_cells',
+        'completed_stage',
+        'diagnostics',
         'n_features',
         'pre_filter_cells',
         'post_filter_cells',

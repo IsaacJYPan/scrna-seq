@@ -1,0 +1,23 @@
+# Post-freeze availability accounting only; no annotation or gate changes.
+suppressPackageStartupMessages({library(hdf5r);library(jsonlite)})
+manifest<-fromJSON('/fixture/sponsor-inputs.json')
+truth<-read.delim('/output/reference/celltypes.tsv',stringsAsFactors=FALSE)
+retained<-read.csv('/output/evaluation/cell-annotation-comparison.csv',stringsAsFactors=FALSE)
+raw_keys<-unlist(lapply(seq_len(nrow(manifest)),function(i){
+ f<-H5File$new(file.path('/fixture/inputs',manifest$file[i]),'r')
+ bc<-f[['hg38/barcodes']][];f$close_all()
+ paste(manifest$sourcePrefix[i],bc,sep='_')
+}))
+selected<-Reduce(`|`,lapply(manifest$sourcePrefix,function(p)startsWith(truth$NAME,paste0(p,'_'))))
+truth<-truth[selected,,drop=FALSE]
+truth$available_in_inputs<-truth$NAME%in%raw_keys
+truth$retained<-truth$NAME%in%retained$reference_name
+stopifnot(all(!truth$retained|truth$available_in_inputs))
+summary<-function(m)data.frame(researcher_cells=nrow(m),available_in_registered_inputs=sum(m$available_in_inputs),retained=sum(m$retained),not_available_before_app_QC=sum(!m$available_in_inputs),excluded_between_registered_inputs_and_checkpoint=sum(m$available_in_inputs&!m$retained))
+by_class<-do.call(rbind,lapply(split(truth,truth$CellType),summary))
+write.csv(by_class,'/output/evaluation/raw-input-reference-coverage-by-class.csv')
+by_library<-do.call(rbind,lapply(seq_len(nrow(manifest)),function(i)summary(truth[startsWith(truth$NAME,paste0(manifest$sourcePrefix[i],'_')),,drop=FALSE])))
+by_library$sample<-manifest$sampleName
+write.csv(by_library,'/output/evaluation/raw-input-reference-coverage-by-library.csv',row.names=FALSE)
+write_json(summary(truth),'/output/evaluation/raw-input-reference-coverage-summary.json',auto_unbox=TRUE,pretty=TRUE)
+print(by_class)

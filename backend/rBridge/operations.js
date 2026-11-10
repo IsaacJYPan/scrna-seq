@@ -1,6 +1,7 @@
 // Allowed R request targets and the artifacts each operation produces.
 
 const R_BRIDGE_OPERATIONS = Object.freeze({
+  'r.workflow.trust': Object.freeze({method:'GET',path:'/runtime/workflow-trust',readOnly:true,touchesAnalysisObject:false,requiresObjectContext:false}),
   'r.runtime.check': Object.freeze({
     method: 'GET',
     path: '/health',
@@ -117,7 +118,7 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     readOnly: false,
     // FindAllMarkers over many clusters can run long; explicit but bounded so a hung run can
     // never wedge a worker indefinitely.
-    defaultTimeoutMs: 120000,
+    defaultTimeoutMs: 600000,
   }),
   // Snapshot the owner-verified current live object without accepting code,
   // paths, or transformation parameters. The worker allocates the exact output
@@ -154,7 +155,7 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     auxiliary: true,
     mutating: true,
     readOnly: false,
-    defaultTimeoutMs: 120000,
+    defaultTimeoutMs: 600000,
   }),
   // Ranked GO enrichment for one selected identity versus all remaining cells. The
   // worker owns the object context, validated scientific parameters, and output key;
@@ -208,7 +209,7 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     carriesExplorationParams: true,
     mutating: false,
     readOnly: true,
-    defaultTimeoutMs: 120000,
+    defaultTimeoutMs: 600000,
   }),
   'r.condition.pseudobulk_de.v1': Object.freeze({
     method: 'POST',

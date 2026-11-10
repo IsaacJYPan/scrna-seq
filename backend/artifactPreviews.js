@@ -43,7 +43,7 @@ function decode(bytes, truncated = false) {
   catch { throw previewError('This preview requires valid UTF-8 text.'); }
 }
 
-function parseDelimited(source, delimiter, { offset = 0, limit = 50, truncated = false } = {}) {
+function parseDelimited(source, delimiter, { offset = 0, limit = 50, truncated = false, rowFilter } = {}) {
   const records = []; let record = []; let field = ''; let quoted = false; let closed = false; let count = 0; let columns; let hasMore = false;
   const fieldDone = () => {
     if (record.length >= PREVIEW_LIMITS.columns) throw previewError('Table preview exceeds 100 columns.');
@@ -56,6 +56,7 @@ function parseDelimited(source, delimiter, { offset = 0, limit = 50, truncated =
       if (columns.some(value => !value.trim()) || new Set(columns).size !== columns.length) throw previewError('Table headers must be nonempty and unique.');
     } else if (!(record.length === 1 && record[0] === '')) {
       if (record.length !== columns.length) throw previewError('Table rows must match the header column count.');
+      if (rowFilter && !rowFilter(columns, record)) { record = []; return; }
       if (count >= offset && records.length < limit) records.push(record);
       else if (count >= offset + limit) hasMore = true;
       count++;

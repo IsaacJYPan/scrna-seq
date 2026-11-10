@@ -83,6 +83,8 @@ function createDefaultRCaller(config = {}) {
       : 1024 * 1024;
 
   const callR = function callR({ method, path, timeoutMs, objectStateKey, body }) {
+      const responseLimit = path === '/object/explore-summary' && /^(figure|study)_/.test(body?.params?.recipe || '')
+      ? 12 * 1024 * 1024 : maxResponseBytes;
     return new Promise((resolve, reject) => {
       if (!token || !endpoint) {
         reject(codedError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.'));
@@ -146,7 +148,7 @@ function createDefaultRCaller(config = {}) {
             let responseBytes = 0;
             res.on('data', (c) => {
               responseBytes += c.length;
-              if (responseBytes > maxResponseBytes) {
+              if (responseBytes > responseLimit) {
                 req.destroy();
                 finishErr(
                   codedError('R_RESPONSE_TOO_LARGE', 'R runtime response exceeded its safe limit.')
@@ -356,6 +358,7 @@ async function runRBridgeOperation(args = {}) {
     if (Number.isFinite(cp.sizeBytes) && cp.sizeBytes >= 0) {
       loadBody.expected_size_bytes = cp.sizeBytes;
     }
+      if(operation==='r.checkpoint.hydrate.v1')loadBody.expression_only=['deg.find_markers.v1','enrichment.gsea.v1','cellchat.infer.v1','condition.pseudobulk_de.v1'].includes(args.job?.jobType)||(args.job?.jobType==='explore.summarize.v1'&&/^study_/.test(args.job?.parameters?.recipe||''));
     request.body = loadBody;
   }
 
@@ -872,6 +875,13 @@ async function runRBridgeOperation(args = {}) {
   }
 
   if (operation === 'r.explore.summarize.v1') {
+    if(body.figureBundle){
+      const bundle=body.figureBundle;
+      if(bundle.schema!=='traceomics.standard-figure.v1'||typeof bundle.png!=='string'||typeof bundle.svg!=='string'||typeof bundle.pdf!=='string'||JSON.stringify(bundle).length>12*1024*1024)throw codedError('R_RESPONSE_INVALID','Invalid standard figure bundle.');
+      const png=Buffer.from(bundle.png,'base64'),pdf=Buffer.from(bundle.pdf,'base64');
+      if(!png.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||pdf.subarray(0,5).toString()!=='%PDF-'||!Buffer.from(bundle.svg,'base64').toString().includes('<svg'))throw codedError('R_RESPONSE_INVALID','Invalid standard figure formats.');
+      return {operation,name:'Standard scientific figure',description:'Approved PNG, SVG and PDF views of one pinned checkpoint.',figureBundle:bundle,metadata:{operation,kind:'standard_figure'}};
+    }
     const summary = sanitizeExplorationSummary(body);
     if (summary.panels.length === 0) {
       throw codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.');

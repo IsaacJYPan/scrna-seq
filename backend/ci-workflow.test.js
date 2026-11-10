@@ -6,7 +6,7 @@ const root = process.cwd();
 const workflowDir = path.join(root, '.github', 'workflows');
 const workflowFiles = fs.readdirSync(workflowDir)
   .filter((name) => name.endsWith('.yml'))
-  .map((name) => ({ name, text: fs.readFileSync(path.join(workflowDir, name), 'utf8') }));
+  .map((name) => ({ name, text: fs.readFileSync(path.join(workflowDir, name), 'utf8').replace(/\r\n/g, '\n') }));
 
 describe('continuous-integration workflow contracts', () => {
   it('pins third-party actions to immutable commit SHAs', () => {

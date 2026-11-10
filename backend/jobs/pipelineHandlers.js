@@ -271,6 +271,7 @@ async function seuratPipelineHandler(ctx) {
     }
     try {
       const { body } = await ctx.slurm.runSeurat({
+        workflowTrust:job.workflowTrust,
         jobId: job.id,
         params,
         inputs: datasets.map((entry, index) => ({

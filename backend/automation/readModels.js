@@ -38,7 +38,7 @@ function createAutomationReadModels({ db }) {
       datasetCount: row.dataset_count,
       completedRunCount: row.completed_run_count,
       createdAt: row.created_at,
-      approvedWorkflows: { available: false, reason: 'Approved workflow execution is not enabled in this release.' },
+      approvedWorkflows: { available: true, reason: 'Execution requires a current project approval, pinned runtime and open study.' },
     };
   }
 

@@ -1,6 +1,11 @@
 // Error classification for worker handlers and job recovery. Only marked messages may reach job logs.
 
 const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
+  WORKFLOW_SOURCE_CHANGED: 'Approved analysis source changed. An operator must restart and reapprove before retrying.',
+  WORKFLOW_RUNTIME_UNAVAILABLE: 'Analysis runtime attestation is unavailable. Ask the operator to check and restart the runtime.',
+  WORKFLOW_RUNTIME_MISMATCH: 'The analysis runtime differs from the approved package or image inventory. Reapproval is required.',
+  WORKFLOW_INPUT_CHANGED: 'A pinned study input changed. A new study approval is required.',
+  WORKFLOW_DESIGN_CHANGED: 'The pinned condition design changed. A new plan and approval are required.',
   ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
   SLURM_UNAVAILABLE: 'The Slurm target is not configured for this installation.',
   SLURM_SUBMIT_FAILED: 'The cluster did not accept the job. Check the Slurm partition and account settings.',

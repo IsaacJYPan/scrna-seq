@@ -9,12 +9,15 @@ const { codedError } = require('./codedError');
 const { validateParamsAgainstSpec } = require('./paramSpec');
 
 const SEURAT_PIPELINE_PARAM_SPEC = Object.freeze({
+  stopAfter: { type: 'enum', values: ['qc','normalize','pca','cluster','umap'], default: 'umap' },
   minCells:          { type: 'int', min: 0, max: 10000, default: 3 },
   minFeatures:       { type: 'int', min: 0, max: 100000, default: 200 },
   applyQcFilter:     { type: 'bool', default: true },
   minFeaturesFilter: { type: 'int', min: 0, max: 100000, default: 200 },
   maxFeaturesFilter: { type: 'int', min: 1, max: 1000000, default: 2500 },
   maxPercentMt:      { type: 'number', min: 0, max: 100, default: 5 },
+  minCountsFilter:   { type: 'int', min: 0, max: 10000000, default: 0 },
+  integrationMethod: { type: 'enum', values: ['none','rpca'], default: 'none' },
   normalizationMethod: { type: 'enum', values: ['LogNormalize', 'SCTransform'], default: 'LogNormalize' },
   scaleFactor:       { type: 'int', min: 1, max: 10000000, default: 10000 },
   variableFeatures:  { type: 'int', min: 50, max: 10000, default: 2000 },

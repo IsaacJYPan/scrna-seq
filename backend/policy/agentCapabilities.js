@@ -16,6 +16,7 @@ const CAPABILITIES = Object.freeze({
     description: 'Read bounded project and dataset metadata.' },
   'results.read': { availability: 'delegable', sponsorRoles: READ_ROLES,
     description: 'Read bounded summaries of completed managed runs.' },
+  'results.inspect': { availability:'delegable',sponsorRoles:READ_ROLES,description:'Inspect bounded scientific diagnostics, result table pages and approved figure previews for own runs.' },
   'proposal.create': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
     description: 'Submit inert code or method proposals for human review.' },
   // Planned agent capabilities. They exist in the catalog so that requests for

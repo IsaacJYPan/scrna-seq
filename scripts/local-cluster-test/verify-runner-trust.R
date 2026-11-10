@@ -1,0 +1,16 @@
+suppressPackageStartupMessages({library(Matrix);library(hdf5r);library(jsonlite);library(digest)})
+stage<-tempfile('trusted-runner-');dir.create(stage);dir.create(file.path(stage,'lib'));on.exit(unlink(stage,recursive=TRUE))
+for(file in c('hpc-runner.R','lib/seuratPipelineCore.R'))stopifnot(file.copy(file.path('/source/r-backend',file),file.path(stage,file)))
+set.seed(7);counts<-as(matrix(rpois(600,5),nrow=60),'CsparseMatrix');rownames(counts)<-paste0('GENE',1:60);colnames(counts)<-paste0('cell',1:10)
+file<-H5File$new(file.path(stage,'input.h5'),'w');group<-file$create_group('hg19');group[['data']]<-counts@x;group[['indices']]<-counts@i;group[['indptr']]<-counts@p;group[['shape']]<-as.integer(dim(counts));group[['barcodes']]<-colnames(counts);group[['genes']]<-rownames(counts);group[['gene_names']]<-rownames(counts);file$close_all()
+write_json(list(stopAfter='qc',minFeatures=0,minCells=0,applyQcFilter=FALSE,seed=42),file.path(stage,'params.json'),auto_unbox=TRUE)
+write_json(list(list(file='input.h5')),file.path(stage,'inputs.json'),auto_unbox=TRUE)
+packages<-installed.packages(noCache=TRUE);packages<-packages[!duplicated(packages[,'Package']),,drop=FALSE]
+trust<-list(runtime=list(imageDigest=Sys.getenv('TRACEOMICS_RUNTIME_IMAGE_DIGEST'),rVersion=as.character(getRversion()),packages=lapply(seq_len(nrow(packages)),function(i)list(name=unname(packages[i,'Package']),version=unname(packages[i,'Version'])))),source=lapply(c('hpc-runner.R','lib/seuratPipelineCore.R'),function(file)list(path=paste0('r-backend/',file),sha256=digest(file=file.path(stage,file),algo='sha256'))))
+save_trust<-function(value)write_json(value,file.path(stage,'workflow-trust.json'),auto_unbox=TRUE)
+invoke<-function(){result<-suppressWarnings(system2(file.path(R.home('bin'),'Rscript'),c('--vanilla',file.path(stage,'hpc-runner.R'),stage),stdout=TRUE,stderr=TRUE));list(status=if(is.null(attr(result,'status')))0L else attr(result,'status'),output=paste(result,collapse='\n'))}
+save_trust(trust);valid<-invoke();if(valid$status!=0L)stop(valid$output);stopifnot(fromJSON(file.path(stage,'output/result.json'))$summary$n_cells==10)
+less<-trust;less$runtime$packages<-less$runtime$packages[-1];save_trust(less);extra<-invoke();stopifnot(extra$status!=0L,grepl('Pinned package inventory mismatch',extra$output,fixed=TRUE))
+save_trust(trust);cat('\n# altered staged source\n',file=file.path(stage,'lib/seuratPipelineCore.R'),append=TRUE);changed<-invoke();stopifnot(changed$status!=0L,grepl('Staged source mismatch',changed$output,fixed=TRUE))
+write_json(list(status='passed',approvedRunnerExecutes=TRUE,unexpectedPackageRejected=TRUE,alteredStagedCoreRejected=TRUE),'/output/runner-trust-r-tests.json',auto_unbox=TRUE,pretty=TRUE)
+cat('PASS: approved staged runner executes; extra packages and altered core are refused.\n')

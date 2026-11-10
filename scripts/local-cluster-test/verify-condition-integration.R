@@ -1,0 +1,8 @@
+suppressPackageStartupMessages({library(Seurat);library(Matrix);library(jsonlite)})
+source('/source/r-backend/lib/seuratPipelineCore.R')
+set.seed(12);counts<-as(matrix(rpois(300*120,4),nrow=300),'CsparseMatrix');rownames(counts)<-c('MT-TEST',paste0('GENE',2:300));colnames(counts)<-paste0('cell',1:120)
+inputs<-lapply(1:4,function(i)list(storage_key=as.character(i),donor_code=paste0('D',i)))
+p<-list(stopAfter='umap',minFeatures=0,minCells=0,applyQcFilter=FALSE,seed=42,pcaDims=10,clusterDims=10,umapDims=10,variableFeatures=100,integrationMethod='rpca')
+output<-tempfile(fileext='.rds');result<-run_seurat_pipeline_core(p,function(key)counts,output,dataset_inputs=inputs,sample_names=paste0('S',1:4),condition_names=c('A','A','B','B'))
+obj<-readRDS(output)$global;stopifnot(ncol(obj)==480,'integrated.rpca'%in%Reductions(obj),length(Layers(obj[['RNA']],search='^counts'))==1)
+write_json(list(status='passed',syntheticOnly=TRUE,cells=ncol(obj),integration='RPCA',retainsJoinedRawCounts=TRUE),'/output/integration-r-tests.json',auto_unbox=TRUE,pretty=TRUE);cat('PASS donor integration, graph, UMAP and joined raw counts\n')
