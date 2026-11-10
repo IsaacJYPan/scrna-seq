@@ -281,6 +281,9 @@ jobs:
       - name: Verify ordered live R execution provenance
         run: npm run test:r-execution-order
 
+      - name: Verify condition pseudobulk uses raw counts
+        run: npm run test:r-condition-pseudobulk
+
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 

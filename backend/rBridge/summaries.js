@@ -491,6 +491,7 @@ function sanitizeConditionComparisonSummary(body) {
   const top = Array.isArray(source.top_results) ? source.top_results.slice(0, 50) : [];
   return {
     method: sanitizeRuntimeField(source.method, 40),
+    countAssay: ['RNA', 'Spatial'].includes(source.count_assay) ? source.count_assay : null,
     cellTypeColumn: sanitizeRuntimeField(source.cell_type_column, 64),
     unitOfReplication: sanitizeRuntimeField(source.unit_of_replication, 20),
     paired: source.paired === true,

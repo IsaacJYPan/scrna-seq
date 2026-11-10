@@ -51,7 +51,7 @@ describe('condition pseudobulk worker contract', () => {
         return { status: 200, body: {
           ok: true,
           summary: {
-            method: 'edgeR quasi-likelihood pseudobulk', cell_type_column: 'cell_type',
+            method: 'edgeR quasi-likelihood pseudobulk', count_assay: 'RNA', cell_type_column: 'cell_type',
             unit_of_replication: 'sample', paired: false, sample_count: 4,
             model_formula: '~ condition',
             tested_cell_type_count: 2, tested_gene_count: 1000, significant_result_count: 12,
@@ -78,6 +78,7 @@ describe('condition pseudobulk worker contract', () => {
       cellType: 'T', gene: 'IL7R', logFc: 1.2, pValue: 0.001, fdr: 0.01,
     });
     expect(descriptor.summary.modelFormula).toBe('~ condition');
+    expect(descriptor.summary.countAssay).toBe('RNA');
     expect(JSON.stringify(descriptor)).not.toContain('raw_counts');
     expect(JSON.stringify(descriptor)).not.toContain('secret');
   });
