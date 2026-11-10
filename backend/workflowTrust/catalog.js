@@ -26,6 +26,16 @@ function withDesignRoles(spec, names) {
 
 const ROOT = path.join(__dirname, '..', '..');
 
+// Summary fields a study may rank trials by (selection rules). Each has a kind:
+// descriptive and quality metrics may be selected; inferential ones
+// (significance counts, test statistics) are reported but never optimized,
+// because ranking trials by them hides how many analyses were tried.
+const PIPELINE_METRICS = [
+  { key: 'nClusters', label: 'clusters', kind: 'descriptive' },
+  { key: 'postFilterCells', label: 'cells kept after QC', kind: 'quality' },
+  { key: 'nVariableFeatures', label: 'variable features', kind: 'descriptive' }
+];
+
 function canonicalJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -64,7 +74,8 @@ const DEFINITIONS = [
     // physical CPU/memory limits come from the R runtime's container settings.
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.analysis_object.present'],
-    validateParameters: params => validateSeuratPipelineParams(params).params
+    validateParameters: params => validateSeuratPipelineParams(params).params,
+    selectableMetrics: PIPELINE_METRICS
   },
   {
     // A follow-on step: it runs on the accepted clustering of a source study
@@ -87,7 +98,11 @@ const DEFINITIONS = [
     parameterSchema: DEG_FIND_MARKERS_PARAM_SPEC,
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 1800 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: params => validateDegFindMarkersParams(params).params
+    validateParameters: params => validateDegFindMarkersParams(params).params,
+    selectableMetrics: [
+      { key: 'nGroups', label: 'groups', kind: 'descriptive' },
+      { key: 'nMarkersTotal', label: 'marker genes', kind: 'inferential' }
+    ]
   },
   {
     // Ranked GO Biological Process enrichment for one group versus the rest.
@@ -119,7 +134,12 @@ const DEFINITIONS = [
     ]),
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 1800 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: params => validateEnrichmentGseaParams(params).params
+    validateParameters: params => validateEnrichmentGseaParams(params).params,
+    selectableMetrics: [
+      { key: 'mappingRate', label: 'gene mapping rate', kind: 'quality' },
+      { key: 'testedPathwayCount', label: 'pathways tested', kind: 'descriptive' },
+      { key: 'significantPathwayCount', label: 'significant pathways', kind: 'inferential' }
+    ]
   },
   {
     // Single-context CellChat ligand-receptor candidates. The intent is fixed
@@ -154,7 +174,8 @@ const DEFINITIONS = [
     ]),
     resources: { cpus: 1, memoryMiB: 16384, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: params => validateCellChatInferenceParams(params).params
+    validateParameters: params => validateCellChatInferenceParams(params).params,
+    selectableMetrics: []
   },
   {
     // Several 10x HDF5 captures merged with a sample sheet (sample, condition,
@@ -181,7 +202,8 @@ const DEFINITIONS = [
     validateParameters: params => {
       const { params: resolved, samples } = validateMultiSampleSeuratParams(params);
       return { samples, ...resolved };
-    }
+    },
+    selectableMetrics: PIPELINE_METRICS
   },
   {
     // Classic 10x Visium (Space Ranger bundle). Same parameter contract and
@@ -201,7 +223,8 @@ const DEFINITIONS = [
     parameterSchema: SEURAT_PIPELINE_PARAM_SPEC,
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.analysis_object.present'],
-    validateParameters: params => validateSpatialSeuratParams(params).params
+    validateParameters: params => validateSpatialSeuratParams(params).params,
+    selectableMetrics: PIPELINE_METRICS
   }
 ];
 // Follow-on releases that read an accepted clustering. Exactly one release per
@@ -228,7 +251,8 @@ DEFINITIONS.push(
     },
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params
+    validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params,
+    selectableMetrics: [{ key: 'nCells', label: 'cells', kind: 'descriptive' }]
   },
   {
     // The contrast is registered by a person on the accepted input and pinned
@@ -243,7 +267,13 @@ DEFINITIONS.push(
     parameterSchema: { contrastId: { type: 'contrastId', required: true, role: 'design' } },
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: p => require('../conditionComparison').validateConditionComparisonParams(p).params
+    validateParameters: p => require('../conditionComparison').validateConditionComparisonParams(p).params,
+    selectableMetrics: [
+      { key: 'sampleCount', label: 'samples', kind: 'descriptive' },
+      { key: 'testedCellTypeCount', label: 'cell types tested', kind: 'descriptive' },
+      { key: 'testedGeneCount', label: 'genes tested', kind: 'descriptive' },
+      { key: 'significantResultCount', label: 'significant results', kind: 'inferential' }
+    ]
   },
   {
     // What the study asks (contrast, populations, condition, target group) is
@@ -278,7 +308,8 @@ DEFINITIONS.push(
     },
     resources: { cpus: 1, memoryMiB: 12288, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params
+    validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params,
+    selectableMetrics: [{ key: 'nCells', label: 'cells', kind: 'descriptive' }]
   }
 );
 
@@ -320,6 +351,7 @@ function trustedMethodDefinitions() {
       runtimeProfileId: trustedMethods.loadLibrary().runtimeProfileId,
     },
     validateParameters: (params) => trustedMethods.resolveMethodParameters(method, params),
+    selectableMetrics: method.metrics.map(({ key, label, kind }) => ({ key, label, kind })),
   }));
 }
 
@@ -383,6 +415,7 @@ function buildRelease(definition, trust = require('./manifest').trustManifest())
     outputs: definition.outputs,
     resources: definition.resources,
     validation: definition.validation,
+    selectableMetrics: definition.selectableMetrics,
     ...(definition.method ? { method: definition.method } : {}),
     trust,
   };

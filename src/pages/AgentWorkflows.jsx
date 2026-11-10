@@ -24,11 +24,6 @@ const METRIC_LABELS = {
 };
 const METRIC_ORDER = ['nCells', 'n_cells', 'cells', 'nFeatures', 'n_features', 'nClusters', 'n_clusters', 'clusters', 'nGroups', 'nMarkersTotal'];
 // Summary fields a selection rule can rank by, per workflow job type.
-const RULE_METRICS = {
-  'seurat.pipeline.v1': [['nClusters', 'clusters'], ['postFilterCells', 'cells kept after QC'], ['nVariableFeatures', 'variable features']],
-  'deg.find_markers.v1': [['nMarkersTotal', 'marker genes'], ['nGroups', 'groups']],
-};
-
 // Mirrors the server's selection: best finished trial by the study's rule, earliest on ties.
 function pickByRule(rule, runs) {
   if (!rule) return null;
@@ -159,8 +154,11 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   // Design choices (columns, gene lists, label maps) are fixed by a person.
   const designParams = schemaEntries.filter(([, spec]) => spec.role === 'design');
   const variableParams = schemaEntries.filter(([, spec]) => spec.role !== 'design').map(([name]) => name);
-  const ruleMetrics = RULE_METRICS[selected?.jobType]
-    || (selected?.method?.metrics || []).map((m) => [m.key, m.label]);
+  // The release declares which summary metrics may rank trials; inferential
+  // ones (significance counts) are never offered.
+  const ruleMetrics = (selected?.selectableMetrics || [])
+    .filter((m) => m.kind !== 'inferential')
+    .map((m) => [m.key, m.label]);
   const createStudy = (event) => {
     event.preventDefault();
     const body = {

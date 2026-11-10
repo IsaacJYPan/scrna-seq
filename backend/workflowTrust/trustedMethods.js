@@ -28,6 +28,7 @@ const VERSION = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/;
 const ENTRY = /^methods\/[a-z0-9-]+\.R$/;
 const METRIC = /^[A-Za-z0-9_]{1,64}$/;
 const OUTPUT_TYPES = ['rds', 'table', 'metrics', 'figure'];
+const METRIC_KINDS = ['descriptive', 'quality', 'inferential'];
 const ROLES = ['tuning', 'design', 'display'];
 const CATEGORIES = ['qc', 'normalization', 'integration', 'clustering', 'annotation', 'differential', 'trajectory',
   'spatial', 'scoring', 'visualization'];
@@ -165,9 +166,14 @@ function validateMethod(method, catalog) {
   if (!Array.isArray(method.metrics) || method.metrics.length < 1 || method.metrics.length > 30)
     fail(`${method.key} must list 1-30 metrics.`);
   for (const metric of method.metrics) {
-    only(metric, ['key', 'label'], `${method.key} metric`);
+    only(metric, ['key', 'label', 'kind'], `${method.key} metric`);
     if (!METRIC.test(metric.key || '')) fail(`${method.key} metric keys must be [A-Za-z0-9_].`);
     line(metric.label, `${method.key} metric ${metric.key} label`, 80);
+    // Inferential metrics (significance counts, test statistics) may be
+    // reported but never used to rank trials.
+    if (!METRIC_KINDS.includes(metric.kind)) {
+      fail(`${method.key} metric ${metric.key} kind must be one of: ${METRIC_KINDS.join(', ')}.`);
+    }
   }
   only(method.resources, ['cpus', 'memoryMiB', 'maxWallSeconds'], `${method.key} resources`);
   const r = method.resources;
@@ -291,6 +297,7 @@ function singleMethodPackage(method, runtimeProfileId = loadLibrary().runtimePro
 }
 
 module.exports = {
+  METRIC_KINDS,
   JOB_TYPE,
   TEXT_PATTERNS,
   METRIC,

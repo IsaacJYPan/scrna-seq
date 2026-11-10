@@ -190,6 +190,19 @@ function createStudyService({ db, withTransaction, approvals }) {
           || !['max', 'min'].includes(rule.goal)) {
         throw codedError('INVALID_INPUT', 'selectionRule must be { metric: <summary field>, goal: "max" or "min" }.', 400);
       }
+      // Only metrics the release declares, and never an inferential one: ranking
+      // trials by significance would reward trying analyses until one "works".
+      const declared = (release.definition.selectableMetrics || []).find((m) => m.key === rule.metric);
+      if (!declared) {
+        throw codedError('INVALID_INPUT', `'${rule.metric}' is not a metric this workflow declares for selection.`, 400);
+      }
+      if (declared.kind === 'inferential') {
+        throw codedError(
+          'INVALID_INPUT',
+          `'${rule.metric}' is an inferential result; trials cannot be selected by it. Choose a descriptive or quality metric.`,
+          400
+        );
+      }
       selectionRule = { metric: rule.metric, goal: rule.goal };
     }
     const maxTrials = intInRange(body.maxTrials, 'maxTrials', 1, 100, 4);

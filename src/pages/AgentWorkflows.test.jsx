@@ -9,6 +9,10 @@ const release = {
   parameterSchema: { clusterResolution: { type: 'number', min: 0.01, max: 10, default: 0.8 },
     normalizationMethod: { type: 'enum', values: ['LogNormalize', 'SCTransform'], default: 'LogNormalize' } },
   resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 }, inputs: [], outputs: [], approval: null,
+  selectableMetrics: [
+    { key: 'nClusters', label: 'clusters', kind: 'descriptive' },
+    { key: 'postFilterCells', label: 'cells kept after QC', kind: 'quality' },
+  ],
 };
 const run = {
   id: 'run_1', studyId: 'study_1', studyName: 'Sweep', trialNumber: 1, agent: { displayName: 'Runner' },
@@ -101,6 +105,20 @@ describe('AgentWorkflows', () => {
     fireEvent.click(screen.getByRole('button', { name: /create study/i }));
     await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
       releaseId: 'rel_w', sourceStudyId: 'study_2' })));
+  });
+
+  it('offers only declared non-inferential metrics as selection rules', async () => {
+    const de = { ...release, id: 'rel_de', key: 'condition-pseudobulk', title: 'Condition DE', jobType: 'condition.pseudobulk_de.v1',
+      selectableMetrics: [
+        { key: 'testedGeneCount', label: 'genes tested', kind: 'descriptive' },
+        { key: 'significantResultCount', label: 'significant results', kind: 'inferential' },
+      ], approval: { id: 'wfa_de' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [de] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    const metric = await screen.findByLabelText('Selection metric');
+    const options = [...metric.options].map((o) => o.value);
+    expect(options).toContain('testedGeneCount');
+    expect(options).not.toContain('significantResultCount');
   });
 
   it('opens a candidate result in the workspace', async () => {

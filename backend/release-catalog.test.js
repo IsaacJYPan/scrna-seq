@@ -73,6 +73,19 @@ describe('workflow release catalog', () => {
     expect(() => workbench.validateParameters({ recipe: 'study_qc', species: 'human' })).toThrow(/species/);
   });
 
+  it('declares a kind for every selectable metric and marks significance counts inferential', () => {
+    for (const release of releases) {
+      for (const metric of release.definition.selectableMetrics) {
+        expect(['descriptive', 'quality', 'inferential'], `${release.key}.${metric.key}`).toContain(metric.kind);
+      }
+    }
+    const kind = (key, metric) => byKey(key).definition.selectableMetrics.find((m) => m.key === metric)?.kind;
+    expect(kind('condition-pseudobulk', 'significantResultCount')).toBe('inferential');
+    expect(kind('pseudobulk-de', 'total_significant')).toBe('inferential');
+    expect(kind('pathway-gsea', 'significantPathwayCount')).toBe('inferential');
+    expect(kind('seurat-qc-cluster', 'nClusters')).toBe('descriptive');
+  });
+
   it('no longer accepts the unused sampleInputs parameter type', () => {
     expect(() => validateScalar({ samples: { type: 'sampleInputs' } }, 'samples', [])).toThrow();
   });

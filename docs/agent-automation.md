@@ -193,8 +193,12 @@ choices, the result's cells and clusters, and any summary field that differs
 between trials) so the candidates can be compared before one is accepted.
 
 **Selection rules.** A study may declare `selectionRule: { metric, goal }`
-(goal `max` or `min`) on a result summary field, for example
-`{ "metric": "nClusters", "goal": "max" }`. The rule is fixed with the study.
+(goal `max` or `min`), for example `{ "metric": "nClusters", "goal": "max" }`.
+The metric must be one the release declares in `selectableMetrics`, and its
+kind must be `descriptive` or `quality`. Inferential metrics, such as counts of
+significant genes or test statistics, are refused: ranking trials by them would
+reward trying analyses until one reaches significance. The rule is fixed with
+the study.
 `GET …/studies/:studyId` then reports `selection`: the finished trial the rule
 ranks first (earliest on ties), and the comparison table marks it *Best by
 rule*. It is a recommendation: nothing is accepted automatically. Agents

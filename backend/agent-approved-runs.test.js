@@ -583,6 +583,31 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     };
   }
 
+  it('accepts selection rules only on declared, non-inferential metrics', async () => {
+    const ctx = await setup();
+    await acceptedClusteringWithCheckpoint(ctx);
+    const create = (body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+    const pseudobulk = byKey('condition-pseudobulk');
+    const library = byKey('pseudobulk-de');
+    await approve(ctx, pseudobulk);
+    await approve(ctx, library);
+    const significant = await create({ name: 'Most significant', releaseId: pseudobulk.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { contrastId: 'contrast_aa' }, selectionRule: { metric: 'significantResultCount', goal: 'max' } });
+    expect(significant.status).toBe(400);
+    expect(significant.data).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(significant.data.error).toMatch(/inferential/);
+    const totalSignificant = await create({ name: 'Most hits', releaseId: library.id, sourceStudyId: ctx.study.id,
+      selectionRule: { metric: 'total_significant', goal: 'max' } });
+    expect(totalSignificant.data.code).toBe('INVALID_INPUT');
+    const undeclared = await create({ name: 'Undeclared', releaseId: pseudobulk.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { contrastId: 'contrast_aa' }, selectionRule: { metric: 'anything', goal: 'max' } });
+    expect(undeclared.data.code).toBe('INVALID_INPUT');
+    const clusters = await api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body: {
+      name: 'Most clusters', releaseId: ctx.rel.id, datasetIds: [ctx.datasetId],
+      variations: { clusterResolution: [0.5, 1.2] }, selectionRule: { metric: 'nClusters', goal: 'max' } } });
+    expect(clusters.status, JSON.stringify(clusters.data)).toBe(201);
+  });
+
   it('refuses studies that vary a contrast, grouping or population label (Q1)', async () => {
     const ctx = await setup();
     await acceptedClusteringWithCheckpoint(ctx);
