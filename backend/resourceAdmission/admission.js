@@ -406,11 +406,14 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       // the agent run record names the actual actor and delegation.
       const jobId = db.genId('job');
       const maxAttempts = db.RETRYABLE_DURABLE_JOB_TYPES.has(plan.release.jobType) ? 2 : 1;
+      // Follow-on releases consume the accepted object. Preserve the dataset
+      // in the plan for provenance, but omit it from the object-only R receipt.
+      const jobDatasetId = study.source_study_id ? null : dataset.id;
       await client.query(
         `INSERT INTO jobs (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type, status,
            parameters_json, max_attempts, execution_target)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [jobId, actor.sponsorUserId, actor.delegation.projectId, plan.inputs.analysisObjectId, dataset.id,
+        [jobId, actor.sponsorUserId, actor.delegation.projectId, plan.inputs.analysisObjectId, jobDatasetId,
           plan.release.jobType, db.INITIAL_JOB_STATUS, JSON.stringify(plan.parameters), maxAttempts, executionTarget]
       );
       const runId = `run_${crypto.randomBytes(12).toString('hex')}`;

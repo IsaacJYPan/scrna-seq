@@ -449,7 +449,9 @@ describe.skipIf(!CONFIGURED)('composed follow-on studies', () => {
     const run = await submit(followOn, planned.data, 'run-req-0101');
     expect(run.status, JSON.stringify(run.data)).toBe(201);
     const { rows: [job] } = await db.query('SELECT * FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
-    expect(job).toMatchObject({ job_type: 'deg.find_markers.v1', analysis_object_id: resultId });
+    // Dataset provenance stays in the plan; object-only R receipts require null.
+    expect(job).toMatchObject({ job_type: 'deg.find_markers.v1', analysis_object_id: resultId, dataset_id: null });
+    expect(planned.data.plan.inputs.datasetId).toBe(ctx.datasetId);
 
     // Simulate the worker recording the marker summary artifact.
     await db.query(`UPDATE jobs SET status = 'completed', completed_at = now() WHERE id = $1`, [job.id]);
