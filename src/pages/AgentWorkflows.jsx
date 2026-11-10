@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle2, FlaskConical, Loader2, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, Loader2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import AgentRunNotebook from '../components/AgentRunNotebook';
 
@@ -174,7 +174,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   return (
     <section className="space-y-5" aria-label="Approved workflows">
       <div>
-        <h3 className="flex items-center gap-2 text-lg font-bold text-text"><FlaskConical size={18} className="text-primary" /> Approved workflows and studies</h3>
+        <h3 className="flex items-center gap-2 text-lg font-bold text-text">Approved workflows and studies</h3>
         <p className="mt-1 text-sm text-textMuted">Agents can only run approved releases inside a study you define: exact inputs, the parameter options they may choose, a trial limit, and a compute budget. Results stay candidates until a person accepts one.</p>
       </div>
       {error && <p role="alert" className="rounded border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}
@@ -238,7 +238,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
           ) : (
           <fieldset className="space-y-1">
             <legend className="text-xs font-bold text-textMuted">Input datasets (exact versions are pinned)</legend>
-            {datasets.length === 0 && <p className="text-xs text-textMuted">No uploaded 10x HDF5 datasets in this project.</p>}
+            {datasets.length === 0 && <p className="text-xs text-textMuted">No uploaded 10x HDF5 files in this project.</p>}
             {datasets.map((d) => (
               <label key={d.id} className="flex items-center gap-2 text-sm text-text">
                 <input type="checkbox" checked={form.datasetIds.includes(d.id)} onChange={() => setForm((f) => ({
@@ -333,9 +333,9 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
                       {choiceKeys.map((k) => <td key={k} className="py-2 pr-3 text-text">{r.choices?.[k] === undefined ? 'default' : String(r.choices[k])}</td>)}
                       {metrics.map((k) => <td key={k} className="py-2 pr-3 text-text">{formatMetric(r.summary?.[k])}</td>)}
                       <td className="py-2 pr-3 text-textMuted">{r.agent.displayName}</td>
-                      <td className="py-2 pr-3"><span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span></td>
+                      <td className="py-2 pr-3"><span className={`rounded border px-2 py-0.5 text-xs font-medium ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span></td>
                       <td className="space-x-2 whitespace-nowrap py-2 text-right">
-                        {recommended === r.id && <span className="rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">Best by rule</span>}
+                        {recommended === r.id && <span className="rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">Best by rule</span>}
                         {r.resultAnalysisObjectId && onOpenResult && (
                           <button type="button" onClick={() => onOpenResult(r.resultAnalysisObjectId)} className="btn btn-secondary text-xs">Open in workspace</button>
                         )}

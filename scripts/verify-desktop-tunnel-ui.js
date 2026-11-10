@@ -214,7 +214,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     const openingDirect = application.waitForEvent('window');
     await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
     const directWorkspace = await openingDirect;
-    await directWorkspace.getByRole('button', { name: 'Open Workbench', exact: true }).waitFor();
+    await directWorkspace.getByRole('button', { name: 'Open workbench', exact: true }).waitFor();
     const directTarget = await directWorkspace.evaluate(() => window.desktopShell.getCurrentTarget());
     assert(directTarget.kind === 'https' && directTarget.status === 'connected'
       && directTarget.serviceCompatibility?.product === 'TraceOmics' && !directTarget.sshTunnel && !directTarget.capabilities,
@@ -235,7 +235,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     setup = await launch({ forcePortConflict: true }); let workspace = await connect(setup);
     assert(await application.evaluate(() => globalThis.__fixturePortConflictRetried), 'A real native local-forward conflict did not safely allocate another port.');
     checks.push('a real occupied local port fails native forwarding and retries with a fresh app-owned loopback port');
-    await workspace.getByRole('button', { name: 'Open Workbench', exact: true }).waitFor();
+    await workspace.getByRole('button', { name: 'Open workbench', exact: true }).waitFor();
     const preloginReadiness = await workspace.evaluate(async () => {
       const response = await fetch('/api/runtime/readiness'); return { status: response.status, data: await response.json() };
     });
@@ -243,7 +243,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
       'Prelogin SSH application connectivity disclosed authenticated runtime readiness.');
     await workspace.getByLabel('Email', { exact: true }).fill(service.account.email);
     await workspace.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await workspace.getByRole('button', { name: 'Open Workbench', exact: true }).click();
+    await workspace.getByRole('button', { name: 'Open workbench', exact: true }).click();
     const indicator = workspace.locator('[aria-label="Execution target"]');
     const connectionSummary = indicator.locator('summary').filter({ hasText: 'Connection details' });
     await connectionSummary.click();
@@ -326,7 +326,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
       && (await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200,
     'A freshly incompatible same-target API displaced the old authenticated SSH workspace.');
     service.setCompatibilityResponse({ error: 'Legacy application.' }, 404);
-    await failedConnect(setup, /does not publish a TraceOmics compatibility descriptor/i);
+    await failedConnect(setup, /does not publish a TBD compatibility descriptor/i);
     assert((await workspace.evaluate(() => window.desktopShell.getCurrentTarget())).status === 'connected',
       'A missing same-target API descriptor tore down an existing verified tunnel.');
     service.setCompatibilityResponse(null);
@@ -363,7 +363,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     assert((await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200, 'Rejected expired/untrusted candidates displaced the existing authenticated workspace.');
     checks.push('expired and unrelated-authority certificates fail strict TLS validation over actual SSH while the original authenticated workspace remains available');
     const switching = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); const alternate = await switching;
-    await alternate.getByRole('button', { name: 'Open Workbench', exact: true }).waitFor({ timeout: 30000 });
+    await alternate.getByRole('button', { name: 'Open workbench', exact: true }).waitFor({ timeout: 30000 });
     const alternateState = await alternate.evaluate(async () => ({ remembered: localStorage.getItem('tunnel-selected-project'), status: (await fetch('/api/auth/session')).status }));
     assert(alternateState.remembered === null && alternateState.status === 401, 'Switching resolved service identities carried project selection or session credentials.');
     checks.push('switching another SSH loopback service creates an isolated cookie/storage partition even with the same HTTPS authority');

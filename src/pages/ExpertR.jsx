@@ -30,7 +30,7 @@ if ("umap" %in% Seurat::Reductions(obj)) {
 `;
 
 function messageFor(error) {
-  return publicErrorMessage(error, 'Could not queue Expert R. Review the saved analysis and script, then try again.');
+  return publicErrorMessage(error, 'Could not queue Expert R. Review the dataset and script, then try again.');
 }
 
 const ACCESS_MESSAGES = {
@@ -39,7 +39,7 @@ const ACCESS_MESSAGES = {
   incompatible: 'The R runtime does not match this installation’s supported profile. The installation administrator must update its image or connection credentials.',
   'access-required': 'Your account needs R execution access. An administrator can grant access, or an owner can give you an analyst role when project-role access is enabled.',
   'access-revoked': 'An administrator has revoked R execution for your account. Existing saved results remain available; new and queued R analyses cannot run.',
-  'demo-disabled': 'Advanced analysis is intentionally unavailable in the public demo.',
+  'demo-disabled': 'R console is intentionally unavailable in the public demo.',
 };
 
 export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {}, userId, setActiveTab, onExpertRSubmitted }) {
@@ -158,11 +158,11 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     return (
       <div className="h-full overflow-y-auto bg-background p-8 text-textMuted">
         <div className="mx-auto max-w-2xl rounded-xl border border-border bg-surface p-6">
-          <PageHeader title="Advanced analysis" icon={Code2} />
+          <PageHeader title="R console" icon={Code2} />
           <p className="mt-3 text-sm">
             {ACCESS_MESSAGES[status] || (publicDemo
-              ? 'Advanced analysis is intentionally unavailable in the public demo.'
-              : 'Advanced analysis has not been enabled for this account or deployment.')}
+              ? 'R console is intentionally unavailable in the public demo.'
+              : 'R console has not been enabled for this account or deployment.')}
           </p>
           <p className="mt-3 text-sm">
             It requires an isolated R runtime and an authorized project role or account grant. Ask a project owner or deployment administrator to review access for this project.
@@ -189,7 +189,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
       <form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
       {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Submitted work is not rerun automatically.</p>}
-      <PageHeader title="Advanced analysis" icon={Code2} description="Use R for custom exploratory analysis on a private saved analysis." actions={
+      <PageHeader title="R console" icon={Code2} description="Use R for custom exploratory analysis on a private dataset." actions={
         <button type="button" className="btn btn-secondary" onClick={() => {
           if (consoleDetails.current) { consoleDetails.current.open = true; consoleDetails.current.scrollIntoView({ block: 'start' }); }
         }}>Interactive console</button>
@@ -201,8 +201,8 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
       </div>
       {error && <div role="alert" className="text-sm text-red-300">{error}</div>}
       {job && <div className="flex flex-wrap items-center gap-3 text-sm"><span role="status" aria-live="polite" className="text-success">Run submitted. Results will remain private until you choose to share them.</span><button type="button" className="btn btn-secondary text-xs" onClick={() => setActiveTab?.('history')}>View in Runs &amp; Results</button></div>}
-      <label className="block text-sm">Saved analysis<select className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={objectId} onChange={(event) => setObjectId(event.target.value)} disabled={objects.length === 0}><option value="">Select a saved analysis</option>{objects.map((item) => <option value={item.id} key={item.id}>{item.displayName || item.name || 'Saved analysis'}</option>)}</select></label>
-      {objects.length === 0 && <p className="text-sm text-slate-400">No saved analysis you own is available for R work. Open a saved version or create a branch first.</p>}
+      <label className="block text-sm">Dataset<select className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={objectId} onChange={(event) => setObjectId(event.target.value)} disabled={objects.length === 0}><option value="">Select a dataset</option>{objects.map((item) => <option value={item.id} key={item.id}>{item.displayName || item.name || 'Dataset'}</option>)}</select></label>
+      {objects.length === 0 && <p className="text-sm text-slate-400">No dataset you own is available for R work. Open a saved version or create a branch first.</p>}
       <details className="card p-3">
         <summary className="cursor-pointer font-medium">Private input files · {selectedInputIds.length}/5 selected</summary>
         <div className="mt-4">
@@ -225,14 +225,14 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
           <label id="expert-r-script-title" htmlFor="expert-r-script" className="font-semibold">R script</label>
           <button className="btn btn-primary" disabled={blocked || busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button>
         </div>
-        <p className="text-sm text-textMuted">Runs use the selected saved analysis and {selectedInputIds.length}/5 private input files. Variables reset between runs.</p>
+        <p className="text-sm text-textMuted">Runs use the selected dataset and {selectedInputIds.length}/5 private input files. Variables reset between runs.</p>
         {selectedInputIds.length > 0 && <p className="text-sm text-textMuted break-all">Selected inputs: {privateInputs.filter((input) => selectedInputIds.includes(input.id)).map((input) => input.originalFilename).join(', ')}</p>}
         <textarea id="expert-r-script" className="min-h-[320px] md:min-h-[420px] w-full rounded-lg border border-border bg-background p-3 font-mono text-sm leading-6 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={script} onChange={(event) => setScript(event.target.value)} spellCheck="false" />
       </section>
       <details className="card p-4 text-sm">
         <summary className="cursor-pointer font-medium">Runtime, packages, and privacy</summary>
         <div className="mt-4 space-y-4">
-          <p className="text-textMuted">Your saved analysis opens in a fresh, time-limited R workspace. It cannot reach the network or files outside this analysis, and uses the packages listed below. Create tables and figures to inspect or export. They stay private unless you choose to share them through Analysis Branches.</p>
+          <p className="text-textMuted">Your dataset opens in a fresh, time-limited R workspace. It cannot reach the network or files outside this analysis, and uses the packages listed below. Create tables and figures to inspect or export. They stay private unless you choose to share them through Analysis Branches.</p>
           <REnvironment reference={policy.expertREnvironment} projectId={projectId} />
           <p className="text-textMuted">Available packages ({profile.packages.length}): {profile.packages.join(', ')}</p>
         </div>

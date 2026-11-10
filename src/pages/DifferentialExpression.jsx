@@ -1,16 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Archive,
-  Ban,
-  CheckCircle2,
-  Clock,
-  FileText,
-  Loader2,
-  Play,
-  RefreshCw,
-  ShieldCheck,
-} from 'lucide-react';
+import { AlertTriangle, Ban, CheckCircle2, FileText, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
@@ -127,7 +116,7 @@ function badgeClass(tone = 'slate') {
 
 function StatusBadge({ children, tone = 'slate' }) {
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold ${badgeClass(tone)}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${badgeClass(tone)}`}>
       {children}
     </span>
   );
@@ -136,8 +125,8 @@ function StatusBadge({ children, tone = 'slate' }) {
 function SummaryMetric({ label, value, detail }) {
   return (
     <div className="rounded border border-border bg-surface/70 p-4">
-      <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold text-textMuted">{label}</div>
+      <div className="text-2xl font-semibold text-text">{value}</div>
+      <div className="mt-1 text-xs font-medium text-textMuted">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
@@ -192,7 +181,7 @@ function TopMarkersTable({ markers }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[680px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold text-textMuted">
+        <thead className="bg-background text-xs font-medium text-textMuted">
           <tr>
             <th className="p-3">Group</th>
             <th className="p-3">Gene</th>
@@ -375,7 +364,7 @@ export default function DifferentialExpression({
       return;
     }
     if (!selectedObjectId || !isDbBackedObject) {
-      setError('Select a saved analysis before running marker analysis.');
+      setError('Select a dataset before running marker analysis.');
       return;
     }
     if (!canWriteProject) {
@@ -446,7 +435,7 @@ export default function DifferentialExpression({
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
           <h2 className="mb-2 text-xl font-bold text-text">No Dataset Loaded</h2>
-          <p className="text-sm text-textMuted">Load or select a saved analysis before running marker analysis.</p>
+          <p className="text-sm text-textMuted">Load or select a dataset before running marker analysis.</p>
         </div>
       </div>
     );
@@ -462,7 +451,7 @@ export default function DifferentialExpression({
             <button
               onClick={launchDegJob}
               disabled={!canLaunch}
-              className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
             >
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
               Run marker analysis
@@ -482,7 +471,7 @@ export default function DifferentialExpression({
 
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
           <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
-          <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Dataset</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
           <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Private analysis workspace</dt><dd className="text-text">Available only to the analysis owner</dd></div>
         </dl>
         {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
@@ -508,7 +497,7 @@ export default function DifferentialExpression({
 
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Select a saved analysis before running marker analysis.
+            Select a dataset before running marker analysis.
           </div>
         )}
 
@@ -527,7 +516,7 @@ export default function DifferentialExpression({
 
         {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Interactive plots are not available until this saved analysis is open in your private workspace. Marker analysis can still run from its private saved checkpoint.
+            Interactive plots are not available until this dataset is open in your private workspace. Marker analysis can still run from its private saved checkpoint.
             <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
               {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open Runs & Results'}
             </button>
@@ -559,7 +548,7 @@ export default function DifferentialExpression({
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Group by</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Group by</span>
               <select
                 value={params.groupBy}
                 onChange={event => setParam('groupBy', event.target.value)}
@@ -571,7 +560,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Assay</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Assay</span>
               <select
                 value={params.assay}
                 onChange={event => setParam('assay', event.target.value)}
@@ -583,7 +572,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">min.pct</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">min.pct</span>
               <input
                 type="number"
                 min="0"
@@ -596,7 +585,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">logfc threshold</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">logfc threshold</span>
               <input
                 type="number"
                 min="0"
@@ -609,7 +598,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Top markers / group</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Top markers / group</span>
               <input
                 type="number"
                 min="5"
@@ -622,7 +611,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Max cells / ident</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Max cells / ident</span>
               <input
                 type="number"
                 min="1"
@@ -636,7 +625,7 @@ export default function DifferentialExpression({
             </label>
 
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Random seed</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Random seed</span>
               <input
                 type="number"
                 min="0"
@@ -668,7 +657,6 @@ export default function DifferentialExpression({
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                <Clock size={18} className="text-primary" />
                 Run status
               </h3>
               <p className="mt-1 text-sm text-textMuted">
@@ -698,11 +686,11 @@ export default function DifferentialExpression({
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
                 <div>
-                  <div className="text-[10px] font-bold text-textMuted">Outcome</div>
+                  <div className="text-xs font-medium text-textMuted">Outcome</div>
                   <div className="mt-1 text-text">{displayRunStatus(job.status)}</div>
                 </div>
                 <div>
-                  <div className="text-[10px] font-bold text-textMuted">Last refreshed</div>
+                  <div className="text-xs font-medium text-textMuted">Last refreshed</div>
                   <div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div>
                 </div>
               </div>
@@ -722,7 +710,6 @@ export default function DifferentialExpression({
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                <Archive size={18} className="text-primary" />
                 Marker analysis summary
               </h3>
               <p className="mt-1 text-sm text-textMuted">
@@ -789,7 +776,7 @@ export default function DifferentialExpression({
             <ShieldCheck size={16} className="text-primary" />
             Boundary note
           </div>
-          Project membership shows metadata only. A saved analysis can be opened only in its owner&apos;s private analysis workspace. Result exports require authorization and visibility checks; saved versions are never downloadable.
+          Project membership shows metadata only. A dataset can be opened only in its owner&apos;s private analysis workspace. Result exports require authorization and visibility checks; saved versions are never downloadable.
         </div>
       </div>
     </div>

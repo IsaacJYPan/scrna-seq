@@ -19,7 +19,7 @@ describe('publicErrorMessage', () => {
   });
   it('preserves short actionable scientific and access feedback', () => {
     expect(publicErrorMessage('No cells matched these filters.')).toBe('No cells matched these filters.');
-    expect(publicErrorMessage('Select a saved analysis before continuing.')).toBe('Select a saved analysis before continuing.');
+    expect(publicErrorMessage('Select a dataset before continuing.')).toBe('Select a dataset before continuing.');
     expect(publicErrorMessage('permission denied')).toBe('You do not have access to this project action.');
   });
 

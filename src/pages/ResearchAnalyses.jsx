@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Archive, FileText, Link2, Loader2, Plus, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Archive, FileText, Link2, Loader2, Plus } from 'lucide-react';
+import RefreshButton from '../components/RefreshButton';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { publicErrorMessage } from '../publicError';
 import { createAnalysis, getAnalysis, listAnalyses, listReferenceOptions, updateAnalysis } from '../analyses/researchAnalysisApi';
@@ -239,7 +240,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
     const result = await createAnalysis(projectId, input);
     if (!mounted.current) return;
     if (!result?.analysis || result.analysis.projectId !== projectId || !RESEARCH_ANALYSIS_ID.test(result.analysis.id)
-        || !Number.isSafeInteger(result.analysis.version) || result.analysis.version < 1) throw new Error('The saved analysis could not be confirmed. Retry the original request.');
+        || !Number.isSafeInteger(result.analysis.version) || result.analysis.version < 1) throw new Error('The dataset could not be confirmed. Retry the original request.');
     if (selection === selectionRequest.current && adoptionVisible.current) {
       applySaved(result.analysis); setSelected(result.analysis); setDetailOpen(true); setCreating(false); closeAdoption();
       setKnownLabels(previous => ({ ...previous, [referenceKey(input.references[0])]: input.name }));
@@ -254,12 +255,11 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
 
   return <div className="relative h-full min-w-0">
     <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen || attachmentsOpen || preparationOpen || publicationsOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
-    <div className="mx-auto w-full max-w-6xl lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+    <div className="page-column lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <header className="mb-7 flex shrink-0 flex-wrap items-start justify-between gap-4">
-        <div><p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold tracking-tight">Analyses</h2>
-          <p className="mt-2 max-w-xl text-sm text-textMuted">Keep a scientific question and its supporting work together.</p></div>
+        <div><h2 className="page-title">Analyses</h2></div>
         <div className="flex flex-wrap gap-3"><button ref={adoptionButton} type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" disabled={!!mutation || connection.blocked || !!pendingCreate.current}
-          onClick={() => { setAdoptionVisited(true); setAdoptionOpen(true); }}><FileText size={16} />Bring saved work</button>
+          onClick={() => { setAdoptionVisited(true); setAdoptionOpen(true); }}><FileText size={16} />Link saved work</button>
           {canWrite && <button type="button" className="btn btn-primary inline-flex items-center gap-2" disabled={!!mutation || connection.blocked}
           onClick={() => { setCreating(true); setError(''); setNotice(''); }}><Plus size={16} />New analysis</button>}</div>
       </header>
@@ -279,11 +279,11 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
       <div className="grid gap-7 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(230px,0.8fr)_minmax(0,1.6fr)]">
         <section aria-label="Project analyses" className={`min-w-0 lg:flex lg:min-h-0 lg:flex-col ${detailOpen || creating ? 'hidden' : ''}`}>
           <div className="mb-2 flex shrink-0 items-center justify-between gap-3 border-b border-border pb-3">
-            <label className="text-sm"><span className="sr-only">Analysis status</span><select aria-label="Analysis status" value={status} disabled={loading || !!mutation} onChange={event => setStatus(event.target.value)} className="rounded border border-border bg-surface px-2 py-1.5"><option value="active">Active analyses</option><option value="archived">Archived analyses</option></select></label>
-            <button type="button" aria-label="Refresh analyses" className="btn btn-secondary p-2" disabled={loading || connection.blocked} onClick={() => void load()}><RefreshCw size={16} /></button>
+            <label className="text-sm"><span className="sr-only">Analysis status</span><select aria-label="Analysis status" value={status} disabled={loading || !!mutation} onChange={event => setStatus(event.target.value)} className="input w-auto py-1.5"><option value="active">Active analyses</option><option value="archived">Archived analyses</option></select></label>
+            <RefreshButton label="Refresh analyses" disabled={loading || connection.blocked} loading={loading} onClick={() => void load()} />
           </div>
           {loading && !items.length && <p role="status" className="py-6 text-sm text-textMuted">Loading analyses…</p>}
-          {!loading && !items.length && <div className="py-7"><p className="text-sm font-medium">{status === 'archived' ? 'No archived analyses' : 'No analyses yet'}</p><p className="mt-2 text-sm text-textMuted">{status === 'archived' ? 'Archived work stays available here.' : canWrite ? 'Start with a question. You can link saved material without copying large objects.' : 'Analyses created by your project colleagues will appear here.'}</p></div>}
+          {!loading && !items.length && <div className="py-5"><p className="text-sm font-medium">{status === 'archived' ? 'No archived analyses' : 'No analyses yet'}</p><p className="mt-1 text-sm text-textMuted">{status === 'archived' ? 'Archived work stays available here.' : canWrite ? 'Start one with a research question.' : 'Analyses created by your project colleagues will appear here.'}</p></div>}
           <ul aria-label="Analysis list" tabIndex={0} className="divide-y divide-border rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:min-h-0 lg:flex-1 lg:overflow-auto">{items.map(item => <li key={item.id}><button ref={element => { if (element) rowButtons.current.set(item.id, element); else rowButtons.current.delete(item.id); }} type="button" disabled={!!mutation} aria-pressed={selected?.id === item.id} onClick={() => void open(item)}
             className={`w-full rounded px-3 py-4 text-left transition-colors hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${selected?.id === item.id ? 'bg-primary/10' : ''}`}>
             <span className="block break-words text-sm font-semibold">{item.name}</span><span className="mt-1.5 block text-xs text-textMuted">{describeTime(item.updatedAt)} · Version {item.version}{drafts[item.id] ? ' · Draft edited' : ''}</span>
@@ -291,7 +291,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
           {nextCursor && <button type="button" className="btn btn-secondary mt-4 shrink-0" disabled={loading} onClick={() => void load(nextCursor)}>Load more analyses</button>}
         </section>
         <section ref={detailScroller} aria-label="Selected analysis" className={`min-w-0 lg:min-h-0 lg:overflow-auto lg:pr-1 ${!detailOpen || creating ? 'hidden lg:block' : ''}`}>
-          {!selected ? <div className="px-2 py-9 text-sm text-textMuted"><FileText size={25} className="mb-4" /><p>Select an analysis to open its question and linked material.</p></div> : <div className="space-y-5">
+          {!selected ? <div className="px-2 pt-2 text-sm text-textMuted"><p>Select an analysis to open its question and linked material.</p></div> : <div className="space-y-5">
             <button ref={detailBack} type="button" className="inline-flex items-center gap-2 rounded text-sm text-textMuted underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:hidden" onClick={() => setDetailOpen(false)}><ArrowLeft size={15} />All analyses</button>
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-textMuted">Version {selected.version} · {selected.status === 'archived' ? 'Archived' : 'Project analysis'}</span>
               {!canWrite && <span className="text-xs text-textMuted">View access</span>}{dirty && <span role="status" className="text-xs text-primary">Draft edited</span>}</div>
@@ -345,7 +345,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
           </div>}
         </section>
       </div>
-      {onOpenWorkspace && <button type="button" className="mt-8 inline-flex items-center gap-2 self-start text-xs text-textMuted underline lg:mt-4 lg:shrink-0" onClick={onOpenWorkspace}><ArrowLeft size={13} />Return to data workspace</button>}
+      {onOpenWorkspace && <button type="button" className="mt-8 inline-flex items-center gap-2 self-start text-xs text-textMuted underline lg:hidden" onClick={onOpenWorkspace}><ArrowLeft size={13} />Return to datasets</button>}
     </div>
     </div>
     {notebookVisited && <div hidden={!notebookOpen} className="absolute inset-0">

@@ -443,7 +443,7 @@ describe('PipelineManager', () => {
       projectId: 'proj_1',
       datasetId: 'ds_spatial123',
       objectType: 'matrix',
-      displayName: 'sample_outs raw dataset',
+      displayName: 'sample_outs raw input',
       metadata: {},
     }));
     window.electronAPI.createSpatialSeuratPipelineJob = vi.fn(async () => ({
@@ -511,7 +511,7 @@ describe('PipelineManager', () => {
       projectId: 'proj_1',
       datasetId: 'ds_abc123',
       objectType: 'matrix',
-      displayName: 'filtered_feature_bc_matrix raw dataset',
+      displayName: 'filtered_feature_bc_matrix raw input',
       metadata: { source: 'dataset', sourceType: 'tenx_h5_dataset' },
     }));
     window.electronAPI.createSeuratPipelineJob = vi.fn(async () => ({
@@ -631,7 +631,7 @@ describe('PipelineManager', () => {
       );
     });
     expect(JSON.stringify(window.electronAPI.createProjectAnalysisObject.mock.calls)).not.toMatch(/storage|path|state/i);
-    expect((await screen.findAllByText(/Saved analysis is ready/i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Dataset is ready/i)).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /Open saved version/i })).toBeInTheDocument();
     expect(screen.getByText(/mitochondrial filter warning/i)).toBeInTheDocument();
     expect(container.textContent || '').not.toMatch(/vault\/private|state_key|user-1:obj/i);

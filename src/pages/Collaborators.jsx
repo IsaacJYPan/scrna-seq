@@ -1,10 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle, Loader2, RefreshCw, ShieldCheck, Trash2,
-  UserPlus, Users,
-} from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
+import RefreshButton from '../components/RefreshButton';
 
 const ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ROLE_HELP = {
@@ -220,37 +218,25 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
 
   if (!activeProjectId) {
     return (
-      <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
-        <div className="mx-auto max-w-5xl rounded-lg border border-dashed border-border p-8 text-center">
-          <Users size={30} className="mx-auto mb-3 text-textMuted" />
-          <h2 className="text-xl font-bold text-text">Select a project</h2>
-          <p className="mt-2 text-sm text-textMuted">Membership and roles are scoped to the selected research project.</p>
+      <div className="page-scroll custom-scrollbar">
+        <div className="page-column empty-note">
+          <h2 className="text-lg font-semibold text-text">Select a project</h2>
+          <p className="mt-1 text-sm text-textMuted">Membership and roles are scoped to the selected research project.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-8 custom-scrollbar">
-      <div className="mx-auto max-w-5xl space-y-7">
-        <PageHeader title="Collaborators" icon={Users} className="border-b border-border pb-5"
-          description={<>Manage access to <span className="font-bold text-text">{activeProject?.name || 'the selected project'}</span>.</>}
-          actions={<button onClick={loadMembers} disabled={interactionBlocked} className="btn btn-secondary">
-            {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
-          </button>}>
+    <div className="page-scroll custom-scrollbar">
+      <div className="page-column space-y-7">
+        <PageHeader title="Collaborators" icon={Users}
+          titleAction={<RefreshButton onClick={loadMembers} disabled={interactionBlocked} loading={loading} />}>
             <div className="mt-3 flex flex-wrap gap-2">
-              <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${roleBadge(actorRole)}`}>Your role: {actorRole || 'unknown'}</span>
-              <span className="rounded border border-border px-2 py-0.5 text-[10px] font-bold text-textMuted">{memberCountText}</span>
+              {actorRole && <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(actorRole)}`}>Your role: {actorRole}</span>}
+              {members.length > 0 && <span className="rounded border border-border px-2 py-0.5 text-xs font-medium text-textMuted">{memberCountText}</span>}
             </div>
         </PageHeader>
-
-        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
-          <div className="mb-1 flex items-center gap-2 font-bold text-text">
-            <ShieldCheck size={17} className="text-primary" />
-            Collaboration boundary
-          </div>
-          Members can review project records and authorized results according to role. To continue another researcher&apos;s work, create your own private branch from a saved version.
-        </div>
 
         {error && (
           <div role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">
@@ -260,9 +246,9 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
         )}
 
         {canManage && (
-          <form onSubmit={addMember} className="rounded-lg border border-border bg-surface p-5">
+          <form onSubmit={addMember} className="panel">
             <div className="mb-4">
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><UserPlus size={18} className="text-primary" /> Add existing user</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Add existing user</h3>
               <p className="mt-1 text-sm text-textMuted">The user must already have an account. This is immediate membership, not an emailed invitation.</p>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
@@ -295,13 +281,12 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
         <section className="space-y-3">
           <div>
             <h3 className="text-lg font-bold text-text">Project members</h3>
-            <p className="mt-1 text-sm text-textMuted">Access is re-checked for every action. Visible controls do not replace those checks.</p>
           </div>
 
           {loading && members.length === 0 ? (
             <div className="flex h-40 items-center justify-center rounded-lg border border-border bg-surface"><Loader2 size={28} className="animate-spin text-primary" /></div>
           ) : members.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-textMuted">No member list is available.</div>
+            <p className="text-sm text-textMuted">The member list could not be loaded. Refresh to try again.</p>
           ) : (
             <div className="space-y-2">
               {members.map(member => {
@@ -313,13 +298,13 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
                 const confirming = confirmRemoveKey === removeKey;
                 const roleOptions = actorRole === 'owner' ? ROLES : ROLES.filter(role => role !== 'owner');
                 return (
-                  <div key={member.userId} className="rounded-lg border border-border bg-surface p-4">
+                  <div key={member.userId} className="panel">
                     <div className="flex flex-wrap items-center justify-between gap-4">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="truncate font-bold text-text">{member.displayName || member.email}</p>
                           {Number(member.userId) === Number(userId) && <span className="text-xs text-textMuted">(you)</span>}
-                          <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${roleBadge(member.role)}`}>{member.role}</span>
+                          <span className={`rounded border px-2 py-0.5 text-xs font-medium ${roleBadge(member.role)}`}>{member.role}</span>
                         </div>
                         <p className="mt-1 truncate text-sm text-textMuted">{member.email}</p>
                         <p className="mt-2 text-xs text-textMuted">{ROLE_HELP[member.role]}</p>

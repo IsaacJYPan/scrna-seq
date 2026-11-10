@@ -57,7 +57,7 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
   try {
     await page.goto(target.origin, { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Start temporary demo', exact: true }).click();
-    await page.getByRole('heading', { name: /^TraceOmics Workbench/ }).waitFor();
+    await page.getByRole('heading', { name: / Workbench — / }).waitFor();
     await page.getByText('Curated single-cell demo', { exact: true }).first().waitFor();
     const identity = await page.evaluate(async () => {
       const projects = await window.electronAPI.listProjects();
@@ -199,7 +199,7 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
       return state.exists === true && state.has_unsaved_changes === false;
     }, 'Restoring the saved version after a runtime restart failed.');
     await page.getByText(/Live analysis is unavailable. Restore a saved version/).waitFor({ state: 'detached' });
-    checks.push('saved analysis recovers after runtime restart');
+    checks.push('dataset recovers after runtime restart');
 
     assert(pageErrors.length === 0, 'Browser errors: ' + pageErrors.join(' | '));
     assert(serverErrors.length === 0, 'Server errors: ' + serverErrors.join(' | '));

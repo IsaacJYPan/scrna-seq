@@ -14,6 +14,7 @@ import {
 } from '../pipelines/pipelineRegistry';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
+import RefreshButton from '../components/RefreshButton';
 
 function parseApiError(error) {
   const raw = error?.message || String(error || 'Request failed.');
@@ -246,22 +247,17 @@ export default function PipelineManager({
 
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-4 custom-scrollbar sm:p-8">
-      <div className="mx-auto max-w-6xl space-y-8">
-        <PageHeader title="Pipelines" icon={Layers} description="Run a complete analysis or inspect each step as you go." className="border-b border-border pb-5" actions={<button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
-            {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-            Refresh
-          </button>} />
+    <div className="page-scroll custom-scrollbar">
+      <div className="page-column space-y-8">
+        <PageHeader title="Pipelines" icon={Layers} titleAction={<RefreshButton onClick={refreshAll} disabled={loading || Boolean(selectingId)} loading={loading} />} />
 
         {!activeProjectId ? (
-          <div className="rounded-lg border border-dashed border-border p-6 text-center">
-            <p className="font-bold text-text">Select a project</p>
-            <p className="mt-2 text-sm text-textMuted">A project is required to choose an approved workflow.</p>
+          <div className="empty-note">
+            <p className="font-semibold text-text">Select a project</p>
+            <p className="mt-1 text-sm text-textMuted">A project is required to choose an approved workflow.</p>
           </div>
         ) : (
           <>
-            <p className="text-sm text-textMuted">Project: <span className="font-medium text-text">{activeProject?.name || 'Selected project'}</span></p>
-
             {error && (
               <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
                 <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Workflow selection unavailable</div>

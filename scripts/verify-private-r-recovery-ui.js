@@ -50,7 +50,7 @@ async function main() {
   const ui = page => page.getByRole('region', { name: 'Private R console', exact: true });
   async function open(page) {
     observe(page);
-    await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await page.getByRole('button', { name: /^R console,/ }).click();
     await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
     await ui(page).getByRole('heading', { name: 'Private R console', exact: true }).waitFor();
     return ui(page);

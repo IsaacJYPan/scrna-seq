@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Microscope, Moon, Sun } from 'lucide-react';
 import { readSnapshotPublicationView, readSnapshotPublicationDocument } from '../analyses/snapshotPublicationApi';
+import { APP_NAME } from '../brand';
 
 const RetainedSnapshotFindings = React.lazy(() => import('../analyses/RetainedSnapshotFindings'));
 const SharedRevisionDiscussion = React.lazy(() => import('./SharedRevisionDiscussion'));
@@ -71,7 +72,7 @@ export default function SharedSnapshotLanding({ state, onRefresh, onReadFailure,
     <header className="shrink-0 border-b border-border bg-surface px-4 py-3 sm:px-8">
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2"><Microscope size={22} className="shrink-0 text-primary" aria-hidden="true" />
-          <div className="min-w-0"><p className="text-sm font-semibold">TraceOmics</p><p className="text-xs text-textMuted">Shared snapshot · Read only</p></div>
+          <div className="min-w-0"><p className="text-sm font-semibold">{APP_NAME}</p><p className="text-xs text-textMuted">Shared snapshot · Read only</p></div>
         </div>
         <button type="button" className="btn btn-secondary flex items-center gap-2 text-xs"
           aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme?.(theme === 'dark' ? 'light' : 'dark')}>
@@ -104,9 +105,9 @@ export default function SharedSnapshotLanding({ state, onRefresh, onReadFailure,
 
       {snapshot && <>
         <section aria-label="Saved research question" className="space-y-4">
-          <div><p className="mb-1 text-xs font-medium text-textMuted">Saved analysis {snapshot.analysis.version}</p>
+          <div><p className="mb-1 text-xs font-medium text-textMuted">Dataset {snapshot.analysis.version}</p>
             <h1 className="whitespace-pre-wrap break-words text-2xl font-semibold">{snapshot.analysis.name}</h1></div>
-          <div><h2 className="text-sm font-semibold">Research question</h2><p className="mt-1 whitespace-pre-wrap break-words text-sm text-textMuted">{snapshot.analysis.description || 'No research question was supplied in this saved analysis.'}</p></div>
+          <div><h2 className="text-sm font-semibold">Research question</h2><p className="mt-1 whitespace-pre-wrap break-words text-sm text-textMuted">{snapshot.analysis.description || 'No research question was supplied in this dataset.'}</p></div>
           <p className="break-words text-sm text-textMuted">Published by {record.publisherLabel} · <time dateTime={record.publishedAt}>{new Date(record.publishedAt).toLocaleString()}</time></p>
           <p className="text-xs text-textMuted">These are the selected findings from this saved version. Reproduction has not been checked. Original data and compute access are governed separately.</p>
         </section>

@@ -16,7 +16,7 @@ export function selectedObjectStorageKey(user, projectId) {
 
 export function createEmptyWorkspace({
   id = 'ws-personal-1',
-  name = 'Personal Workspace',
+  name = 'Personal workspace',
   type = 'personal',
   collaborators = [],
 } = {}) {

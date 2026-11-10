@@ -13,7 +13,7 @@ const R_STATUS = {
   'demo-disabled': 'Guided demo',
 };
 
-export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projectId, userId }) {
+export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projectId, projectName = '', onOpenProjects, userId }) {
   const { target, blocked, error: connectionError } = useExecutionTarget();
   const [error, setError] = useState('');
   const [readinessOpen, setReadinessOpen] = useState(false);
@@ -23,15 +23,20 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projec
   const runtime = R_STATUS[deploymentPolicy.expertRStatus?.state]
     || (deploymentPolicy.demoMode ? 'Guided demo' : deploymentPolicy.expertREnabled ? 'Custom R available' : 'Custom R status unavailable');
   const disconnected = target?.sshTunnel?.state && target.sshTunnel.state !== 'connected';
-  return <><div aria-label="Execution target" className="shrink-0 min-h-12 py-1.5 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
+  return <><div aria-label="Execution target" className="shrink-0 h-12 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
     <div className="min-w-0 flex-1">
-      <span className="block truncate font-medium">{target?.name || 'Analysis server'}</span>
+      {onOpenProjects
+        ? <button type="button" onClick={onOpenProjects} title="Switch project" className="max-w-full truncate rounded px-1 -mx-1 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">{projectName || 'Select a project'}</button>
+        : <span className="block truncate text-sm font-semibold">{projectName || 'No project selected'}</span>}
+    </div>
+    <div className="min-w-0 text-right">
+      <span className="block truncate text-textMuted">{target?.name || 'Analysis server'}</span>
       {target?.sshTunnel && <span role="status" className={`block truncate ${disconnected ? 'text-amber-800 dark:text-amber-200' : 'text-textMuted'}`}>
         {disconnected ? 'SSH tunnel disconnected' : 'SSH tunnel connected'}
       </span>}
       {(error || connectionError) && <span role="status" className="block truncate" title={error || connectionError}>Connection needs attention</span>}
     </div>
-    <DetailsPopover label="Connection details" className="shrink-0">
+    <DetailsPopover label="Connection details" className="shrink-0" summaryClassName="inline-flex min-h-8 cursor-pointer list-none select-none items-center rounded px-2 text-xs font-medium text-textMuted hover:bg-black/5 hover:text-text dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
       <p className="font-medium break-words">Server: {target?.name || endpoint}</p>
       {target && <p className="mt-1 break-all text-textMuted">{endpoint}</p>}
       <p className="mt-3 font-medium">{runtime}</p>

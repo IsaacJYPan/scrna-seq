@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { X, FileCode2 } from 'lucide-react';
+import { X } from 'lucide-react';
 
 export default function ProvenanceDrawer({ provId, chain, onClose }) {
   const panelRef = useRef(null);
@@ -43,7 +43,6 @@ export default function ProvenanceDrawer({ provId, chain, onClose }) {
         <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-slate-800/50">
           <div>
             <h3 id="prov-drawer-title" className="text-lg font-bold text-white flex items-center gap-2">
-              <FileCode2 size={20} className="text-primary" />
               {stepName}
             </h3>
             <span className="text-xs text-textMuted">{timestamp}</span>
@@ -56,7 +55,7 @@ export default function ProvenanceDrawer({ provId, chain, onClose }) {
         <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
           
           <div className="rounded-lg border border-border bg-black/20 p-4">
-            <span className="block text-[10px] text-textMuted mb-2 font-semibold">Recorded analysis</span>
+            <span className="block text-xs text-textMuted mb-2 font-semibold">Recorded analysis</span>
             <p className="text-sm text-slate-300">This record summarizes an approved analysis step. Technical implementation details and source text are not shown here.</p>
           </div>
 

@@ -43,9 +43,9 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
     setLinkedResults(previous => [...previous, { kind: option.typed ? 'typed-analysis-reference' : 'analysis-reference', reference: option.reference,
       ...(option.typed ? { descriptorSha256: option.descriptorSha256 } : {}), caption: option.label, view }]);
   };
-  return <section aria-label={`Linked in saved analysis ${analysisVersion}`} className="space-y-4 border-t border-border pt-5">
-    <div><h4 className="font-medium">Linked in saved analysis {analysisVersion}</h4>
-      <p className="mt-1 text-sm text-textMuted">Choose findings already linked to this exact saved version. Linked selections are kept separately for each saved analysis version.</p>
+  return <section aria-label={`Linked in dataset ${analysisVersion}`} className="space-y-4 border-t border-border pt-5">
+    <div><h4 className="font-medium">Linked in dataset {analysisVersion}</h4>
+      <p className="mt-1 text-sm text-textMuted">Choose findings already linked to this exact saved version. Linked selections are kept separately for each dataset version.</p>
       <p className="mt-2 text-xs text-textMuted">Eligibility is based on recorded metadata. Contents are checked when preparing a finding. Reference-only items include no contents or data access.</p></div>
     <ul aria-label="Linked saved references" className="space-y-3">{choices.map(option => {
       const included = linkedPrerequisites.some(item => item.kind === 'analysis-reference' && same(item.reference, option.reference));
@@ -66,8 +66,8 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
         {option.reference.kind === 'workflow-snapshot' && <CapturedWorkflowChoices snapshotReference={option.reference} state={state} disabled={disabled} />}
       </li>;
     })}</ul>
-    {loading && <p role="status" className="text-sm text-textMuted">Loading references for saved analysis {analysisVersion}…</p>}
-    {collection && typedCollection && !choices.length && <p className="text-sm text-textMuted">No references are linked to this saved analysis version. Attached findings can still be selected above.</p>}
+    {loading && <p role="status" className="text-sm text-textMuted">Loading references for dataset {analysisVersion}…</p>}
+    {collection && typedCollection && !choices.length && <p className="text-sm text-textMuted">No references are linked to this dataset version. Attached findings can still be selected above.</p>}
     <div className="flex flex-wrap gap-3 text-xs"><button type="button" className="text-primary underline" disabled={!!loading} onClick={() => {
       void loadOptions('analysis-references'); void loadOptions('analysis-typed-references');
     }}>Refresh linked references</button>
@@ -75,7 +75,7 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
       {typedCollection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-typed-references', typedCollection.cursor)}>Load more typed references</button>}</div>
     <InertSnapshotChoices key={analysisVersion} state={state} disabled={disabled} />
     <ol aria-label="Selected linked findings" className="space-y-3">{linkedResults.map((item, index) => <li key={index} className="space-y-3 rounded border border-border p-3">
-      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : item.view.family === 'embedding' ? 'Embedding sample' : item.view.family === 'text' ? 'Source text prefix' : 'Figure'} · Saved analysis {analysisVersion}</p>
+      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : item.view.family === 'embedding' ? 'Embedding sample' : item.view.family === 'text' ? 'Source text prefix' : 'Figure'} · Dataset {analysisVersion}</p>
       <label className="block text-sm">Caption for linked finding {index + 1}<textarea value={item.caption} required maxLength={2000} disabled={disabled} rows={2}
         onChange={event => edit(index, { caption: event.target.value })} className="input mt-2 block w-full" /></label>
       <p className="text-xs text-textMuted">This caption is supplied for this snapshot.</p>

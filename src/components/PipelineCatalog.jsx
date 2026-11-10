@@ -152,7 +152,7 @@ export default function PipelineCatalog({
                 </button>
               </div>
               <p className="mt-3 text-xs text-textMuted">
-                Applies to your account in this project. Saved analyses stay unchanged.
+                Applies to your account in this project. Datasets stay unchanged.
               </p>
             </div>
             <div>

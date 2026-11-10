@@ -18,10 +18,10 @@ const CELLCHAT_OWNER_MESSAGES = new Set([
   'CellChat needs valid clustering or identity labels. Run clustering or choose current identities and try again.',
   'CellChat needs between two and 32 populated groups. Review the selected grouping and try again.',
   'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
-  'CellChat requires an RNA assay in the saved analysis.',
+  'CellChat requires an RNA assay in the dataset.',
   'CellChat requires normalized RNA data. Run normalization and try again.',
   'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
-  'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
+  'CellChat could not construct a valid input. Review the grouping, assay, species, and dataset.',
 ]);
 
 function unpackError(value) {
@@ -60,7 +60,7 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
   if (/^(?:at least|exactly) \d+\b/i.test(message)) return message;
   if (/\b(?:last owner|own role|member already|role assignment)\b/i.test(message)) return message;
   if (/\b(?:not authorized|permission|access)\b/i.test(message)) return 'You do not have access to this project action.';
-  if (/\b(?:not found|no longer available|missing)\b/i.test(message)) return 'The requested saved analysis is no longer available.';
+  if (/\b(?:not found|no longer available|missing)\b/i.test(message)) return 'The requested dataset is no longer available.';
 
   return fallback;
 }

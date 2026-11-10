@@ -55,7 +55,7 @@ describe('durable project analyses', () => {
   it('adopts an exact saved version through the analysis entry without losing another question draft', async () => {
     render(<ResearchAnalyses {...defaults} />); await open(first.name);
     fireEvent.change(editor('Research question or notes'), { target: { value: 'Keep this unsaved question.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Bring saved work' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Link saved work' }));
     const browser = await screen.findByRole('region', { name: 'Existing saved work' });
     fireEvent.click(await within(browser).findByRole('button', { name: /^Established donor work/ }));
     fireEvent.click(within(browser).getByRole('button', { name: 'Start analysis with this saved version' }));
@@ -69,7 +69,7 @@ describe('durable project analyses', () => {
   it('opens original object history deliberately without creating an analysis or altering its saved source', async () => {
     const original = vi.fn().mockResolvedValue(undefined);
     render(<ResearchAnalyses {...defaults} onOpenOriginal={original} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Bring saved work' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Link saved work' }));
     const browser = await screen.findByRole('region', { name: 'Existing saved work' });
     fireEvent.click(await within(browser).findByRole('button', { name: /^Established donor work/ }));
     fireEvent.click(within(browser).getByRole('button', { name: 'Open original object history' }));
@@ -349,6 +349,5 @@ describe('durable project analyses', () => {
     await screen.findByRole('button', { name: new RegExp(second.name) });
     await act(async () => { reply({ analyses: [first], nextCursor: null }); });
     expect(screen.queryByRole('button', { name: new RegExp(first.name) })).toBeNull();
-    expect(screen.getByText('Different cohort')).toBeVisible();
   });
 });

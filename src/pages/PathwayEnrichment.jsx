@@ -1,15 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Archive,
-  Ban,
-  Clock,
-  FileText,
-  Loader2,
-  Play,
-  RefreshCw,
-  ShieldCheck,
-} from 'lucide-react';
+import { AlertTriangle, Ban, FileText, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
 import { publicErrorMessage } from '../publicError';
@@ -151,7 +141,7 @@ function StatusBadge({ children, tone = 'slate' }) {
     slate: 'bg-background text-textMuted border-border',
   };
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold ${tones[tone] || tones.slate}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${tones[tone] || tones.slate}`}>
       {children}
     </span>
   );
@@ -169,8 +159,8 @@ function EmptyNotice({ title, children }) {
 function Metric({ label, value, detail }) {
   return (
     <div className="rounded border border-border bg-surface/70 p-4">
-      <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold text-textMuted">{label}</div>
+      <div className="text-2xl font-semibold text-text">{value}</div>
+      <div className="mt-1 text-xs font-medium text-textMuted">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
@@ -204,7 +194,7 @@ function PathwayTable({ pathways }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[780px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold text-textMuted">
+        <thead className="bg-background text-xs font-medium text-textMuted">
           <tr>
             <th className="p-3">Pathway</th>
             <th className="p-3">Direction in target</th>
@@ -430,14 +420,14 @@ export default function PathwayEnrichment({
     if (!userEmail) return setError('Sign in before starting pathway enrichment.');
     if (!activeProjectId) return setError('Select a project before starting pathway enrichment.');
     if (!selectedObjectId || !isDbBackedObject) {
-      return setError('Select a saved analysis before starting pathway enrichment.');
+      return setError('Select a dataset before starting pathway enrichment.');
     }
     if (!canWriteProject) return setError('Your project role can view results but cannot start analysis jobs.');
     if (!ownsPrivateLiveObject) {
       return setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before starting pathway enrichment.');
     }
     if (!sessionReady || !liveObjectAttached) {
-      return setError('Open this saved analysis in your private analysis workspace before starting pathway enrichment.');
+      return setError('Open this dataset in your private analysis workspace before starting pathway enrichment.');
     }
     if (!enrichmentAvailable) {
       return setError('Pathway enrichment is unavailable in the current compute profile. Ask an operator to install the approved enrichment package profile.');
@@ -531,7 +521,7 @@ export default function PathwayEnrichment({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-text">No saved analysis selected</h2>
+          <h2 className="mb-2 text-xl font-bold text-text">No dataset selected</h2>
           <p className="text-sm text-textMuted">Select a saved, clustered analysis before running pathway enrichment.</p>
         </div>
       </div>
@@ -560,7 +550,7 @@ export default function PathwayEnrichment({
 
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
           <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
-          <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Dataset</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
           <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Gene sets</dt><dd className="text-text">GO Biological Process</dd></div>
         </dl>
         {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
@@ -586,7 +576,7 @@ export default function PathwayEnrichment({
 
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Select a saved analysis before starting pathway enrichment.
+            Select a dataset before starting pathway enrichment.
           </div>
         )}
 
@@ -605,7 +595,7 @@ export default function PathwayEnrichment({
 
         {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This saved analysis is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
+            This dataset is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
             <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
               {datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'Open workspace' : 'Open Runs & Results'}
             </button>
@@ -632,21 +622,21 @@ export default function PathwayEnrichment({
           <p className="mt-1 text-sm text-textMuted">Choose the cluster to compare with all other cells. Species is required because human and mouse gene identifiers use different reference databases.</p>
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Group labels</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Group labels</span>
               <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="seurat_clusters">Seurat clusters</option>
                 <option value="ident">Current identities</option>
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Assay</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Assay</span>
               <select value={params.assay} onChange={event => setParam('assay', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="RNA">RNA</option>
                 <option value="SCT">SCT</option>
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Target cluster or group</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Target cluster or group</span>
               {params.groupBy === 'seurat_clusters' ? (
                 <select value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" disabled={targetGroupsLoading || targetGroups.length === 0}>
                   <option value="">{targetGroupsLoading ? 'Loading clusters…' : targetGroups.length ? 'Choose cluster' : 'No clusters available'}</option>
@@ -660,7 +650,7 @@ export default function PathwayEnrichment({
               )}
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Species (required)</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Species (required)</span>
               <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose species</option>
                 <option value="human">Human</option>
@@ -673,27 +663,27 @@ export default function PathwayEnrichment({
             <p className="mt-2 text-xs text-textMuted">Gene-set bounds, significance cutoff, display count, sampling limit, and reproducibility seed.</p>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Smallest gene set</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Smallest gene set</span>
               <input type="number" min="10" max="200" value={params.minGeneSetSize} onChange={event => setParam('minGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Largest gene set</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Largest gene set</span>
               <input type="number" min="50" max="2000" value={params.maxGeneSetSize} onChange={event => setParam('maxGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Adjusted p-value cutoff</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Adjusted p-value cutoff</span>
               <input type="number" min="0.000001" max="1" step="0.01" value={params.adjustedPValueCutoff} onChange={event => setParam('adjustedPValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Pathways shown</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Pathways shown</span>
               <input type="number" min="5" max="25" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Maximum cells per group</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Maximum cells per group</span>
               <input type="number" min="10" max="100000" value={params.maxCellsPerIdent} onChange={event => setParam('maxCellsPerIdent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Random seed</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Random seed</span>
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
@@ -709,7 +699,7 @@ export default function PathwayEnrichment({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Run status</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Run status</h3>
               <p className="mt-1 text-sm text-textMuted">Compute is allocated when available. When demand is high, a new analysis waits for compute.</p>
             </div>
             <div className="flex items-center gap-2">
@@ -731,8 +721,8 @@ export default function PathwayEnrichment({
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
-                <div><div className="text-[10px] font-bold text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
-                <div><div className="text-[10px] font-bold text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
+                <div><div className="text-xs font-medium text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
+                <div><div className="text-xs font-medium text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
               </div>
               {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{publicErrorMessage(job.error, 'This analysis needs attention. Review the settings and try again.')}</div>}
               <JobLogs logs={visibleLogs} />
@@ -743,7 +733,7 @@ export default function PathwayEnrichment({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> Pathway summary</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Pathway summary</h3>
               <p className="mt-1 text-sm text-textMuted">Review the leading pathways here. Export the full table from Runs &amp; Results.</p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}

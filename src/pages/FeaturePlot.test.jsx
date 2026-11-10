@@ -62,7 +62,7 @@ it('keeps page context and navigates to UMAP while enforcing the prerequisite', 
   const callApi = vi.fn();
   const onNavigateToUmap = vi.fn();
   render(<FeaturePlot datasetInfo={{ id: 'ao_1' }} pipelineState={{ umap: false }} callApi={callApi} onNavigateToUmap={onNavigateToUmap} />);
-  expect(screen.getByRole('heading', { name: 'Feature Plot' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Feature plot' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Go to UMAP' }));
   expect(onNavigateToUmap).toHaveBeenCalledOnce();
   expect(callApi).not.toHaveBeenCalled();

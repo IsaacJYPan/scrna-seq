@@ -9,10 +9,14 @@ describe('light-mode-first styling', () => {
   it('keeps light tokens as the default and dark tokens behind data-theme="dark"', () => {
     const css = readFileSync(join(here, 'App.css'), 'utf8');
 
-    expect(css).toMatch(/--color-background:\s*#edefec/);
+    expect(css).toMatch(/--color-background:\s*#f3f4f6/);
     expect(css).toMatch(/--color-surfaceRaised:\s*#ffffff/);
-    expect(css).toMatch(/--color-text:\s*#18201e/);
+    expect(css).toMatch(/--color-text:\s*#16191d/);
     expect(css).toMatch(/:root\[data-theme="dark"\]/);
+    // The interface typeface and type scale are theme tokens; losing them
+    // silently falls back to Tailwind's system font stack.
+    expect(css).toMatch(/--font-sans:\s*"Public Sans"/);
+    expect(css).toMatch(/--text-sm:\s*0\.8125rem/);
     expect(css).toMatch(/:root:not\(\[data-theme="dark"\]\) input/);
     expect(css).toMatch(/:root:not\(\[data-theme="dark"\]\) \.bg-slate-900/);
     expect(css).toMatch(/background-color:\s*var\(--color-surfaceRaised\)\s*!important/);

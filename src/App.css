@@ -3,19 +3,80 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  /* Stained-slide palette: slide glass, coverslip, ink, hematoxylin, eosin. */
-  --color-primary: #3e3a92;
-  --color-background: #edefec;
-  --color-surface: #fafbf9;
-  --color-border: #cfd5d0;
-  --color-text: #18201e;
-  /* Supporting copy stays comfortably above AA on glass and coverslip. */
-  --color-textMuted: #56605c;
-  --color-success: #1f6b43;
-  --color-danger: #b4232f;
-  --color-trace: #c23b6b;
-  --font-sans: "Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif;
-  --font-display: "Newsreader Variable", "Newsreader", Georgia, serif;
+  /* Neutral palette: plain cool greys, white panels, near-black text, and
+     one strong mid blue for actions and selection. Status colours (green,
+     red, amber) stay distinct from the accent. */
+  --color-primary: #1d5fd1;
+  --color-background: #f3f4f6;
+  --color-surface: #ffffff;
+  --color-border: #d4d7dd;
+  --color-text: #16191d;
+  /* Supporting copy and compact status labels stay comfortably above AA on
+     the page background and on white panels. */
+  --color-textMuted: #555c66;
+  --color-success: #1f7a3d;
+  --color-danger: #c0271d;
+
+  /* Tailwind's blue scale is aligned to the accent so stray utility blues
+     match it. Plot colours are set in code and are unaffected. */
+  --color-blue-50: #eef3fc;
+  --color-blue-100: #d9e5f8;
+  --color-blue-200: #b3cbf1;
+  --color-blue-300: #84aae8;
+  --color-blue-400: #5089df;
+  --color-blue-500: #2f6fdc;
+  --color-blue-600: #1d5fd1;
+  --color-blue-700: #174fae;
+  --color-blue-800: #143f88;
+  --color-blue-900: #12346c;
+  /* One family everywhere. Hierarchy comes from weight and colour, not
+     from mixing faces or widths: 400 for reading, 500 for controls and
+     labels, 600 for headings and emphasis. Heavier utilities collapse to 600. */
+  --font-sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-weight-bold: 600;
+  --font-weight-extrabold: 600;
+  --font-weight-black: 600;
+
+  /* A tight, fixed type scale (roughly 1.125) for a dense analysis tool.
+     Every size used in the app comes from this list. */
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.625rem;
+  --text-2xl: 1.375rem;
+  --text-2xl--line-height: 1.875rem;
+  --text-3xl: 1.625rem;
+  --text-3xl--line-height: 2.125rem;
+  --text-4xl: 1.875rem;
+  --text-4xl--line-height: 2.375rem;
+
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+
+  /* Tiered corners: controls are nearly square, panels slightly softer,
+     overlays softest. Pills (rounded-full) stay round for dots and avatars. */
+  --radius: 3px;
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 6px;
+  --radius-3xl: 8px;
+
+  /* Panels are flat and bordered; only floating layers cast a shadow. */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: 0 6px 18px -6px rgb(16 24 40 / 0.22);
+  --shadow-lg: 0 10px 28px -8px rgb(16 24 40 / 0.26);
+  --shadow-xl: 0 16px 40px -12px rgb(16 24 40 / 0.30);
+  --shadow-2xl: 0 22px 52px -14px rgb(16 24 40 / 0.34);
 }
 
 @layer base {
@@ -24,42 +85,49 @@
      --color-surfaceRaised is a slightly lifted panel for nested cards. */
   :root {
     --color-surfaceRaised: #ffffff;
-    --accent-soft: rgba(62, 58, 146, 0.08);
-    --rail: #25234f;
-    --rail-ink: #c9c6ef;
-    --rail-active: rgba(255, 255, 255, 0.12);
+    --accent-soft: rgba(29, 95, 209, 0.08);
+    --accent-text: #174fae;
+    --rail: #eceef1;
+    --rail-ink: #555c66;
+    --rail-ink-strong: #16191d;
+    --rail-hover: rgba(22, 25, 29, 0.06);
     --elev-1: none;
-    --elev-2: 0 18px 40px -16px rgba(24, 32, 30, 0.28), 0 2px 6px rgba(24, 32, 30, 0.06);
-    --ring: 0 0 0 3px rgba(62, 58, 146, 0.28);
+    --elev-2: 0 12px 32px -10px rgba(16, 24, 40, 0.28);
+    --ring: 0 0 0 3px rgba(29, 95, 209, 0.28);
   }
 
-  /* Darkfield: the same stains seen against an unlit field. */
   :root[data-theme="dark"] {
-    --color-primary: #5d58c9;
-    --color-background: #0f1312;
-    --color-surface: #161c1b;
-    --color-surfaceRaised: #1d2524;
-    --color-border: #2c3735;
-    --color-text: #e7ecea;
-    --color-textMuted: #9ba7a3;
-    --color-success: #5fd39a;
-    --color-danger: #f2626c;
-    --color-trace: #f07ba3;
-    --accent-soft: rgba(160, 155, 255, 0.12);
-    --rail: #17162f;
-    --rail-ink: #b7b3e6;
-    --rail-active: rgba(160, 155, 255, 0.16);
+    --color-primary: #2f6fdc;
+    --color-background: #131518;
+    --color-surface: #1b1e22;
+    --color-surfaceRaised: #22262b;
+    --color-border: #30353c;
+    --color-text: #e7e9ec;
+    --color-textMuted: #9aa1ab;
+    --color-success: #5cc97e;
+    --color-danger: #f2716a;
+    /* The blue fill is legible behind white text, but too dark for small
+       accent text and icons on the dark background. Accent text is lightened. */
+    --accent-soft: rgba(110, 160, 255, 0.13);
+    --accent-text: #8db4ff;
+    --rail: #0f1114;
+    --rail-ink: #9aa1ab;
+    --rail-ink-strong: #e7e9ec;
+    --rail-hover: rgba(255, 255, 255, 0.06);
     --elev-1: none;
-    --elev-2: 0 18px 40px -12px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.4);
-    --ring: 0 0 0 3px rgba(160, 155, 255, 0.35);
+    --elev-2: 0 12px 32px -10px rgba(0, 0, 0, 0.6);
+    --ring: 0 0 0 3px rgba(110, 160, 255, 0.32);
   }
 
   body {
     @apply bg-background text-text font-sans antialiased m-0 p-0 h-screen w-screen overflow-hidden;
-    font-family: var(--font-sans);
-    font-feature-settings: "tnum" 1, "cv11" 1;
+    font-size: 14px;
+    font-feature-settings: "tnum" 1;
   }
-  ::selection { background: color-mix(in srgb, var(--color-trace) 22%, transparent); }
+
+  h1, h2, h3, h4 { letter-spacing: -0.005em; }
+
+  ::selection { background: color-mix(in srgb, var(--color-primary) 22%, transparent); }
 }
 
 @layer components {
@@ -79,22 +147,16 @@
     .pipeline-parameter .input, .pipeline-qc-toggle { min-height: 44px; }
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
     min-height: 40px;
-    border-radius: 6px;
     font-size: 0.875rem;
     line-height: 1.25rem;
-    letter-spacing: 0.005em;
   }
   .page-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem 1.5rem; flex-shrink: 0; }
   .page-header-content { flex: 1 1 20rem; min-width: 0; }
-  /* Page titles are set like a journal figure title: optical-size serif,
-     regular weight, tight leading. The icon is dropped to keep the title
-     as type alone. */
-  .page-title { display: flex; align-items: baseline; gap: 0.625rem; font-family: var(--font-display); font-size: 2rem; line-height: 2.375rem; font-weight: 450; font-variation-settings: "opsz" 72; letter-spacing: -0.012em; color: var(--color-text); overflow-wrap: anywhere; }
-  .page-title > svg { display: none; }
-  .page-description { margin-top: 0.5rem; max-width: 68ch; font-size: 0.9375rem; line-height: 1.5rem; color: var(--color-textMuted); }
-  @media (max-width: 639px) { .page-title { font-size: 1.625rem; line-height: 2rem; } }
+  .page-title { display: flex; align-items: center; gap: 0.5rem; font-size: 1.375rem; line-height: 1.875rem; font-weight: 600; letter-spacing: -0.01em; color: var(--color-text); overflow-wrap: anywhere; }
+  .page-title svg { color: var(--accent-text); stroke-width: 1.75; }
+  .page-description { margin-top: 0.25rem; max-width: 68ch; font-size: 0.875rem; line-height: 1.5rem; color: var(--color-textMuted); }
   .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; flex: 0 1 auto; }
   .page-header-actions > button { white-space: nowrap; }
   .page-header-actions svg { flex-shrink: 0; }
@@ -112,9 +174,17 @@
   }
   .btn-primary:hover {
     /* White text stays above 4.5:1 through the transition and at rest. */
-    background-color: color-mix(in srgb, var(--color-primary) 84%, #000);
+    background-color: color-mix(in srgb, var(--color-primary) 82%, #000);
     color: #ffffff !important;
     box-shadow: none;
+  }
+  /* Disabled primary actions turn neutral instead of a faded accent, so
+     they read as "not yet available" rather than broken. */
+  .btn-primary:disabled,
+  .btn-primary[aria-disabled="true"] {
+    background-color: color-mix(in srgb, var(--color-border) 55%, var(--color-surface)) !important;
+    color: var(--color-textMuted) !important;
+    opacity: 1 !important;
   }
   .btn-secondary {
     @apply bg-surface border border-border text-text focus-visible:ring-primary;
@@ -126,10 +196,12 @@
   .btn-ghost:hover { background-color: var(--accent-soft); color: var(--color-text); }
   .card {
     @apply bg-surface border border-border overflow-hidden flex flex-col;
-    border-radius: 10px;
+    border-radius: 4px;
+    box-shadow: none;
   }
   .card-header {
     @apply px-4 py-3 border-b border-border flex items-center justify-between;
+    background-color: color-mix(in srgb, var(--color-background) 55%, var(--color-surface));
   }
 
   /* Shared form controls used by the study design and branch forms. */
@@ -141,7 +213,7 @@
     color: var(--color-text);
     background-color: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 6px;
+    border-radius: 3px;
     font: inherit;
   }
   .input::placeholder { color: var(--color-textMuted); opacity: 1; }
@@ -151,12 +223,11 @@
     align-items: center;
     max-width: 100%;
     padding: 0.25rem 0.625rem;
-    border: 1px solid color-mix(in srgb, var(--color-primary) 22%, var(--color-border));
-    border-radius: 4px;
+    border: 1px solid var(--color-border);
+    border-radius: 2px;
     background-color: var(--accent-soft);
     color: var(--color-text);
     font-size: 0.75rem;
-    font-weight: 500;
     line-height: 1.25rem;
     overflow-wrap: anywhere;
   }
@@ -258,12 +329,12 @@
 
   :root:not([data-theme="dark"]) table thead.bg-slate-800,
   :root:not([data-theme="dark"]) thead.bg-slate-800 {
-    background-color: #eef2f7 !important;
+    background-color: color-mix(in srgb, var(--color-background) 60%, #fff) !important;
   }
 
   :root:not([data-theme="dark"]) .shadow-2xl,
   :root:not([data-theme="dark"]) .shadow-lg {
-    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12) !important;
+    box-shadow: var(--elev-2) !important;
   }
 
   :root:not([data-theme="dark"]) .btn.btn-primary,
@@ -320,7 +391,7 @@
      title therefore needs a dark blue foreground in light mode rather than
      the generic near-white fallback authored for the older dark dashboard. */
   :root:not([data-theme="dark"]) .bg-primary\/10.text-white {
-    color: #2b2870 !important;
+    color: var(--accent-text) !important;
   }
 
   /* Accent text/icons: the brand blue (#3371e3) only reaches ~3.9:1 on the
@@ -328,7 +399,7 @@
      in dark mode (this does NOT touch bg-primary fills, which keep the brand
      blue with white text). Applies to text-primary spans and icon fills. */
   :root[data-theme="dark"] .text-primary {
-    color: #b9b5ff !important;
+    color: var(--accent-text) !important;
   }
   /* Error text needs contrast against its tinted alert surface. Keep solid
      danger fills independent so their button foregrounds are unchanged. */
@@ -347,7 +418,7 @@
     max-width: none !important;
     margin-bottom: 0.5rem !important;
     border: 1px solid var(--color-border) !important;
-    border-radius: 0.75rem !important;
+    border-radius: 4px !important;
     background: var(--color-surface) !important;
     color: var(--color-text) !important;
     box-shadow: var(--elev-2);
@@ -393,7 +464,7 @@
   :root:not([data-theme="dark"]) .text-blue-300,
   :root:not([data-theme="dark"]) .text-blue-400,
   :root:not([data-theme="dark"]) .text-blue-500 {
-    color: #1e3a8a !important;
+    color: var(--accent-text) !important;
   }
   :root:not([data-theme="dark"]) .text-indigo-300,
   :root:not([data-theme="dark"]) .text-indigo-400,
@@ -410,35 +481,98 @@
      accent text in light mode so even the small chips clear AA; the button
      fill (.bg-primary) is untouched and keeps the brand blue. */
   :root:not([data-theme="dark"]) .text-primary {
-    color: #34307f !important;
+    color: var(--accent-text) !important;
   }
 }
 
-/* ── Login screen ──────────────────────────────────────────────────────
-   Two panes: a hematoxylin plate carrying the wordmark and the analysis
-   trace, and a plain slide-glass pane for the form. */
-.login-bg { background-color: var(--color-background); }
-.login-plate {
-  background-color: var(--rail);
-  color: #eceaff;
-  background-image:
-    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.07) 1px, transparent 0);
-  background-size: 18px 18px;
+/* ── Navigation ─────────────────────────────────────────────────────
+   Unlayered so it can restyle the Tailwind utilities the nav items carry.
+   The icon rail and the page list read as one pane: the rail is a shade
+   darker than the list in both themes, separated by a single rule. */
+.nav-rail { background-color: var(--rail); color: var(--rail-ink); border-color: var(--color-border); }
+@media (min-width: 640px) { .nav-rail { border-right: 1px solid var(--color-border); } }
+@media (max-width: 639px) { .nav-rail { border-bottom: 1px solid var(--color-border); } }
+.nav-rail-mark { color: #ffffff; background-color: var(--color-primary); border-radius: 4px; }
+.nav-rail-title { color: var(--rail-ink-strong); font-size: 0.875rem; }
+.nav-rail-divider { background-color: var(--color-border); }
+.nav-rail-button { color: var(--rail-ink); background-color: transparent; }
+.nav-rail-button:hover { color: var(--rail-ink-strong); background-color: var(--rail-hover); }
+.nav-rail-button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.nav-rail-button-active { color: var(--accent-text); background-color: var(--accent-soft); }
+.nav-rail-button-danger:hover { color: #ffffff; background-color: var(--color-danger); }
+
+.nav-workspace-name { font-size: 0.875rem; font-weight: 600; }
+.nav-group-label { font-size: 0.75rem; font-weight: 500; }
+.nav-item { font-size: 0.8125rem; font-weight: 400; border-radius: 3px; min-height: 2.25rem; }
+.nav-item.nav-item-active {
+  border-color: transparent;
+  background-color: var(--accent-soft);
+  color: var(--color-text);
+  font-weight: 500;
 }
-.login-plate .wordmark { font-family: var(--font-display); font-weight: 400; font-variation-settings: "opsz" 72; letter-spacing: -0.02em; }
-.trace-figure line, .trace-figure path { stroke: rgba(236, 234, 255, 0.35); }
-.trace-figure circle { fill: var(--rail); stroke: #eceaff; }
-.trace-figure circle.done { fill: #eceaff; }
-.trace-figure circle.now { fill: var(--color-trace); stroke: var(--color-trace); }
-.trace-figure text { fill: rgba(236, 234, 255, 0.78); font: 500 12px var(--font-sans); }
+
+/* Segmented control for mutually exclusive modes. Deliberately unlike a
+   button row so a mode choice never reads as the page's main action. */
+.segmented { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--color-border); border-radius: 4px; background-color: var(--color-background); padding: 2px; gap: 2px; }
+.segmented-option { min-height: 34px; padding: 0 0.875rem; border-radius: 3px; font-size: 0.8125rem; font-weight: 500; color: var(--color-textMuted); background: transparent; }
+.segmented-option:hover { color: var(--color-text); }
+.segmented-option[aria-pressed="true"] { color: var(--color-text); background-color: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); }
+.segmented-option:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+
+/* Disclosure triangles: one consistent chevron instead of the browser's. */
+details > summary { list-style: none; cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary:not(.btn):not(.list-none)::before {
+  content: ""; display: inline-block; width: 0.4rem; height: 0.4rem; margin-right: 0.5rem; vertical-align: 0.15em;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+details[open] > summary:not(.btn):not(.list-none)::before { transform: rotate(45deg); }
+/* Button-driven disclosures use the same chevron as <details>. */
+.disclosure-title::before {
+  content: ""; display: inline-block; width: 0.4rem; height: 0.4rem; margin-right: 0.5rem; vertical-align: 0.15em;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+[aria-expanded="true"] > .disclosure-title::before { transform: rotate(45deg); }
+
+/* Every page uses the same frame: one scroll container with fixed gutters
+   and one centred column width, so content edges never jump between pages. */
+.page-scroll { height: 100%; width: 100%; overflow-y: auto; background-color: var(--color-background); padding: 1.5rem 1rem; }
+@media (min-width: 640px) { .page-scroll { padding: 2rem 2rem; } }
+.page-column { width: 100%; max-width: 72rem; margin-inline: auto; }
+
+.refresh-button { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 3px; color: var(--color-textMuted); }
+.refresh-button:hover:not(:disabled) { color: var(--color-text); background-color: var(--accent-soft); }
+.refresh-button:disabled { opacity: 0.45; cursor: default; }
+.refresh-button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+@media (pointer: coarse) { .refresh-button { width: 2.75rem; height: 2.75rem; } }
+
+/* Bordered panel: the one container style for grouped content. */
+.panel { padding: 1rem 1.25rem; border: 1px solid var(--color-border); border-radius: 4px; background-color: var(--color-surface); }
+
+/* Empty and placeholder states: a plain, left-aligned note in the flow of
+   the page, not a centred dashed drop zone with a faded icon. */
+.empty-note {
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background-color: var(--color-surface);
+  text-align: left;
+}
+
+/* ── Login screen ─────────────────────────────────────────────────── */
+.login-bg { background-color: var(--color-background); }
+.login-panel { border-radius: 6px; }
+.login-wordmark { font-size: 1.375rem; line-height: 1.875rem; font-weight: 600; letter-spacing: -0.01em; color: var(--color-text); }
 
 /* React Flow Controls & MiniMap Styling for Dark/Light Mode compatibility */
 .react-flow__controls {
   background-color: var(--color-surface) !important;
   border: 1px solid var(--color-border) !important;
-  border-radius: 8px !important;
+  border-radius: 4px !important;
   overflow: hidden !important;
-  box-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.18) !important;
+  box-shadow: var(--elev-2) !important;
 }
 
 .react-flow__controls-button {
@@ -461,8 +595,8 @@
 .react-flow__minimap {
   background-color: var(--color-surface) !important;
   border: 1px solid var(--color-border) !important;
-  border-radius: 8px !important;
-  box-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.18) !important;
+  border-radius: 4px !important;
+  box-shadow: var(--elev-2) !important;
 }
 
 .react-flow__minimap-mask {
@@ -484,68 +618,3 @@
 .notebook-narrative blockquote { border-left: 3px solid var(--color-border); padding-left: 1rem; color: var(--color-textMuted); }
 .notebook-narrative pre { max-height: 20rem; overflow: auto; border: 1px solid var(--color-border); border-radius: 0.5rem; padding: 0.75rem; background: var(--color-background); }
 .notebook-narrative code { font: 0.85em/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }
-
-/* ── Workbench shell ───────────────────────────────────────────────────── */
-@layer components {
-  .app-rail { background-color: var(--rail); color: var(--rail-ink); }
-  .app-rail .rail-mark { color: #eceaff; }
-  .app-rail .rail-title { color: #eceaff; }
-  .rail-button { color: var(--rail-ink); background: transparent; }
-  .rail-button:hover { color: #ffffff; background-color: var(--rail-active); }
-  .rail-button[aria-current="page"] { color: #ffffff; background-color: var(--rail-active); box-shadow: inset 2px 0 0 var(--color-trace); }
-  .rail-button-danger:hover { background-color: color-mix(in srgb, var(--color-danger) 70%, transparent); }
-  .rail-button:focus-visible { outline: 2px solid #eceaff; outline-offset: 2px; }
-
-  .workspace-name {
-    font-family: var(--font-display);
-    font-size: 1.1875rem;
-    font-weight: 500;
-    font-variation-settings: "opsz" 36;
-    line-height: 1.2;
-    letter-spacing: -0.005em;
-    color: var(--color-text);
-  }
-
-  /* Workflow stages are a real sequence, so they are drawn as one trace:
-     a hairline joins every stage, a filled node marks completed stages and
-     the eosin node marks where you are. */
-  .trace-list { position: relative; display: flex; flex-direction: column; gap: 1px; }
-  .trace-list::before {
-    content: "";
-    position: absolute;
-    left: calc(1.0625rem - 1px);
-    top: 1.25rem;
-    bottom: 1.25rem;
-    width: 2px;
-    border-radius: 2px;
-    background: color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
-  }
-  .trace-item { padding-left: 0.625rem; }
-  .trace-node {
-    position: relative;
-    z-index: 1;
-    flex: none;
-    width: 0.6875rem;
-    height: 0.6875rem;
-    border-radius: 9999px;
-    border: 1.5px solid color-mix(in srgb, var(--color-textMuted) 70%, transparent);
-    background: var(--color-surface);
-  }
-  .trace-item[data-trace-state="done"] .trace-node { background: var(--color-primary); border-color: var(--color-primary); }
-  .trace-item[data-trace-state="current"] .trace-node {
-    background: var(--color-trace);
-    border-color: var(--color-trace);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-trace) 22%, var(--color-surface));
-  }
-  :root[data-theme="dark"] .trace-item[data-trace-state="done"] .trace-node { background: #a9a5ff; border-color: #a9a5ff; }
-
-  /* One status band across the workbench: server on the left, the open
-     analysis and its save control on the right. */
-  .workbench-band { display: flex; flex-wrap: wrap; align-items: stretch; flex-shrink: 0; border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
-  .workbench-band > [aria-label="Execution target"] { border-bottom: 0; background: transparent; flex: 0 1 18rem; min-width: 0; }
-  .workbench-band > [aria-label="Analysis status"] { border-bottom: 0; flex: 1 1 22rem; min-width: 0; border-left: 1px solid var(--color-border); }
-  @media (max-width: 639px) {
-    .workbench-band > [aria-label="Execution target"] { flex-basis: 100%; }
-    .workbench-band > [aria-label="Analysis status"] { flex-basis: 100%; border-left: 0; border-top: 1px solid var(--color-border); }
-  }
-}

@@ -12,8 +12,8 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
      <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center opacity-40 max-w-sm">
            <ShieldCheck size={64} className="mx-auto text-slate-400 mb-6" />
-           <p className="text-lg font-bold text-white mb-2 tracking-tighter">Validation Offline</p>
-           <p className="text-xs text-textMuted font-black leading-loose">Load a dataset to validate pipeline state.</p>
+           <p className="text-lg font-medium text-white mb-2">Validation Offline</p>
+           <p className="text-xs text-textMuted font-semibold leading-loose">Load a dataset to validate pipeline state.</p>
         </div>
      </div>
   );
@@ -40,7 +40,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
   };
 
   const pipelineCheck = (has) => (
-    <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded text-[8px] font-black border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
+    <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded text-xs font-semibold tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
       {has ? '✓ DONE' : 'PENDING'}
     </span>
   );
@@ -91,8 +91,8 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
               ].map((stat, i) => (
                 <div key={i} className="card min-w-0 p-4 sm:p-6 border-l-4 border-l-primary bg-slate-800/30">
                    <stat.icon className="text-primary mb-3 opacity-60" size={24} />
-                   <div className="min-w-0 break-words text-xl sm:text-2xl font-black text-white mb-1 tracking-tight">{stat.value ?? '—'}</div>
-                   <div className="break-words text-[10px] font-black text-slate-400">{stat.label}</div>
+                   <div className="min-w-0 break-words text-xl sm:text-2xl font-semibold text-white mb-1 tracking-tight">{stat.value ?? '—'}</div>
+                   <div className="break-words text-xs font-semibold text-slate-400">{stat.label}</div>
                 </div>
               ))}
            </div>
@@ -100,7 +100,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
            {/* Detailed metrics table */}
            <div className="card">
               <div className="p-4 border-b border-border bg-slate-800/40">
-                 <h3 className="text-xs font-black text-white">Analysis measurements</h3>
+                 <h3 className="text-xs font-semibold text-white">Analysis measurements</h3>
               </div>
               <div className="overflow-x-auto">
                  <table className="w-full text-left text-xs">
@@ -133,7 +133,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
 
            {/* Pipeline state */}
            <div className="card p-6">
-               <h3 className="text-xs font-black text-white mb-4">Analysis progress</h3>
+               <h3 className="text-xs font-semibold text-white mb-4">Analysis progress</h3>
               <div className="flex flex-wrap gap-x-5 gap-y-3">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    <span className="font-mono text-primary font-bold">load</span>

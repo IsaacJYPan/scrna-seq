@@ -287,7 +287,7 @@ async function main() {
     assert(staleAdmission.status === 409, 'A source mutation was not rejected before another snapshot was admitted.');
     check('Later source replacement leaves both saved versions unchanged and invalidates the previously listed source selection before a new import.');
 
-    await workspace.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await workspace.getByRole('button', { name: /^R console,/ }).click();
     await workspace.getByRole('button', { name: 'Interactive console', exact: true }).click();
     const consoleUi = workspace.getByRole('region', { name: 'Private R console', exact: true });
     await consoleUi.getByRole('checkbox', { name: 'Use Server Seurat snapshot', exact: true }).check();

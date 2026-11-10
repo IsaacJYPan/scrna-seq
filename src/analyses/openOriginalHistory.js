@@ -1,6 +1,6 @@
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 
-const dirty = () => Object.assign(new Error('Save your current live analysis in Data workspace before switching objects.'), { code: 'UNSAVED_LIVE_WORK' });
+const dirty = () => Object.assign(new Error('Save your current live analysis on the Projects page before switching objects.'), { code: 'UNSAVED_LIVE_WORK' });
 const changed = () => Object.assign(new Error('The selected workspace changed. Open the source again from its project.'), { code: 'TARGET_CHANGED' });
 
 // Read metadata without changing selection or its cache. The caller commits the

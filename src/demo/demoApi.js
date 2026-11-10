@@ -80,7 +80,7 @@ async function waitForJob(context, progress) {
     }
     if (['failed', 'canceled'].includes(job.status)) {
       delete context.pending; remember(context);
-      throw new Error('The result could not be saved or loaded. Your last saved analysis is available after refreshing.');
+      throw new Error('The result could not be saved or loaded. Your last dataset is available after refreshing.');
     }
     progress?.(job.status === 'queued' ? 'Waiting for the server…' : pending.type === 'checkpoint.save.v1' ? 'Saving analysis…' : 'Loading analysis…');
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -125,7 +125,7 @@ async function resumeEarlierRequest(previous, expectedStage, progress) {
   const context = { ...saved };
   if (!context.pending) {
     if (context.currentObjectId !== previous.currentObjectId || context.stage !== previous.stage) {
-      throw new Error('A newer saved analysis is available. Refresh to display it before starting more work.');
+      throw new Error('A newer dataset is available. Refresh to display it before starting more work.');
     }
     return null;
   }

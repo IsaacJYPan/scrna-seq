@@ -74,7 +74,7 @@ async function verifySharedLinks(context) {
     await baselineColleague.goto(service.endpoint);
     await baselineColleague.getByPlaceholder('researcher@lab.edu').fill(accounts.colleague.email);
     await baselineColleague.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await baselineColleague.getByRole('button', { name: /Open Workbench/ }).click();
+    await baselineColleague.getByRole('button', { name: /Open workbench/ }).click();
     await baselineColleague.getByText('Connection details', { exact: true }).waitFor();
     await openPublications(baselineColleague, study); await openPublic(baselineColleague);
     loggedOutEverySession = false;
@@ -113,7 +113,7 @@ async function verifySharedLinks(context) {
     assert(direct.url() === copiedUrl && !directReads.some(item => item.page === direct && item.pathname.startsWith(analysisPath)), 'A signed-out shared link resolved project data or lost its exact target.');
     await capture(direct, 'shared-link-fresh-recipient-keeps-target-at-sign-in');
     await directLogin(direct);
-    assert(direct.url() === copiedUrl && await question(direct).getByText(`Saved analysis ${accepted.package.analysis.version}`, { exact: true }).count(), 'A fresh signed-in recipient advanced to the live analysis head or lost the copied target.');
+    assert(direct.url() === copiedUrl && await question(direct).getByText(`Dataset ${accepted.package.analysis.version}`, { exact: true }).count(), 'A fresh signed-in recipient advanced to the live analysis head or lost the copied target.');
     await landing(direct).getByRole('cell', { name: 'control', exact: true }).waitFor();
     await landing(direct).getByRole('cell', { name: 'treated', exact: true }).waitFor();
     assert(!(await direct.getByRole('button', { name: /Run|Publish to project|Prepare private preview|Withdraw from project/, exact: true }).count()), 'The read-only link mounted scientific/editor/sharing mutation controls.');

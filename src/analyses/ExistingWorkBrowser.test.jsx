@@ -115,7 +115,7 @@ describe('existing work adoption and inspection', () => {
     listExistingWork.mockRejectedValueOnce(Object.assign(new Error('Revoked'), { status: 404 }));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh saved work' })); await screen.findByRole('alert');
     expect(screen.queryByRole('textbox', { name: 'Adopted analysis name' })).toBeNull();
-    expect(screen.queryByText('No analysis objects yet')).toBeNull();
+    expect(screen.queryByText('No datasets yet')).toBeNull();
     expect(screen.queryByText('Select saved work to review its version and start an analysis.')).toBeNull();
     expect(within(screen.getByRole('list', { name: 'Saved work list' })).queryAllByRole('button')).toHaveLength(0);
     view.rerender(<ExistingWorkBrowser {...defaults} blocked />);

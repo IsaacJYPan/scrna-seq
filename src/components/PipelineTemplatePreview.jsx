@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileClock, FormInput, TableProperties } from 'lucide-react';
+import { FileClock, TableProperties } from 'lucide-react';
 
 const VIEW_LABELS = Object.freeze({
   summaryMetrics: 'Summary metrics',
@@ -100,7 +100,6 @@ export default function PipelineTemplatePreview({ manifest }) {
     <section className="space-y-4" aria-labelledby="pipeline-template-preview-heading">
       <div>
         <h3 id="pipeline-template-preview-heading" className="flex items-center gap-2 text-lg font-bold text-text">
-          <FormInput size={18} className="text-primary" />
           Workflow preview
         </h3>
         <p className="mt-1 max-w-4xl text-sm text-textMuted">
@@ -119,7 +118,7 @@ export default function PipelineTemplatePreview({ manifest }) {
               <summary className="cursor-pointer px-4 py-3 font-bold text-text">{tab.label}</summary>
               <div className="grid gap-4 border-t border-border p-4 lg:grid-cols-2">
                 <fieldset disabled className="space-y-3">
-                  <legend className="mb-2 text-[10px] font-bold text-textMuted">Parameters</legend>
+                  <legend className="mb-2 text-xs font-medium text-textMuted">Parameters</legend>
                   {(tab.parameterSchema || []).length > 0 ? (tab.parameterSchema || []).map(parameter => (
                     <ParameterControl
                       key={parameter.key}
@@ -129,7 +128,7 @@ export default function PipelineTemplatePreview({ manifest }) {
                   )) : <p className="text-sm text-textMuted">No settings are needed for this step.</p>}
                 </fieldset>
                 <div>
-                  <div className="mb-2 text-[10px] font-bold text-textMuted">Result views</div>
+                  <div className="mb-2 text-xs font-medium text-textMuted">Result views</div>
                   <div className="space-y-3">
                     {(tab.resultViews || []).length > 0 ? (tab.resultViews || []).map((view, index) => (
                       <ResultView key={`${typeof view === 'string' ? view : view.type}-${index}`} view={view} />

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
+import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
 import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -37,10 +37,10 @@ function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
 
   const message = String(rawError || '').trim();
   if (/analysis object not found/i.test(message)) {
-    return 'This saved analysis appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis or open its saved version when that workflow is available.';
+    return 'This dataset appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis or open its saved version when that workflow is available.';
   }
   if (/no object loaded|load data first/i.test(message)) {
-    return 'This saved analysis appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis to continue interactive work.';
+    return 'This dataset appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis to continue interactive work.';
   }
   return publicErrorMessage(message, 'QC distribution data is unavailable for the selected analysis.');
 }
@@ -238,7 +238,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const baseLayout = {
     autosize: true,
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: theme === 'light' ? '#475569' : '#94a3b8', size: 11, family: '"Instrument Sans Variable", system-ui, sans-serif' },
+    font: { color: theme === 'light' ? '#475569' : '#94a3b8', size: 11, family: 'Inter, system-ui' },
     margin: { l: 60, r: 30, t: 20, b: 55 },
     showlegend: false,
     hoverlabel: getPlotHoverStyle(theme),
@@ -280,40 +280,40 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
   const plotConfigs = distributions ? {
     mt: {
-      data: [...seuratViolin('mt', mtValues, '#3f8f6e', `<b>${qcMetricHover('percent.mt', 'y')}</b><extra></extra>`, mtJitter)],
+      data: [...seuratViolin('mt', mtValues, '#22c55e', `<b>${qcMetricHover('percent.mt', 'y')}</b><extra></extra>`, mtJitter)],
       layout: {
         ...baseLayout,
         hovermode: 'closest',
         xaxis: { range: [-0.6, 0.6], fixedrange: true, showticklabels: false },
         yaxis: { title: '% MT', autorange: true, zeroline: false },
-        shapes: [{ type: 'line', x0: -0.5, x1: 0.5, y0: mtCutoff, y1: mtCutoff, line: { color: '#c23b6b', dash: 'dash', width: 2 } }]
+        shapes: [{ type: 'line', x0: -0.5, x1: 0.5, y0: mtCutoff, y1: mtCutoff, line: { color: '#f43f5e', dash: 'dash', width: 2 } }]
       },
-      title: 'Mitochondrial Content', color: '#3f8f6e', hint: 'Cells extending past the upper cutoff (red bounds) are removed.'
+      title: 'Mitochondrial Content', color: '#22c55e', hint: 'Cells extending past the upper cutoff (red bounds) are removed.'
     },
     features: {
-      data: [...seuratViolin('features', featureValues, '#6f63c9', `<b>${qcMetricHover('nFeature_RNA', 'y')}</b><extra></extra>`, featureJitter)],
+      data: [...seuratViolin('features', featureValues, '#a855f7', `<b>${qcMetricHover('nFeature_RNA', 'y')}</b><extra></extra>`, featureJitter)],
       layout: {
         ...baseLayout,
         hovermode: 'closest',
         xaxis: { range: [-0.6, 0.6], fixedrange: true, showticklabels: false },
         yaxis: { title: 'Genes detected per cell', autorange: true, zeroline: false },
         shapes: [
-          { type: 'line', x0: -0.5, x1: 0.5, y0: minFeatures, y1: minFeatures, line: { color: '#c23b6b', dash: 'dash', width: 2 } },
-          { type: 'line', x0: -0.5, x1: 0.5, y0: maxFeatures, y1: maxFeatures, line: { color: '#c23b6b', dash: 'dash', width: 2 } }
+          { type: 'line', x0: -0.5, x1: 0.5, y0: minFeatures, y1: minFeatures, line: { color: '#f43f5e', dash: 'dash', width: 2 } },
+          { type: 'line', x0: -0.5, x1: 0.5, y0: maxFeatures, y1: maxFeatures, line: { color: '#f43f5e', dash: 'dash', width: 2 } }
         ]
       },
-      title: 'Genes detected per cell', color: '#6f63c9', hint: 'Cells falling outside the min/max bounds are removed.'
+      title: 'Genes detected per cell', color: '#a855f7', hint: 'Cells falling outside the min/max bounds are removed.'
     },
     counts: {
-      data: [...seuratViolin('counts', countValues, '#3b73ad', `<b>${qcMetricHover('nCount_RNA', 'y')}</b><extra></extra>`, countJitter)],
+      data: [...seuratViolin('counts', countValues, '#3b82f6', `<b>${qcMetricHover('nCount_RNA', 'y')}</b><extra></extra>`, countJitter)],
       layout: {
         ...baseLayout,
         hovermode: 'closest',
         xaxis: { range: [-0.6, 0.6], fixedrange: true, showticklabels: false },
         yaxis: { title: 'RNA counts per cell', autorange: true, zeroline: false },
-        shapes: [{ type: 'line', x0: -0.5, x1: 0.5, y0: minCounts, y1: minCounts, line: { color: '#c23b6b', dash: 'dash', width: 2 } }]
+        shapes: [{ type: 'line', x0: -0.5, x1: 0.5, y0: minCounts, y1: minCounts, line: { color: '#f43f5e', dash: 'dash', width: 2 } }]
       },
-      title: 'RNA counts per cell', color: '#3b73ad', hint: 'Low count cells (left tail) are likely empty droplets or debris.'
+      title: 'RNA counts per cell', color: '#3b82f6', hint: 'Low count cells (left tail) are likely empty droplets or debris.'
     },
     scatter: {
       data: [{
@@ -390,10 +390,10 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
               <h3 className="text-sm font-semibold text-text">{result ? 'QC Filtering Summary' : 'QC Metrics Applied'}</h3>
               <div className="flex items-baseline gap-2">
                 <span className="text-xs text-textMuted">{summary?.post_filter_cells != null ? 'Post-filter cells' : 'Total cells'}</span>
-                <strong className="text-lg font-black text-success">{count?.toLocaleString() || '—'}</strong>
+                <strong className="text-lg font-semibold text-success">{count?.toLocaleString() || '—'}</strong>
               </div>
               {(pipelineState?.isSubset || datasetInfo?.parentObjId) && !result && (
-                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-bold rounded border border-primary/20">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-primary/10 text-primary text-xs font-medium rounded border border-primary/20">
                   <Scissors size={10} /> Subset inherited
                 </span>
               )}
@@ -418,46 +418,46 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       {/* Manual Threshold Controls */}
       <fieldset disabled={!canMutate} className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden disabled:opacity-60">
         {(result || pipelineState?.qc) && (
-          <div className="absolute top-0 right-0 px-3 py-1 bg-success/10 text-success text-[9px] font-black tracking-tighter rounded-bl-lg border-b border-l border-success/20">
+          <div className="absolute top-0 right-0 px-3 py-1 bg-success/10 text-success text-xs font-semibold rounded-bl-lg border-b border-l border-success/20">
             Active Filter Applied
           </div>
         )}
         <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
           <h3 className="font-bold flex items-center gap-2 text-text">
-            <SlidersHorizontal size={18} className="text-primary" /> Filtering Thresholds
+            Filtering thresholds
           </h3>
-          <span className="text-[10px] font-bold text-slate-400">
+          <span className="text-xs font-medium text-slate-400">
             {pipelineState?.isSubset || datasetInfo?.parentObjId ? 'Subset Inherited Mode' : 'Manual Mode'}
           </span>
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
           <div>
-            <label htmlFor="qc-mt" className="block text-xs text-textMuted mb-1.5 font-bold">Max MT %</label>
+            <label htmlFor="qc-mt" className="block text-xs text-textMuted mb-1.5 font-medium">Max MT %</label>
             <input id="qc-mt" type="number" min="0.1" max="100" step="0.5" value={mtCutoff} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('mtCutoff', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells above this % are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells above this % are removed</p>
           </div>
           <div>
-            <label htmlFor="qc-minf" className="block text-xs text-textMuted mb-1.5 font-bold">Min Features</label>
+            <label htmlFor="qc-minf" className="block text-xs text-textMuted mb-1.5 font-medium">Min Features</label>
             <input id="qc-minf" type="number" min="0" step="1" value={minFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells with fewer detected genes are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells with fewer detected genes are removed</p>
           </div>
           <div>
-            <label htmlFor="qc-maxf" className="block text-xs text-textMuted mb-1.5 font-bold">Max Features</label>
+            <label htmlFor="qc-maxf" className="block text-xs text-textMuted mb-1.5 font-medium">Max Features</label>
             <input id="qc-maxf" type="number" min="1" step="1" value={maxFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('maxFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells with more detected genes are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells with more detected genes are removed</p>
           </div>
           <div>
-            <label htmlFor="qc-minc" className="block text-xs text-textMuted mb-1.5 font-bold">Min Counts</label>
+            <label htmlFor="qc-minc" className="block text-xs text-textMuted mb-1.5 font-medium">Min Counts</label>
             <input id="qc-minc" type="number" min="0" step="1" value={minCounts} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minCounts', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">Cells with fewer RNA counts are removed</p>
+            <p className="text-xs text-slate-400 mt-1">Cells with fewer RNA counts are removed</p>
           </div>
         </div>
         {validationError && <p className="mt-4 text-sm text-danger" role="alert">{validationError}</p>}
@@ -465,12 +465,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         <details className="mt-6 border-t border-border/50 pt-4 group">
           <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
             <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" aria-hidden="true" />
-            <Settings size={15} className="text-primary" aria-hidden="true" />
-            <span>Advanced Options</span>
+            <span>Advanced options</span>
           </summary>
           <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-1 gap-6 md:grid-cols-2">
             <div>
-              <label htmlFor="qc-filter-features" className="block text-xs text-textMuted mb-1.5 font-bold">Filter Features</label>
+              <label htmlFor="qc-filter-features" className="block text-xs text-textMuted mb-1.5 font-medium">Filter Features</label>
               <input
                 id="qc-filter-features"
                 type="text" 
@@ -479,10 +478,10 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 placeholder="e.g. TRBV, IGH, IGK"
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-400 mt-1">Regex patterns of features/genes to remove before clustering</p>
+              <p className="text-xs text-slate-400 mt-1">Regex patterns of features/genes to remove before clustering</p>
             </div>
             <div>
-              <label className="block text-xs text-textMuted mb-3 font-bold">Doublet Detection</label>
+              <label className="block text-xs text-textMuted mb-3 font-medium">Doublet Detection</label>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -492,7 +491,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 />
                 <span className="text-sm text-white font-medium">Remove Doublets (scDblFinder)</span>
               </label>
-              <p className="text-[10px] text-slate-400 mt-1 ml-7">Increases runtime significantly</p>
+              <p className="text-xs text-slate-400 mt-1 ml-7">Increases runtime significantly</p>
             </div>
           </div>
         </details>
@@ -507,7 +506,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
               key={tab.id}
               onClick={() => setActivePlot(tab.id)}
               aria-pressed={activePlot === tab.id}
-              className={`shrink-0 whitespace-nowrap px-4 py-2.5 text-xs font-bold transition-colors border-b-2 -mb-[1px]
+              className={`shrink-0 whitespace-nowrap px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-[1px]
                 ${activePlot === tab.id
                   ? 'text-blue-400 border-blue-400 bg-background/40'
                   : 'text-slate-400 border-transparent hover:text-slate-300 hover:border-slate-600'
@@ -538,7 +537,6 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           ) : activePlot === 'stats' ? (
             <div>
               <h3 className="text-sm font-bold text-text mb-6 flex items-center gap-2">
-                <Info size={16} className="text-primary" />
                 Distribution Summary
               </h3>
 
@@ -546,11 +544,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
                   {/* Mitochondrial Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
-                    <h4 className="text-xs font-bold text-slate-400 mb-3">Mitochondrial RNA</h4>
+                    <h4 className="text-xs font-medium text-slate-400 mb-3">Mitochondrial RNA</h4>
                     <div className="space-y-3">
                       {stats.mt.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
-                          <span className="text-[10px] text-textMuted">{s.label}</span>
+                          <span className="text-xs text-textMuted">{s.label}</span>
                           <span className="text-sm font-bold text-text font-mono">{s.value}</span>
                         </div>
                       ))}
@@ -559,11 +557,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
                   {/* Features Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
-                    <h4 className="text-xs font-bold text-slate-400 mb-3">Genes detected</h4>
+                    <h4 className="text-xs font-medium text-slate-400 mb-3">Genes detected</h4>
                     <div className="space-y-3">
                       {stats.features.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
-                          <span className="text-[10px] text-textMuted">{s.label}</span>
+                          <span className="text-xs text-textMuted">{s.label}</span>
                           <span className="text-sm font-bold text-text font-mono">{s.value}</span>
                         </div>
                       ))}
@@ -572,11 +570,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
                   {/* Counts Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
-                    <h4 className="text-xs font-bold text-slate-400 mb-3">RNA counts</h4>
+                    <h4 className="text-xs font-medium text-slate-400 mb-3">RNA counts</h4>
                     <div className="space-y-3">
                       {stats.counts.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
-                          <span className="text-[10px] text-textMuted">{s.label}</span>
+                          <span className="text-xs text-textMuted">{s.label}</span>
                           <span className="text-sm font-bold text-text font-mono">{s.value}</span>
                         </div>
                       ))}
@@ -585,11 +583,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
                   {/* Global Block */}
                   <div className="col-span-1 p-4 bg-primary/5 rounded-xl border border-primary/20">
-                    <h4 className="text-xs font-bold text-primary mb-3">Overall Status</h4>
+                    <h4 className="text-xs font-medium text-primary mb-3">Overall Status</h4>
                     <div className="space-y-3">
                       {stats.global.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
-                          <span className="text-[10px] text-blue-400">{s.label}</span>
+                          <span className="text-xs text-blue-400">{s.label}</span>
                           <span className="text-sm font-bold text-blue-400 font-mono">{s.value}</span>
                         </div>
                       ))}
@@ -624,7 +622,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                   <div className="flex flex-wrap items-center gap-3">
                     {['mt', 'features', 'counts', 'scatter'].includes(activePlot) && (showPoints[activePlot] || activePlot === 'scatter') && (
                       <div className="flex items-center gap-2 border border-border/50 rounded-full px-3 py-1 bg-black/5 dark:bg-black/10">
-                        <span className="text-[10px] text-textMuted">Opacity</span>
+                        <span className="text-xs text-textMuted">Opacity</span>
                         <input
                           type="range" min="0.05" max="1" step="0.05"
                           aria-label="Point opacity"
@@ -668,7 +666,6 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
               {['mt', 'features', 'counts'].includes(activePlot) && (
                 <div className="w-full lg:w-64 lg:flex-shrink-0 flex flex-col gap-3">
                   <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
-                    <Info size={16} className="text-primary" />
                     Related Statistics
                   </h3>
                   <dl className="divide-y divide-border/70 text-xs">

@@ -135,7 +135,7 @@ export default function ExecutablePipelines({
           ...current,
           error: publicErrorMessage(
             error,
-            'The pipeline could not start. Check your saved analysis and try again.'
+            'The pipeline could not start. Check your dataset and try again.'
           ),
         }));
     } finally {
@@ -154,7 +154,7 @@ export default function ExecutablePipelines({
             Installed R pipelines
           </h3>
           <p className="mt-1 text-sm text-textMuted">
-            Import a versioned pipeline file, then run it on a saved analysis. Installed files stay
+            Import a versioned pipeline file, then run it on a dataset. Installed files stay
             in this browser for your account.
           </p>
         </div>
@@ -180,13 +180,13 @@ export default function ExecutablePipelines({
         <p className="mt-3 text-sm text-textMuted">
           {deploymentPolicy.demoMode
             ? 'The public demo runs built-in pipelines only.'
-            : 'Running imported code requires Advanced analysis access on a private deployment.'}{' '}
+            : 'Running imported code requires R console access on a private deployment.'}{' '}
           You can still install and export pipeline files here.
         </p>
       )}
       {enabled && (!ownsObject || !canWriteProject || unsavedLiveChanges) && (
         <p className="mt-3 text-sm text-textMuted">
-          Select a saved analysis you own in a project you can edit. Save any pending analysis
+          Select a dataset you own in a project you can edit. Save any pending analysis
           changes before running a pipeline.
         </p>
       )}

@@ -1,10 +1,10 @@
 import React from 'react';
-import { ArrowRight, Loader2 } from 'lucide-react';
-import TraceMark from '../components/TraceMark';
+import { ArrowRight, Dna, Loader2 } from 'lucide-react';
 import './demo.css';
+import { APP_NAME } from '../brand';
 
 export function DemoBrand() {
-  return <div className="demo-brand"><TraceMark size={26} className="text-[#3e3a92]" /><span>TraceOmics</span><span className="demo-badge">Demo</span></div>;
+  return <div className="demo-brand"><Dna size={23} /><span>{APP_NAME}</span><span className="demo-badge">Demo</span></div>;
 }
 
 export default function DemoLoading({ error, onRetry, message = 'Loading counts and QC metrics…' }) {

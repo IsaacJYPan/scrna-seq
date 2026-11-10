@@ -1,6 +1,6 @@
 import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect, useCallback } from 'react';
-import { Layers, AlertTriangle, CheckCircle2, RefreshCw, Zap, GitMerge, FileText } from 'lucide-react';
+import { Layers, AlertTriangle, CheckCircle2, RefreshCw, GitMerge, FileText } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import { publicErrorMessage } from '../publicError';
@@ -194,8 +194,8 @@ export default function BatchIntegration({
 
           {/* Method selector */}
           <div className="card p-5 border-l-4 border-l-primary">
-            <h3 className="font-bold text-white mb-4 text-sm flex items-center gap-2">
-              <Zap size={14} className="text-primary" /> Integration Method
+            <h3 className="font-medium text-white mb-4 text-sm flex items-center gap-2">
+              Integration method
             </h3>
             <div className="space-y-2.5">
               {Object.entries(METHOD_INFO).map(([key, info]) => (
@@ -216,7 +216,7 @@ export default function BatchIntegration({
                       <div className={`w-2 h-2 rounded-full ${info.textColor.replace('text-', 'bg-')}`} />
                     )}
                   </div>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">{info.description}</p>
+                  <p className="text-xs text-slate-400 leading-relaxed">{info.description}</p>
                 </button>
               ))}
             </div>
@@ -224,8 +224,8 @@ export default function BatchIntegration({
 
           {/* Batch column selector */}
           <div className="card p-5 border-l-4 border-l-violet-500">
-            <h3 className="font-bold text-white mb-3 text-sm flex items-center gap-2">
-              <Layers size={14} className="text-violet-400" /> Batch Variable
+            <h3 className="font-medium text-white mb-3 text-sm flex items-center gap-2">
+              Batch variable
             </h3>
             {colsError ? (
               <p className="text-danger text-xs">{colsError}</p>
@@ -238,7 +238,7 @@ export default function BatchIntegration({
               <>
                 <select
                   id="batch-col-select"
-                  aria-label="Batch Variable"
+                  aria-label="Batch variable"
                   value={batchCol}
                   onChange={e => setParam('batchCol', e.target.value)}
                   className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary mb-2"
@@ -268,14 +268,14 @@ export default function BatchIntegration({
             {/* Batch preview */}
             {batchPreview && batchCol && (
               <div className="mt-3 pt-3 border-t border-border">
-                <p className="text-[10px] text-slate-400 font-bold mb-2">
+                <p className="text-xs text-slate-400 font-medium mb-2">
                   Batch Groups ({batchPreview.n_unique})
                 </p>
                 <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto custom-scrollbar">
                   {(batchPreview.values || []).slice(0, 20).map(v => (
                     <span
                       key={v.value}
-                      className="px-2 py-0.5 bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-300 font-mono"
+                      className="px-2 py-0.5 bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 font-mono"
                       title={`${v.count} cells`}
                     >
                       {v.value}
@@ -283,7 +283,7 @@ export default function BatchIntegration({
                     </span>
                   ))}
                   {batchPreview.n_unique > 20 && (
-                    <span className="text-[11px] text-slate-400 self-center">
+                    <span className="text-xs text-slate-400 self-center">
                       +{batchPreview.n_unique - 20} more
                     </span>
                   )}
@@ -294,7 +294,7 @@ export default function BatchIntegration({
 
           {/* Method pros */}
           <div className={`card p-4 ${selectedMethod.bgColor} border ${selectedMethod.borderColor}`}>
-            <p className={`text-xs font-bold mb-2 ${selectedMethod.textColor}`}>
+            <p className={`text-xs font-medium mb-2 ${selectedMethod.textColor}`}>
               {selectedMethod.name} Advantages
             </p>
             <ul className="space-y-1">
@@ -306,7 +306,7 @@ export default function BatchIntegration({
               ))}
             </ul>
             {selectedMethod.package && (
-              <p className="text-[10px] text-slate-400 mt-2">
+              <p className="text-xs text-slate-400 mt-2">
                 Requires: <code className={`${selectedMethod.textColor} bg-black/20 px-1 rounded`}>{selectedMethod.package}</code>
               </p>
             )}
@@ -350,18 +350,18 @@ export default function BatchIntegration({
               {/* Stats grid */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="card p-4 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted font-bold mb-1">Method</div>
+                  <div className="text-xs text-textMuted font-medium mb-1">Method</div>
                   <div className="text-lg font-bold text-white">{(result.result?.method || '').toUpperCase()}</div>
                 </div>
                 <div className="card p-4 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted font-bold mb-1">Batch Column</div>
+                  <div className="text-xs text-textMuted font-medium mb-1">Batch Column</div>
                   <div className="text-lg font-bold text-white font-mono truncate" title={result.result?.batch_col}>
                     {result.result?.batch_col}
                   </div>
                 </div>
                 <div className="card p-4 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted font-bold mb-1">Batches</div>
-                  <div className="text-2xl font-black text-primary">
+                  <div className="text-xs text-textMuted font-medium mb-1">Batches</div>
+                  <div className="text-2xl font-semibold text-primary">
                     {(result.result?.batches || []).length}
                   </div>
                 </div>
@@ -370,7 +370,7 @@ export default function BatchIntegration({
               {/* Batch list */}
               {result.result?.batches?.length > 0 && (
                 <div className="card p-4">
-                  <h4 className="text-xs font-bold text-slate-400 mb-3">
+                  <h4 className="text-xs font-medium text-slate-400 mb-3">
                     Integrated Batches
                   </h4>
                   <div className="flex flex-wrap gap-2">
@@ -391,7 +391,7 @@ export default function BatchIntegration({
 
               {/* Next steps */}
               <div className="card p-4 bg-black/10 border border-border/50">
-                <h4 className="text-xs font-bold text-slate-400 mb-3">Next Steps</h4>
+                <h4 className="text-xs font-medium text-slate-400 mb-3">Next Steps</h4>
                 <div className="space-y-2">
                   {[
                     { step: 'PCA', desc: method === 'harmony' ? 'Harmony uses integrated embeddings; run PCA anyway for consistency' : 'PCA was already re-run on the integrated assay' },
@@ -439,7 +439,7 @@ export default function BatchIntegration({
                     <CheckCircle2 size={12} className="text-success" />
                     Method: <span className="text-white">{selectedMethod.name}</span>
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-2 pl-4">
+                  <p className="text-xs text-slate-400 mt-2 pl-4">
                     Click <strong className="text-white">Run Integration</strong> to begin.
                   </p>
                 </div>

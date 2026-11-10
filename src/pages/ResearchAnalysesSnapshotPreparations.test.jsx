@@ -58,7 +58,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-it('keeps a dirty overview and private preparation draft across ordinary back/reopen without saving or substituting draft text for saved analysis', async () => {
+it('keeps a dirty overview and private preparation draft across ordinary back/reopen without saving or substituting draft text for dataset', async () => {
   render(<ResearchAnalyses {...defaults} />); await openAnalysis();
   fireEvent.change(question(), { target: { value: 'Unsent scientific interpretation.' } }); await enterPreparation();
   expect(within(preparation()).getByLabelText('Preparation saved context')).toHaveTextContent('Treatment response · saved 1 · overview edited');

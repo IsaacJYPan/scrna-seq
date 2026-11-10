@@ -52,7 +52,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    font: { color: plotText, size: 12, family: '"Instrument Sans Variable", system-ui, sans-serif' },
+    font: { color: plotText, size: 12, family: 'Inter, system-ui' },
     hoverlabel: getPlotHoverStyle(theme),
     margin: { l: 58, r: 12, t: 24, b: 120 },
     xaxis: { title: { text: 'Cluster' }, automargin: true, type: 'category', tickangle: categoryTickAngle(heatmapData?.clusters || [], Math.max(chart.width, categoryPlotWidth(heatmapData?.genes, heatmapData?.clusters)) - 100), gridcolor: plotGrid },
@@ -87,7 +87,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
       <PageHeader title="Marker Heatmap" description="Average expression of top marker genes per cluster." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" actions={
 <div className="flex flex-wrap items-center gap-3">
-          <label htmlFor="heatmap-top-n" className="text-xs text-textMuted font-bold">Top N per cluster</label>
+          <label htmlFor="heatmap-top-n" className="text-xs text-textMuted font-medium">Top N per cluster</label>
           <input
             id="heatmap-top-n"
             type="number"

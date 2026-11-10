@@ -136,10 +136,10 @@ function startReadinessR(storageRoot, port) {
 }
 
 async function login(page, email, password) {
-  await page.getByRole('button', { name: 'Log In', exact: true }).click();
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: /Open Workbench/ }).click();
+  await page.getByRole('button', { name: /Open workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
 
@@ -239,7 +239,7 @@ async function main() {
     });
     const analysis = await db.createProjectAnalysisObject(user.id, project.id, {
       objectType: 'seurat',
-      displayName: 'Expert browser saved analysis',
+      displayName: 'Expert browser dataset',
     });
     const producer = await db.createProjectJob(user.id, project.id, {
       jobType: 'checkpoint.noop', analysisObjectId: analysis.id,
@@ -373,11 +373,11 @@ async function main() {
     });
 
     await page.goto(origin, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: 'Log in', exact: true }).waitFor({ state: 'visible' });
     await login(page, email, password);
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
-    await page.getByRole('button', { name: /^Advanced analysis/ }).click();
-    await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: /^R console/ }).click();
+    await page.getByRole('heading', { name: 'R console', exact: true }).waitFor({ state: 'visible' });
     await page.locator('summary', { hasText: 'Runtime, packages, and privacy' }).click();
     await page.getByRole('heading', { name: 'Exact R environment',exact:true }).waitFor();
     await page.getByRole('button', { name: 'Inspect package lock',exact:true }).click();
@@ -517,7 +517,7 @@ write_table(summary_table, "object-summary.csv")
     ], { capture: true });
     const summaryValues = pipelineArchive.stdout.trim().split(/\r?\n/).at(-1).split(',').map(Number);
     assert(summaryValues.length === 2 && summaryValues[0] === 80 && summaryValues[1] === 120,
-      'The imported pipeline must compute cell and feature counts from the saved analysis.');
+      'The imported pipeline must compute cell and feature counts from the dataset.');
 
     const { packWorkflow } = await import('./pack-workflow.mjs');
     const workflowPath = path.join(tempRoot, 'scrna-workflow.pipeline.json');
@@ -611,8 +611,8 @@ write_table(summary_table, "object-summary.csv")
     await figure.waitFor({ state: 'visible' });
     console.log('[workflow-browser] PASS import, locks, figures, rerun invalidation, and snapshot restoration');
 
-    await page.getByRole('button', { name: /^Advanced analysis/ }).click();
-    await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: /^R console/ }).click();
+    await page.getByRole('heading', { name: 'R console', exact: true }).waitFor({ state: 'visible' });
     const privateMarker = `${tempRoot}\\private-marker.txt`;
     await page.getByRole('textbox', { name: 'R script', exact: true }).fill(`stop("${privateMarker.replace(/\\/g, '\\\\')}")`);
     await page.getByRole('button', { name: 'Run R analysis' }).click();
@@ -658,9 +658,9 @@ write_table(summary_table, "object-summary.csv")
     assert(Number(published.rows[0].count) === 2,
       'Only the two successful runs should publish creator-private result objects.');
     await db.setExpertRExecutorByEmail(email, false);
-    await page.getByRole('button', { name: /^Advanced analysis/ }).click();
+    await page.getByRole('button', { name: /^R console/ }).click();
     await page.reload();
-    await page.getByRole('button', { name: /^Advanced analysis/ }).click();
+    await page.getByRole('button', { name: /^R console/ }).click();
     await page.getByText(/administrator has revoked R execution/i).waitFor({ state: 'visible' });
     await page.screenshot({ path: path.join(rStatusScreenshots, 'access-revoked.png'), fullPage: true });
     assert(await page.getByRole('button', { name: 'Check R availability', exact: true }).isEnabled(),

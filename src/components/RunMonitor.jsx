@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import RefreshButton from './RefreshButton';
 import { getRunMonitoring, listRunMonitoring } from '../executions/runMonitoringApi';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import ExecutionTargetEvidence from './ExecutionTargetEvidence';
@@ -207,16 +208,15 @@ export default function RunMonitor({ projectId, userId }) {
   if (!projectId) return null;
   const timing = visibleDetail?.timing;
   const logs = visibleDetail?.logs;
-  return <section aria-label="Run monitoring" className="rounded-xl border border-border bg-surface/50 p-5 space-y-4">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h3 className="text-lg font-semibold">Run monitoring</h3><p className="text-sm text-textMuted">Follow your server jobs and private R commands. Monitoring reads existing records and never submits work.</p></div>
-      <button type="button" className="btn btn-secondary text-sm" disabled={connection.blocked || loading || checking} onClick={refresh}>Refresh monitoring</button>
+  return <section aria-label="Run monitoring" className="space-y-3">
+    <div>
+      <div className="flex items-center gap-1.5"><h3 className="text-lg font-semibold">Run monitoring</h3><RefreshButton onClick={refresh} disabled={connection.blocked || loading || checking} loading={loading || checking} label="Refresh monitoring" /></div>
     </div>
-    <p className="text-xs text-textMuted">Selected server connection: {connection.blocked ? 'Disconnected or unconfirmed' : stale ? 'Service status could not be checked' : 'Connected'}{connection.target?.sshTunnel ? ' · SSH tunnel' : ''}.</p>
+    {(connection.blocked || stale) && <p className="text-xs text-textMuted">Server connection: {connection.blocked ? 'disconnected or unconfirmed' : 'status could not be checked'}{connection.target?.sshTunnel ? ', SSH tunnel' : ''}.</p>}
     {connection.blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">The selected server connection is unavailable. Last confirmed observations remain visible; current computation status is unknown. Reconnect to check the same run. No work is resubmitted.</p>}
     {(stale || expired) && !connection.blocked && (visibleDetail || visibleItems.length > 0) && <p role="status" className="text-sm">{expired ? 'These active observations are no longer current.' : 'These observations could not be refreshed.'} The last confirmed server state and elapsed time remain visible.</p>}
     {error && scopeMatches && <p role="alert" className="text-sm text-danger">{error}</p>}
-    <div className="grid gap-4 lg:grid-cols-[minmax(220px,1fr)_minmax(0,2fr)]">
+    <div className={`grid gap-4 ${visibleItems.length > 0 ? 'lg:grid-cols-[minmax(220px,1fr)_minmax(0,2fr)]' : ''}`}>
       <div className="max-h-[600px] space-y-2 overflow-auto">
         <ul aria-label="Monitored runs" className="space-y-2">
         {visibleItems.map(item => <li key={item.id}><button type="button" aria-pressed={selected === item.id && scopeMatches} disabled={connection.blocked} onClick={() => select(item)} className={`w-full rounded border p-3 text-left disabled:opacity-70 ${selected === item.id && scopeMatches ? 'border-primary bg-primary/5' : 'border-border'}`}>
@@ -227,7 +227,7 @@ export default function RunMonitor({ projectId, userId }) {
         </button></li>)}
         </ul>
         {loading && <p role="status" className="text-sm">Loading run observations…</p>}
-        {!loading && !visibleItems.length && <p className="text-sm text-textMuted">No jobs or private R commands are available for your account in this project.</p>}
+        {!loading && !visibleItems.length && <p className="text-sm text-textMuted">You have no server jobs or R commands in this project.</p>}
         {scopeMatches && cursor && <button type="button" className="btn btn-secondary text-xs" disabled={connection.blocked || loading} onClick={() => readList(cursor)}>More monitored runs</button>}
       </div>
       <section aria-label="Selected run monitoring" className="min-w-0 space-y-3">
@@ -267,7 +267,7 @@ export default function RunMonitor({ projectId, userId }) {
             {visibleDetail.kernel && <><dt>Kernel</dt><dd className="break-all">{visibleDetail.kernel.id}</dd><dt>Generation</dt><dd className="break-all">{visibleDetail.kernel.generation}</dd><dt>Command order</dt><dd>{visibleDetail.kernel.order}</dd></>}
           </dl></details>}
         </>}
-        {!visibleDetail && !checking && <p className="text-sm text-textMuted">Select your run to inspect its current server observations.</p>}
+        {!visibleDetail && !checking && visibleItems.length > 0 && <p className="text-sm text-textMuted">Select your run to inspect its current server observations.</p>}
       </section>
     </div>
   </section>;

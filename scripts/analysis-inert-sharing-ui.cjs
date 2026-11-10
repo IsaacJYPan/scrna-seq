@@ -34,7 +34,7 @@ async function verifyInertSharing(context) {
   let choices = prep(owner).getByRole('form', { name: 'Prepare private snapshot', exact: true });
   const chooseVersion = async version => { await choices.getByRole('radio', { name: new RegExp(`Saved version ${version} ·`) }).check(); };
   await chooseVersion(study.version);
-  const linked = () => choices.getByRole('region', { name: `Linked in saved analysis ${study.version}`, exact: true });
+  const linked = () => choices.getByRole('region', { name: `Linked in dataset ${study.version}`, exact: true });
   const sourceOptionReads = () => requests.filter(item => item.method === 'GET' && item.pathname === `${preparations}/options` && item.optionKind === 'analysis-inert-references');
   assert(sourceOptionReads().length === 0, 'Source text metadata was loaded before explicit expansion.');
   await linked().getByText('Text and JSON source excerpts (optional)', { exact: true }).click();

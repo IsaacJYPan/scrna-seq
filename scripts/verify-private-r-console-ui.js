@@ -44,7 +44,7 @@ async function savedAnalysisFixture(database, service, image) {
         stopifnot(ncol(obj)==12L, nrow(obj)==20L)
         saveRDS(list(global=obj,raw=obj), '/fixture/checkpoint.rds')
       `], { cwd: root, windowsHide: true, timeout: 90_000, maxBuffer: 64 * 1024 });
-  } catch { throw new Error('The reviewed isolated R image could not create the disposable saved analysis.'); }
+  } catch { throw new Error('The reviewed isolated R image could not create the disposable dataset.'); }
   finally { fs.chmodSync(checkpointDirectory, 0o755); }
   const checkpointBytes = fs.readFileSync(checkpointPath);
   const checksum = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -169,8 +169,8 @@ async function main() {
     await page.goto(service.endpoint);
     await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
     await page.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await page.getByRole('button', { name: /Open Workbench/ }).click();
-    await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await page.getByRole('button', { name: /Open workbench/ }).click();
+    await page.getByRole('button', { name: /^R console,/ }).click();
     const darkMode = page.getByRole('button', { name: 'Switch to dark mode', exact: true });
     if (await darkMode.isVisible()) await darkMode.click();
     const consoleUi = page.getByRole('region', { name: 'Private R console', exact: true });
@@ -202,7 +202,7 @@ async function main() {
       pathname: '/api/private-r-kernels/' + service.project.id + '/' + originalKernel.id, mode: 'hold' });
     try {
       await page.reload();
-      await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+      await page.getByRole('button', { name: /^R console,/ }).click();
       await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
       await waitFor(() => initialInspection.observation(), 'Initial attach did not inspect the exact existing kernel.');
       await consoleUi.getByText('Checking the private R session. Commands and saves wait for fresh server confirmation.', { exact: true }).waitFor();
@@ -389,7 +389,7 @@ async function main() {
     await output.getByText('Command 8 · interrupted', { exact: true }).waitFor();
     await consoleUi.getByRole('region', { name: 'Previous R session evidence', exact: true }).screenshot({ path: path.join(directory, 'restarted-r-journal-evidence.png') });
     await page.reload();
-    await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await page.getByRole('button', { name: /^R console,/ }).click();
     await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor();
     await run('stopifnot(!exists("private_value")); cat("Reload retained fresh generation")', 2);
@@ -453,7 +453,7 @@ async function main() {
     await consoleUi.getByRole('button', { name: 'Stop session', exact: true }).click();
     await consoleUi.getByRole('button', { name: 'Stop and discard unsaved memory', exact: true }).click();
     await consoleUi.getByText('Session stopped · unsaved memory lost', { exact: true }).waitFor();
-    await consoleUi.getByLabel('Initial saved analysis', { exact: true }).selectOption(selectedAnalysis.analysisId);
+    await consoleUi.getByLabel('Initial dataset', { exact: true }).selectOption(selectedAnalysis.analysisId);
     await consoleUi.getByRole('checkbox', { name: 'Use cell-metadata.csv', exact: true }).check();
     await consoleUi.getByRole('button', { name: 'Start private session', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor({ timeout: 125_000 });
@@ -461,14 +461,14 @@ async function main() {
 selected_metadata <- read_input("cell-metadata.csv")
 stopifnot(identical(as.character(selected_metadata$cell), colnames(obj)))
 obj$condition <- selected_metadata$condition
-display_table(data.frame(cells=ncol(obj), features=nrow(obj), conditions=length(unique(obj$condition))), name="Loaded saved analysis")
+display_table(data.frame(cells=ncol(obj), features=nrow(obj), conditions=length(unique(obj$condition))), name="Loaded dataset")
 cat("Loaded cells:", ncol(obj), "features:", nrow(obj))`, 1);
     assert((await output.getByLabel('R stdout').innerText()).includes('Loaded cells: 12 features: 20'),
       'The saved Seurat checkpoint or its exact CSV input was not loaded into the private kernel.');
     await output.getByRole('columnheader', { name: 'cells', exact: true }).waitFor();
     await output.getByRole('cell', { name: '12', exact: true }).waitFor();
     await output.screenshot({ path: path.join(directory, 'saved-analysis-cell-counts.png') });
-    await run('control_obj <- subset(obj, cells=colnames(obj)[obj$condition=="control"]); condition_counts <- as.data.frame(table(obj$condition)); names(condition_counts) <- c("condition","cells"); display_table(condition_counts, name="Selected conditions"); barplot(table(obj$condition), main="Saved analysis conditions")', 2);
+    await run('control_obj <- subset(obj, cells=colnames(obj)[obj$condition=="control"]); condition_counts <- as.data.frame(table(obj$condition)); names(condition_counts) <- c("condition","cells"); display_table(condition_counts, name="Selected conditions"); barplot(table(obj$condition), main="Dataset conditions")', 2);
     await output.getByRole('cell', { name: 'control', exact: true }).waitFor();
     await output.getByRole('cell', { name: 'treated', exact: true }).waitFor();
     const savedFigure = output.getByRole('img', { name: 'R figure 1', exact: true });
@@ -622,7 +622,7 @@ cat("Original checkpoint restored:",ncol(obj),"cells; original input rows:",nrow
     await consoleUi.getByRole('button', { name: 'Stop session', exact: true }).click();
     await consoleUi.getByRole('button', { name: 'Stop and discard unsaved memory', exact: true }).click();
     await consoleUi.getByText('Session stopped · unsaved memory lost', { exact: true }).waitFor();
-    await consoleUi.getByLabel('Initial saved analysis', { exact: true }).selectOption('');
+    await consoleUi.getByLabel('Initial dataset', { exact: true }).selectOption('');
     await consoleUi.getByRole('checkbox', { name: 'Use cell-metadata.csv', exact: true }).uncheck();
     await consoleUi.getByRole('checkbox', { name: 'Use Control cells · v1', exact: true }).check();
     await consoleUi.getByRole('checkbox', { name: 'Use Condition counts · v1', exact: true }).check();
@@ -693,8 +693,8 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
     const otherPage = await otherContext.newPage(); await otherPage.goto(service.endpoint);
     await otherPage.getByPlaceholder('researcher@lab.edu').fill(colleagueEmail);
     await otherPage.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await otherPage.getByRole('button', { name: /Open Workbench/ }).click();
-    await otherPage.getByRole('button', { name: /^Advanced analysis,/ }).waitFor();
+    await otherPage.getByRole('button', { name: /Open workbench/ }).click();
+    await otherPage.getByRole('button', { name: /^R console,/ }).waitFor();
     const privateVersion = await apiGet(otherPage, '/api/artifact-versions/' + service.project.id + '/' + revisedObject.version.versionId + '/preview');
     const privateJournal = await apiGet(otherPage, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/publications');
     const colleagueVersions = await apiGet(otherPage, '/api/artifact-versions/' + service.project.id);

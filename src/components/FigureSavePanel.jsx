@@ -41,7 +41,7 @@ function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true })
         className="w-full flex items-center gap-2 px-4 py-3 bg-surface/60 hover:bg-surface text-left transition-colors"
       >
         {Icon && <Icon size={14} className="text-primary shrink-0" />}
-        <span className="text-xs font-bold text-text flex-1">{title}</span>
+        <span className="text-xs font-medium text-text flex-1">{title}</span>
         {open ? <ChevronDown size={14} className="text-textMuted" /> : <ChevronRight size={14} className="text-textMuted" />}
       </button>
       {open && <div className="p-4 space-y-4">{children}</div>}
@@ -62,7 +62,7 @@ function SliderRow({ label, value, min, max, step = 0.1, onChange, hint }) {
         onChange={e => onChange(parseFloat(e.target.value))}
         className="w-full accent-primary"
       />
-      {hint && <p className="text-[10px] text-slate-500 mt-0.5">{hint}</p>}
+      {hint && <p className="text-xs text-slate-500 mt-0.5">{hint}</p>}
     </div>
   );
 }
@@ -358,7 +358,7 @@ export default function FigureSavePanel({
             <Image size={20} className="text-primary" />
             <div>
               <h3 id="figure-save-panel-title" className="font-bold text-text text-sm">Save to Figure Gallery</h3>
-              <p className="text-[11px] text-textMuted">{plotType} · Publication-quality export</p>
+              <p className="text-xs text-textMuted">{plotType} · Publication-quality export</p>
             </div>
           </div>
           <button ref={closeButtonRef} onClick={onClose} aria-label="Close figure editor" className="text-textMuted hover:text-text transition-colors p-1 rounded hover:bg-white/10">
@@ -431,7 +431,7 @@ export default function FigureSavePanel({
                           <div key={i} className="w-3 h-3 rounded-sm" style={{ backgroundColor: c }} />
                         ))}
                       </div>
-                      <span className="text-[11px] font-medium truncate">{p.label}</span>
+                      <span className="text-xs font-medium truncate">{p.label}</span>
                     </button>
                   ))}
                 </div>
@@ -451,7 +451,7 @@ export default function FigureSavePanel({
                     <button
                       key={p}
                       onClick={() => setLegendPos(p)}
-                      className={`px-2 py-1 rounded text-[11px] font-medium capitalize border transition-all ${
+                      className={`px-2 py-1 rounded text-xs font-medium capitalize border transition-all ${
                         legendPos === p
                           ? 'border-primary bg-primary/10 text-primary'
                           : 'border-border text-textMuted hover:text-text'
@@ -468,7 +468,7 @@ export default function FigureSavePanel({
                 <div className="flex items-center justify-between">
                   <div>
                     <label className="text-xs text-textMuted font-medium">Log Scale Colors</label>
-                    <p className="text-[10px] text-slate-500">log_scale in FeaturePlot</p>
+                    <p className="text-xs text-slate-500">log_scale in FeaturePlot</p>
                   </div>
                   <button
                     role="switch"
@@ -492,7 +492,7 @@ export default function FigureSavePanel({
                     <button
                       key={f}
                       onClick={() => setFormat(f)}
-                      className={`flex-1 py-1.5 rounded text-xs font-bold border transition-all ${
+                      className={`flex-1 py-1.5 rounded text-xs font-medium border transition-all ${
                         format === f ? 'border-primary bg-primary/10 text-primary' : 'border-border text-textMuted'
                       }`}
                     >{f}</button>
@@ -544,7 +544,7 @@ export default function FigureSavePanel({
             {/* Preview card — white background mimics publication */}
             <div className="flex-1 relative flex flex-col">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-bold text-textMuted">Preview (white background)</span>
+                <span className="text-xs font-medium text-textMuted">Preview (white background)</span>
                 <button
                   onClick={() => refreshPreview(buildParams())}
                   disabled={previewLoading || Boolean(previewUnavailableReason)}
@@ -566,14 +566,14 @@ export default function FigureSavePanel({
                   <div className="text-center p-6 text-slate-500">
                     <Info size={30} className="mx-auto mb-2 text-primary/70" />
                     <p className="text-xs font-medium text-slate-600 mb-1">Preview unavailable</p>
-                    <p className="text-[11px] text-slate-400">{previewUnavailableReason}</p>
+                    <p className="text-xs text-slate-400">{previewUnavailableReason}</p>
                   </div>
                 )}
                 {previewError && !previewLoading && !previewUnavailableReason && (
                   <div className="text-center p-6 text-slate-500">
                     <AlertCircle size={32} className="mx-auto mb-2 text-amber-500" />
                     <p className="text-xs font-medium text-slate-600 mb-1">Preview failed</p>
-                    <p className="text-[11px] text-slate-400">{previewError}</p>
+                    <p className="text-xs text-slate-400">{previewError}</p>
                   </div>
                 )}
                 {previewB64 && !previewError && !previewUnavailableReason && (
@@ -616,7 +616,7 @@ export default function FigureSavePanel({
                   : <><Download size={16} /> Save to Figure Gallery</>
                 }
               </button>
-              <p className="text-[10px] text-slate-500 text-center">
+              <p className="text-xs text-slate-500 text-center">
                 {serverFigureExportEnabled
                   ? 'Saves figure metadata and a preview to the private gallery.'
                   : 'Figures remain in this private gallery; file export is not available in this deployment.'}

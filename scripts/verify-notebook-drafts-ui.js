@@ -65,7 +65,7 @@ async function main({ artifactDirectory } = {}) {
     await target.goto(service.endpoint);
     await target.getByPlaceholder('researcher@lab.edu').fill(account.email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
   }
@@ -74,7 +74,7 @@ async function main({ artifactDirectory } = {}) {
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openDocuments(target) {
-    await navigation(target, /^Data workspace,/);
+    await navigation(target, /^Projects,/);
     await target.getByRole('button', { name: new RegExp('^' + escaped(service.project.name) + '(?:$|\\s)') }).click();
     await navigation(target, 'Analyses');
     const list = target.getByRole('region', { name: 'Project analyses', exact: true });

@@ -49,7 +49,7 @@ describe('Analysis status', () => {
     render(<AnalysisStatusBar {...base} datasetInfo={{ ...base.datasetInfo, liveState: 'saved' }} onOpenHistory={onOpenHistory} />);
     expect(screen.getByRole('status')).toHaveTextContent('Saved object selected');
     expect(screen.queryByRole('button', { name: 'Save current analysis' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Open saved analysis from Runs & Results' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open dataset from Runs & Results' }));
     expect(onOpenHistory).toHaveBeenCalledOnce();
   });
 
@@ -59,7 +59,7 @@ describe('Analysis status', () => {
       checkpointSaveState={{ phase: 'error', durableSaved: true, message: 'Saved successfully, but opening failed.' }} />);
     expect(screen.getByRole('status')).toHaveTextContent('Saved; opening failed');
     expect(screen.queryByRole('button', { name: 'Save current analysis' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Open saved analysis from Runs & Results' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open dataset from Runs & Results' }));
     expect(onOpenHistory).toHaveBeenCalledOnce();
     expect(onSave).not.toHaveBeenCalled();
   });

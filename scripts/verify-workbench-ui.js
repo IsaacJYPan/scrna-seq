@@ -156,7 +156,7 @@ async function workbench(browser, theme, width) {
   const { page, consoleErrors, networkFailures } = await fixture(context);
   try {
     await page.goto(`http://localhost:${port}`, { waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: 'Add analysis', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Add dataset', exact: true }).first().click();
     await page.getByRole('button', { name: /PBMC 3k Demo Dataset/ }).click();
     await page.getByText('PBMC_3k_Tutorial', { exact: true }).first().waitFor();
     for (const destination of ['workspace', 'qc', 'pca', 'umap', 'inspect', 'normalize', 'cluster', 'featureplot', 'heatmap', 'dotplot', 'geneviewer']) {
@@ -236,7 +236,7 @@ async function extraInteractions(browser) {
   const { page, consoleErrors } = await fixture(context);
   try {
     await page.goto(`http://localhost:${port}`, { waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: 'Add analysis', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Add dataset', exact: true }).first().click();
     await page.getByRole('button', { name: /PBMC 3k Demo Dataset/ }).click();
     await page.getByText('PBMC_3k_Tutorial', { exact: true }).first().waitFor();
     await navigate(page, 'umap');

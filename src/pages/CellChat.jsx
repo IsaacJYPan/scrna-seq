@@ -1,16 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Archive,
-  Ban,
-  Clock,
-  FileText,
-  Loader2,
-  MessageSquare,
-  Play,
-  RefreshCw,
-  ShieldCheck,
-} from 'lucide-react';
+import { AlertTriangle, Ban, FileText, Loader2, MessageSquare, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
 import { publicErrorMessage } from '../publicError';
@@ -114,10 +103,10 @@ function cellChatReasonMessage(code) {
     CELLCHAT_GROUPING_UNAVAILABLE: 'CellChat needs valid clustering or identity labels. Run clustering or choose current identities and try again.',
     CELLCHAT_GROUP_COUNT_INVALID: 'CellChat needs between two and 32 populated groups. Review the selected grouping and try again.',
     CELLCHAT_MIN_GROUP_CELLS: 'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
-    CELLCHAT_ASSAY_UNAVAILABLE: 'CellChat requires an RNA assay in the saved analysis.',
+    CELLCHAT_ASSAY_UNAVAILABLE: 'CellChat requires an RNA assay in the dataset.',
     CELLCHAT_NORMALIZED_DATA_REQUIRED: 'CellChat requires normalized RNA data. Run normalization and try again.',
     CELLCHAT_DATABASE_OVERLAP_LOW: 'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
-    CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
+    CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and dataset.',
   };
   return messages[code] || null;
 }
@@ -338,7 +327,7 @@ function StatusBadge({ children, tone = 'slate' }) {
     slate: 'bg-background text-textMuted border-border',
   };
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold ${tones[tone] || tones.slate}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${tones[tone] || tones.slate}`}>
       {children}
     </span>
   );
@@ -356,8 +345,8 @@ function EmptyNotice({ title, children }) {
 function Metric({ label, value, detail }) {
   return (
     <div className="rounded border border-border bg-surface/70 p-4">
-      <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold text-textMuted">{label}</div>
+      <div className="text-2xl font-semibold text-text">{value}</div>
+      <div className="mt-1 text-xs font-medium text-textMuted">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
@@ -390,7 +379,7 @@ function InteractionTable({ interactions }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[760px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold text-textMuted">
+        <thead className="bg-background text-xs font-medium text-textMuted">
           <tr>
             <th className="p-3">Source group</th>
             <th className="p-3">Target group</th>
@@ -424,7 +413,7 @@ function PathwayTable({ pathways }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[680px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold text-textMuted">
+        <thead className="bg-background text-xs font-medium text-textMuted">
           <tr>
             <th className="p-3">Signaling pathway</th>
             <th className="p-3">Source group</th>
@@ -648,14 +637,14 @@ export default function CellChat({
     if (!userEmail) return setError('Sign in before starting CellChat inference.');
     if (!activeProjectId) return setError('Select a project before starting CellChat inference.');
     if (!selectedObjectId || !isDbBackedObject) {
-      return setError('Select a saved analysis before starting CellChat inference.');
+      return setError('Select a dataset before starting CellChat inference.');
     }
     if (!canWriteProject) return setError('Your project role can view results but cannot start analysis jobs.');
     if (!ownsPrivateLiveObject) {
       return setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before starting CellChat inference.');
     }
     if (!sessionReady || !liveObjectAttached) {
-      return setError('Open this saved analysis in your private analysis workspace before starting CellChat inference.');
+      return setError('Open this dataset in your private analysis workspace before starting CellChat inference.');
     }
     if (unsavedLiveChanges) {
       return setError('Save the current analysis before starting this durable run. Unsaved clustering or other live steps are not included.');
@@ -683,7 +672,7 @@ export default function CellChat({
         { useCache: false }
       );
       if (preflight?.ready !== true) {
-        throw Object.assign(new Error(cellChatReasonMessage(preflight?.code) || 'CellChat could not validate this saved analysis.'), {
+        throw Object.assign(new Error(cellChatReasonMessage(preflight?.code) || 'CellChat could not validate this dataset.'), {
           code: preflight?.code,
         });
       }
@@ -740,7 +729,7 @@ export default function CellChat({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-text">No saved analysis selected</h2>
+          <h2 className="mb-2 text-xl font-bold text-text">No dataset selected</h2>
           <p className="text-sm text-textMuted">Select a saved, clustered analysis before running CellChat inference.</p>
         </div>
       </div>
@@ -769,7 +758,7 @@ export default function CellChat({
 
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
           <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
-          <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Dataset</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
           <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Assay</dt><dd className="text-text">RNA</dd></div>
         </dl>
         {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
@@ -795,7 +784,7 @@ export default function CellChat({
 
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Select a saved analysis before starting this analysis.
+            Select a dataset before starting this analysis.
           </div>
         )}
 
@@ -814,7 +803,7 @@ export default function CellChat({
 
         {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This saved analysis is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
+            This dataset is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
             <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
               {datasetInfo?.source === 'pbmc3k_demo' && datasetInfo?.metadata?.curatedDemo !== true ? 'Open workspace' : 'Open Runs & Results'}
             </button>
@@ -834,32 +823,32 @@ export default function CellChat({
           </p>
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Group labels (required)</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Group labels (required)</span>
               <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose grouping</option>
                 {GROUP_BY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Assay</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Assay</span>
               <input value="RNA" readOnly aria-label="Assay" className="w-full cursor-not-allowed rounded border border-border bg-surface/70 p-2.5 text-sm text-textMuted" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Species (required)</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Species (required)</span>
               <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose species</option>
                 {SPECIES_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Database category (required)</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Database category (required)</span>
               <select value={params.databaseCategory} onChange={event => setParam('databaseCategory', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose database category</option>
                 {DATABASE_CATEGORY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Analysis intent (required)</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Analysis intent (required)</span>
               <select value={params.analysisIntent} onChange={event => setParam('analysisIntent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Confirm analysis scope</option>
                 {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
@@ -871,31 +860,31 @@ export default function CellChat({
             <p className="mt-2 text-xs text-textMuted">Sampling bounds, display limits, statistical cutoff, and reproducibility seed.</p>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Minimum cells per group</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Minimum cells per group</span>
               <input type="number" min="5" max="200" value={params.minCellsPerGroup} onChange={event => setParam('minCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Maximum cells per group</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Maximum cells per group</span>
               <input type="number" min="100" max="10000" value={params.maxCellsPerGroup} onChange={event => setParam('maxCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Maximum cells total</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Maximum cells total</span>
               <input type="number" min="1000" max="10000" value={params.maxTotalCells} onChange={event => setParam('maxTotalCells', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">p-value cutoff</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">p-value cutoff</span>
               <input type="number" min="0.000001" max="0.1" step="0.01" value={params.pValueCutoff} onChange={event => setParam('pValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Interactions shown</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Interactions shown</span>
               <input type="number" min="5" max="100" value={params.topInteractions} onChange={event => setParam('topInteractions', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Pathways shown</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Pathways shown</span>
               <input type="number" min="5" max="100" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold text-textMuted">Random seed</span>
+              <span className="mb-1.5 block text-xs font-medium text-textMuted">Random seed</span>
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
@@ -906,7 +895,7 @@ export default function CellChat({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Run status</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">Run status</h3>
               <p className="mt-1 text-sm text-textMuted">Compute is allocated when available. When demand is high, a new analysis waits for compute.</p>
             </div>
             <div className="flex items-center gap-2">
@@ -928,8 +917,8 @@ export default function CellChat({
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
-                <div><div className="text-[10px] font-bold text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
-                <div><div className="text-[10px] font-bold text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
+                <div><div className="text-xs font-medium text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
+                <div><div className="text-xs font-medium text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
               </div>
               {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{publicErrorMessage(job.error, 'This analysis needs attention. Review the settings and try again.')}</div>}
               <JobLogs logs={visibleLogs} />
@@ -940,7 +929,7 @@ export default function CellChat({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> CellChat summary</h3>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">CellChat summary</h3>
               <p className="mt-1 text-sm text-textMuted">This page shows a bounded candidate summary for interpretation. The complete interaction table is available through authorized export.</p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
@@ -957,10 +946,10 @@ export default function CellChat({
 
               <h4 className="text-sm font-bold text-text">Recorded run settings</h4>
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Grouping</div><div className="mt-1 font-bold text-text">{formatGroupBy(summary.groupBy || resolvedParams.groupBy)}</div></div>
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Species / assay</div><div className="mt-1 font-bold text-text">{summary.species || resolvedParams.species || 'Not recorded'} / {summary.assay || resolvedParams.assay || 'RNA'}</div></div>
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Database category</div><div className="mt-1 font-bold text-text">{formatCategory(summary.databaseCategory || resolvedParams.databaseCategory)}</div></div>
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Analysis scope</div><div className="mt-1 font-bold text-text">{(summary.analysisIntent || resolvedParams.analysisIntent) === 'single_context' ? 'One biological context' : 'Not recorded'}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-xs font-medium text-textMuted">Grouping</div><div className="mt-1 font-bold text-text">{formatGroupBy(summary.groupBy || resolvedParams.groupBy)}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-xs font-medium text-textMuted">Species / assay</div><div className="mt-1 font-bold text-text">{summary.species || resolvedParams.species || 'Not recorded'} / {summary.assay || resolvedParams.assay || 'RNA'}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-xs font-medium text-textMuted">Database category</div><div className="mt-1 font-bold text-text">{formatCategory(summary.databaseCategory || resolvedParams.databaseCategory)}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-xs font-medium text-textMuted">Analysis scope</div><div className="mt-1 font-bold text-text">{(summary.analysisIntent || resolvedParams.analysisIntent) === 'single_context' ? 'One biological context' : 'Not recorded'}</div></div>
               </div>
 
               {summary.warnings.length > 0 && (
@@ -980,7 +969,7 @@ export default function CellChat({
               <div className="rounded-lg border border-border bg-surface/60 p-4 text-sm">
                 <h4 className="font-bold text-text">Group labels in this private analysis workspace</h4>
                 <p className="mt-1 text-textMuted">
-                  Group labels are available only while the owner&apos;s saved analysis is open in their private analysis workspace; they are not saved with the shared result. If identities changed after this analysis ran, rerun it before interpreting the mapping.
+                  Group labels are available only while the owner&apos;s dataset is open in their private analysis workspace; they are not saved with the shared result. If identities changed after this analysis ran, rerun it before interpreting the mapping.
                 </p>
                 {ownerGroupKey?.groups?.length ? (
                   <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -996,7 +985,7 @@ export default function CellChat({
                 ) : (
                   <p className="mt-3 text-xs text-textMuted">
                     {ownerGroupKeyUnavailable
-                      ? 'The group-label mapping is unavailable. Open the source saved analysis in your private analysis workspace to recover it.'
+                      ? 'The group-label mapping is unavailable. Open the source dataset in your private analysis workspace to recover it.'
                       : 'Loading group labels from the attached private analysis workspace…'}
                   </p>
                 )}

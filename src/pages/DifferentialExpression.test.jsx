@@ -175,7 +175,7 @@ describe('DifferentialExpression durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
-    expect(screen.getByText(/Select a saved analysis before running marker analysis/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a dataset before running marker analysis/i)).toBeInTheDocument();
   });
 
   it('queues checkpoint-backed DEG when the interactive private R object is not attached', async () => {

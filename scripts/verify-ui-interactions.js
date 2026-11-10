@@ -52,14 +52,14 @@ async function workbench(browser) {
   const { page, consoleErrors } = await prepareVisualPage(context, { logConsole: false });
   try {
     await page.goto(origin, { waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: 'Add analysis', exact: true }).first().click();
-    const dialog = page.getByRole('dialog', { name: 'Load saved analysis' });
+    await page.getByRole('button', { name: 'Add dataset', exact: true }).first().click();
+    const dialog = page.getByRole('dialog', { name: 'Load dataset' });
     await dialog.waitFor();
     await page.keyboard.press('Shift+Tab');
     check('Loader retains keyboard focus', await dialog.evaluate(el => el.contains(document.activeElement)));
     await page.keyboard.press('Escape');
-    check('Loader Escape returns focus to Add analysis', await page.getByRole('button', { name: 'Add analysis', exact: true }).first().evaluate(el => el === document.activeElement));
-    await page.getByRole('button', { name: 'Add analysis', exact: true }).first().click();
+    check('Loader Escape returns focus to Add dataset', await page.getByRole('button', { name: 'Add dataset', exact: true }).first().evaluate(el => el === document.activeElement));
+    await page.getByRole('button', { name: 'Add dataset', exact: true }).first().click();
     await page.getByRole('button', { name: /PBMC 3k Demo Dataset/ }).click();
     await page.getByText('PBMC_3k_Tutorial', { exact: true }).first().waitFor();
     await page.getByRole('button', { name: 'Object options' }).waitFor();
@@ -114,7 +114,7 @@ async function workbench(browser) {
     await page.keyboard.press('Escape');
     check('Drawer Escape restores launcher focus', await expand.evaluate(el => el === document.activeElement));
     await expand.click();
-    await drawer.getByRole('button', { name:/Data workspace/ }).click();
+    await drawer.getByRole('button', { name:/Projects/ }).click();
     check('Selecting a destination closes drawer', await drawer.isHidden());
     const connection = page.getByRole('button', { name:'Connection details', exact:true });
     await connection.click();
@@ -221,7 +221,7 @@ async function touchWorkbench(browser) {
   const {page}=await prepareVisualPage(context,{logConsole:false});
   try {
     await page.goto(origin);
-    await page.getByRole('button',{name:'Add analysis',exact:true}).first().tap();
+    await page.getByRole('button',{name:'Add dataset',exact:true}).first().tap();
     await page.getByRole('button',{name:/PBMC 3k Demo Dataset/}).tap();
     const trigger=page.getByRole('button',{name:'Object options'});
     await trigger.tap();

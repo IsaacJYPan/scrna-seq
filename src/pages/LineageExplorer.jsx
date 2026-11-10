@@ -17,7 +17,7 @@ function formatObjectLabel(node) {
   if (label && label !== node?.id && !/^(?:ao|job|artifact|object)[_-]/i.test(label)) {
     return formatAnalysisObjectDisplayName(label, node?.createdAt);
   }
-  return 'Saved analysis';
+  return 'Dataset';
 }
 
 function compactRecordedDate(value) {
@@ -43,7 +43,7 @@ const RELATIONSHIP_COPY = {
   },
   branch: {
     label: 'Analysis branch',
-    description: 'Started a separate analysis branch from this saved analysis.',
+    description: 'Started a separate analysis branch from this dataset.',
   },
   integration_input: {
     label: 'Integration input',
@@ -115,7 +115,7 @@ function LineageNode({ data }) {
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-textMuted">
-        <span>Saved analysis</span>
+        <span>Dataset</span>
         <span className="normal-case tracking-normal" title={`Recorded analysis ID: ${data.id}`}>
           {data.recordedDate || `ID …${String(data.id).slice(-6)}`}
         </span>
@@ -310,7 +310,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
         data: {
           id: node.id,
           label: formatObjectLabel(node),
-          objectType: typeof node.objectType === 'string' ? node.objectType : 'saved analysis',
+          objectType: typeof node.objectType === 'string' ? node.objectType : 'dataset',
           recordedDate: compactRecordedDate(node.createdAt),
           isRoot: node.id === graph?.rootObjectId,
           selected: node.id === selectedNodeId,
@@ -355,8 +355,8 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       <div className="flex h-full items-center justify-center bg-background p-8">
         <div className="max-w-lg rounded-xl border border-dashed border-border bg-surface p-8 text-center">
           <GitBranch size={38} className="mx-auto text-primary" aria-hidden="true" />
-          <h2 className="mt-4 text-xl font-bold text-text">Select a saved analysis</h2>
-          <p className="mt-2 text-sm text-textMuted">Choose a saved analysis in the Data workspace to view its recorded relationships.</p>
+          <h2 className="mt-4 text-xl font-bold text-text">Select a dataset</h2>
+          <p className="mt-2 text-sm text-textMuted">Choose a dataset on the Projects page to view its recorded relationships.</p>
         </div>
       </div>
     );
@@ -365,7 +365,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <PageHeader title="Lineage" icon={GitBranch} className="shrink-0 border-b border-border bg-surface/60 px-4 py-5 sm:px-6"
-        description="Recorded relationships for the selected saved analysis. This view is read-only."
+        description="Recorded relationships for the selected dataset. This view is read-only."
         actions={<button onClick={loadLineage} disabled={loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
           {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
         </button>}>
@@ -416,7 +416,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
               <div className="space-y-5">
                 <div>
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[10px] font-black text-primary">Selected analysis</p>
+                    <p className="text-xs font-semibold text-primary">Selected analysis</p>
                     {graph?.rootObjectId && nodeById.has(graph.rootObjectId) && selectedNodeId !== graph.rootObjectId && (
                       <button type="button" onClick={() => setSelectedNodeId(graph.rootObjectId)} className="text-xs font-bold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">Jump to root</button>
                     )}
@@ -445,7 +445,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
                 </section>
               </div>
             ) : (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select a saved analysis to inspect its recorded relationships.</p></div>
+              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select a dataset to inspect its recorded relationships.</p></div>
             )}
             <div className="mt-6 flex gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-textMuted"><ShieldCheck size={16} className="shrink-0 text-primary" />Lineage visibility does not grant access to another researcher&apos;s private analysis workspace.</div>
           </aside>

@@ -10,23 +10,23 @@ function findingContext(item, schema) {
   if (attachment) return { attachment, caption: attachment.caption, short: `Saved revision ${attachment.revisionNumber}`, long: `Saved attachment revision ${attachment.revisionNumber}` };
   if (schema === packageV2 && ['analysis-reference', 'typed-analysis-reference'].includes(item.origin?.kind) && item.origin.captionOrigin === 'user-supplied') {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
-      short: `Linked in saved analysis ${item.origin.analysisVersion}`, long: `Linked in saved analysis ${item.origin.analysisVersion}` };
+      short: `Linked in dataset ${item.origin.analysisVersion}`, long: `Linked in dataset ${item.origin.analysisVersion}` };
   }
   if (schema === packageV2 && item.origin?.kind === 'inert-analysis-reference' && item.origin.captionOrigin === 'user-supplied' && item.origin.includeSourceText === true) {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
-      short: `Source text included · Saved analysis ${item.origin.analysisVersion}`, long: `Source text included · Saved analysis ${item.origin.analysisVersion}` };
+      short: `Source text included · Dataset ${item.origin.analysisVersion}`, long: `Source text included · Dataset ${item.origin.analysisVersion}` };
   }
   if (schema === packageV2 && item.origin?.kind === 'captured-workflow-output' && item.origin.captionOrigin === 'user-supplied') {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
-      short: `Recorded in workflow capture · Saved analysis ${item.origin.analysisVersion}`,
-      long: `Recorded in workflow capture · Saved analysis ${item.origin.analysisVersion}` };
+      short: `Recorded in workflow capture · Dataset ${item.origin.analysisVersion}`,
+      long: `Recorded in workflow capture · Dataset ${item.origin.analysisVersion}` };
   }
   return null;
 }
 function ExactReference({ reference, includeChecksum = true }) {
   return <>
     {reference.kind === 'workflow-snapshot' ? <div><dt>Saved workflow snapshot</dt><dd className="break-all">{reference.snapshotId}</dd></div>
-      : reference.kind === 'analysis-object' ? <><div><dt>Saved analysis object</dt><dd className="break-all">{reference.analysisObjectId}</dd></div>
+      : reference.kind === 'analysis-object' ? <><div><dt>Dataset object</dt><dd className="break-all">{reference.analysisObjectId}</dd></div>
         <div><dt>Saved checkpoint version</dt><dd className="break-all">{reference.checkpointVersionId}</dd></div></>
         : <div><dt>Saved artifact version</dt><dd className="break-all">{reference.versionId}</dd></div>}
     {includeChecksum && <div><dt>Recorded reference SHA-256</dt><dd className="break-all">{reference.sha256}</dd></div>}
@@ -69,7 +69,7 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
         <details className="my-3 text-xs text-textMuted"><summary className="cursor-pointer">Supplied context and exact view</summary>
           <dl className="mt-2 space-y-2">
             {context.attachment && Object.entries(context.attachment.suppliedOrigin).map(([field, value]) => <div key={field}><dt>{field}</dt><dd className="whitespace-pre-wrap break-words">{value || 'Unknown / not supplied'}</dd></div>)}
-            {context.reference && <><div><dt>Saved analysis version</dt><dd>{context.analysisVersion}</dd></div><ExactReference reference={context.reference} includeChecksum={false} /></>}
+            {context.reference && <><div><dt>Dataset version</dt><dd>{context.analysisVersion}</dd></div><ExactReference reference={context.reference} includeChecksum={false} /></>}
             <div><dt>Original source SHA-256</dt><dd className="break-all">{finding.source.sha256}</dd></div>
             {['typed-analysis-reference', 'captured-workflow-output'].includes(finding.origin?.kind) && <div><dt>Recorded output descriptor SHA-256</dt><dd className="break-all">{finding.view.descriptorSha256}</dd></div>}
             <div><dt>Retained view SHA-256</dt><dd className="break-all">{finding.view.viewSha256}</dd></div>

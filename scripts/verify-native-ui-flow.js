@@ -134,10 +134,10 @@ function observePage(page, label, diagnostics) {
 }
 
 async function login(page, lane) {
-  await page.getByRole('button', { name: 'Log In', exact: true }).click();
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(lane.email);
   await page.getByLabel('Password', { exact: true }).fill(lane.password);
-  await page.getByRole('button', { name: /Open Workbench/ }).click();
+  await page.getByRole('button', { name: /Open workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 30_000 });
   await page.getByText(`Private fixture ${lane.index}`, { exact: true }).first()
     .waitFor({ state: 'visible', timeout: 30_000 });
@@ -204,7 +204,7 @@ async function runSeuratPipeline(page, lane, pipelineInputPath, runDirectory) {
       'The real Seurat pipeline completed only after an R timeout/recovery path.');
     const refreshJob = panel.getByRole('button', { name: 'Refresh run', exact: true });
     await refreshJob.click();
-    await panel.getByText(/Saved analysis is ready|Preparing saved analysis/, { exact: false }).first()
+    await panel.getByText(/Dataset is ready|Preparing dataset/, { exact: false }).first()
       .waitFor({ state: 'visible', timeout: 60_000 });
     assert(await panel.getByText(pipelineJob.resultAnalysisObjectId, { exact: true }).count() === 0,
       'The researcher-facing Seurat panel exposed the internal result analysis identifier.');
@@ -449,7 +449,7 @@ async function attachCheckpoint(page, lane, runDirectory, label) {
       .waitFor({ timeout: 30_000 });
     await page.getByText('cluster groups ready', { exact: true }).waitFor({ state: 'visible', timeout: 60_000 });
     await waitFor(async () => (
-      page.getByText(/This saved analysis is not open in your private analysis workspace yet/i).isHidden()
+      page.getByText(/This dataset is not open in your private analysis workspace yet/i).isHidden()
     ), 60_000, `Private checkpoint attachment was not projected after reload for ${label}.`);
   } catch (error) {
     const diagnosticPath = path.join(runDirectory, `${label}-attach-failure.json`);
@@ -500,7 +500,7 @@ async function showUmap(page) {
 
 async function runOverview(page, lane) {
   await openSidebarPage(page, 'Exploratory Analysis');
-  await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor({ timeout: 30_000 });
+  await page.getByRole('heading', { name: 'Exploratory analysis', exact: true }).waitFor({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Run recipe', exact: true }).click();
   const job = await waitFor(async () => {
     const jobs = await page.evaluate(({ projectId, objectId }) => (
@@ -587,10 +587,10 @@ async function prepareDegLaunch(page, lane, runDirectory) {
     await waitFor(async () => launch.isEnabled(), 60_000, `DEG launch did not enable for lane ${lane.index}.`);
   } catch (error) {
     const messages = {
-      savedAnalysisMissing: await page.getByText(/Select a saved analysis before running marker analysis/i).isVisible().catch(() => false),
+      savedAnalysisMissing: await page.getByText(/Select a dataset before running marker analysis/i).isVisible().catch(() => false),
       readOnly: await page.getByText(/Your project role is read-only/i).isVisible().catch(() => false),
       foreignOwner: await page.getByText(/This analysis belongs to another member/i).isVisible().catch(() => false),
-      privateWorkspaceNotReady: await page.getByText(/This saved analysis is not open in your private analysis workspace yet/i).isVisible().catch(() => false),
+      privateWorkspaceNotReady: await page.getByText(/This dataset is not open in your private analysis workspace yet/i).isVisible().catch(() => false),
       computeUnavailable: await page.getByText(/Compute is temporarily unavailable/i).isVisible().catch(() => false),
       clusterGroupsReady: await page.getByText('cluster groups ready', { exact: true }).isVisible().catch(() => false),
       launchDisabled: await launch.isDisabled().catch(() => true),

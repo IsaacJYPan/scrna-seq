@@ -146,24 +146,20 @@ describe('ProjectHistory', () => {
   it('renders researcher-safe history without leaking private runtime details', async () => {
     const { container } = render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
 
-    expect(screen.getByText('Runs & Results')).toBeInTheDocument();
+    expect(screen.getByText('Runs & results')).toBeInTheDocument();
     expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
-    const privacy = screen.getByText('Visibility & privacy');
-    expect(privacy.closest('details')).not.toHaveAttribute('open');
-    fireEvent.click(privacy);
-    expect(screen.getByText(/History access does not open another researcher’s private workspace/i)).toBeInTheDocument();
     expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
     expect(screen.getByText(/Inspect or import artifact files/i)).toBeInTheDocument();
 
     expect(screen.getByLabelText('Selected analysis counts')).toHaveTextContent('3 selected runs');
     expect(screen.getByLabelText('Selected analysis counts')).toHaveTextContent('1 selected result');
-    const selectedRuns = screen.getByText('Selected Analysis Runs').closest('section');
-    const selectedResults = screen.getByText('Selected Analysis Results').closest('section');
+    const selectedRuns = screen.getByText('Runs for this dataset').closest('section');
+    const selectedResults = screen.getByText('Saved results for this dataset').closest('section');
     const runMonitor = screen.getByRole('region', { name: 'Run monitoring' });
     expect(selectedRuns.compareDocumentPosition(selectedResults) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(selectedResults.compareDocumentPosition(runMonitor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    const executionHistory = screen.getByRole('button', { name: /Execution history.*Recorded inputs/i });
+    const executionHistory = screen.getByRole('button', { name: /Execution history/i });
     expect(executionHistory).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('region', { name: 'Execution history' })).not.toBeInTheDocument();
     fireEvent.click(executionHistory);
@@ -224,7 +220,7 @@ describe('ProjectHistory', () => {
     await waitFor(() => expect(window.electronAPI.listProjectJobs).toHaveBeenCalledTimes(2));
   });
 
-  it('distinguishes repeated R analysis outputs by their saved analysis and recorded time', async () => {
+  it('distinguishes repeated R analysis outputs by their dataset and recorded time', async () => {
     window.electronAPI.listProjectJobs.mockResolvedValueOnce([{
       id: 'job_r_one', jobType: 'expert.r.v1', analysisObjectId: 'ao_abc123', status: 'completed', createdAt: '2026-06-30T00:00:00.000Z',
     }, {
@@ -261,7 +257,7 @@ describe('ProjectHistory', () => {
 
     render(<ProjectHistory currentWs={mixedWorkspace} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} userId={7} />);
 
-    const selectedSection = (await screen.findByText('Selected Analysis Runs')).closest('section');
+    const selectedSection = (await screen.findByText('Runs for this dataset')).closest('section');
     expect(within(selectedSection).getByText('PBMC preprocessing')).toBeInTheDocument();
     expect(within(selectedSection).queryByText('Spatial preprocessing')).not.toBeInTheDocument();
     expect(screen.getByText(/Other project activity \(1 runs/i)).toBeInTheDocument();
@@ -342,14 +338,14 @@ describe('ProjectHistory', () => {
       expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_fork123');
       expect(setActiveTab).toHaveBeenCalledWith('workspace');
     });
-    expect(screen.getByText(/source analysis and saved version remain unchanged/i)).toBeInTheDocument();
+    expect(screen.getByText(/the original is unchanged/i)).toBeInTheDocument();
   });
 
   it('shows a project-scoped empty state when no project is selected', () => {
     render(<ProjectHistory currentWs={{ ...currentWs, projects: [], selectedProjectId: null }} datasetInfo={null} />);
 
     expect(screen.getByText(/Select a project/i)).toBeInTheDocument();
-    expect(screen.getByText(/scoped to a project/i)).toBeInTheDocument();
+    expect(screen.getByText(/listed per project/i)).toBeInTheDocument();
   });
 
   it('does not load object lineage when no object is selected in the active project', async () => {
@@ -364,7 +360,7 @@ describe('ProjectHistory', () => {
       expect(window.electronAPI.listProjectJobs).toHaveBeenCalledWith('proj_1');
     });
     expect(window.electronAPI.getProjectAnalysisObjectLineage).not.toHaveBeenCalled();
-    expect(screen.getByText(/No analysis selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/No dataset selected/i)).toBeInTheDocument();
   });
 
   it('keeps checkpoint forks unavailable to project viewers', async () => {
@@ -620,7 +616,6 @@ describe('ProjectHistory', () => {
 
     expect(screen.queryAllByText('PBMC preprocessing')).toHaveLength(0);
     expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
-    expect(screen.getByText('Project B')).toBeInTheDocument();
 
     await act(async () => {
       resolveB([{ id: 'job_project_b', status: 'completed', jobType: 'deg.find_markers.v1' }]);

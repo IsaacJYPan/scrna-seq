@@ -42,7 +42,7 @@ it('sends explicit prepare, exact resume and exact deletion through the mutation
   for (const [, options] of withExecutionTarget.mock.calls) expect(options).toEqual({ mutation: true });
 });
 
-it('binds linked choice discovery to an explicit saved analysis version without changing legacy queries', async () => {
+it('binds linked choice discovery to an explicit dataset version without changing legacy queries', async () => {
   fetch.mockImplementation(async () => new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
   await listSnapshotPreparationOptions('project 1', 'analysis 1', 'analysis-references', { analysisVersion: 19, cursor: 'saved/page' });
   expect(fetch.mock.calls[0][0]).toBe(base + '/options?limit=30&kind=analysis-references&cursor=saved%2Fpage&analysisVersion=19');
@@ -58,7 +58,7 @@ it('sends typed discovery only to the saved-version-bound metadata route', async
   expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
 });
 
-it('binds explicit captured output discovery to one saved analysis and exact scalar snapshot query without exposing context values', async () => {
+it('binds explicit captured output discovery to one dataset and exact scalar snapshot query without exposing context values', async () => {
   fetch.mockResolvedValue(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
   const snapshotReference = workflowSnapshotReference(), signal = new AbortController().signal;
   await listSnapshotPreparationOptions('project 1', 'analysis 1', 'captured-workflow-outputs', { analysisVersion: 9, snapshotReference, cursor: 'capture/page', signal });

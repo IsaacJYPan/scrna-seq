@@ -101,7 +101,7 @@ describe('installed executable pipelines', () => {
     { canWriteProject: false },
     { unsavedLiveChanges: true },
     { deploymentPolicy: { expertREnabled: true, expertRProfile: { id: 'different-profile' } } },
-  ])('does not run without an eligible saved analysis and runtime: %j', (overrides) => {
+  ])('does not run without an eligible dataset and runtime: %j', (overrides) => {
     localStorage.setItem(storageKey, JSON.stringify([pipeline]));
     show(overrides);
     const run = screen.getByRole('button', { name: 'Run Cell summary' });

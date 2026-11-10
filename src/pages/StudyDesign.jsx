@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import { FlaskConical, RefreshCw } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
+import RefreshButton from '../components/RefreshButton';
 import {
   ConditionsForm,
   BiologicalSamples,
@@ -246,22 +247,12 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
     return <div className="p-8 text-slate-400">Select a project to define its study design.</div>;
 
   return (
-    <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
-      <div className="max-w-6xl mx-auto space-y-5">
+    <div className="page-scroll custom-scrollbar text-text">
+      <div className="page-column space-y-5">
         <PageHeader
           title="Study Design"
           icon={FlaskConical}
-          description="Define conditions, register samples, and choose comparisons."
-          actions={
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => void refresh()}
-              disabled={!!busy}
-            >
-              <RefreshCw size={16} /> Refresh
-            </button>
-          }
+          titleAction={<RefreshButton onClick={() => void refresh()} disabled={!!busy} />}
         />
         {error && (
           <div
@@ -272,7 +263,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           </div>
         )}
         {!canWriteStudyDesign && (
-          <div className="rounded-lg border border-border bg-surface p-3 text-sm text-textMuted">
+          <div className="panel text-sm text-textMuted">
             Study design is read-only for your project role. An owner, administrator, or analyst can
             change conditions, samples, mappings, and comparisons.
           </div>
@@ -298,7 +289,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           </label>
           <select
             id={selectIds.savedVersion}
-            className="input mt-1 w-full"
+            className="input mt-1 w-full max-w-md"
             value={objectId}
             onChange={(event) => setObjectId(event.target.value)}
           >

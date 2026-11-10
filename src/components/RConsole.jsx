@@ -228,9 +228,9 @@ export default function RConsole({
             {!active && (
               <>
                 <label className="text-sm">
-                  Initial saved analysis
+                  Initial dataset
                   <select
-                    aria-label="Initial saved analysis"
+                    aria-label="Initial dataset"
                     value={objectId}
                     onChange={(event) => selectObject(event.target.value)}
                     disabled={busy || controlBusy}

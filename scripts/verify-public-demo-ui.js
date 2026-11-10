@@ -121,11 +121,11 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
       'The public demo policy notice was not visible before guest creation.');
     await start.click();
 
-    await page.getByRole('heading', { name: /^TraceOmics Workbench/ })
+    await page.getByRole('heading', { name: / Workbench — / })
       .waitFor({ state: 'visible', timeout: 60_000 });
     await page.getByText('Curated single-cell demo', { exact: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });
-    const expertRButtons = page.getByRole('button', { name: /^Advanced analysis(?:,|$)/i });
+    const expertRButtons = page.getByRole('button', { name: /^R console(?:,|$)/i });
     await expertRButtons.first().waitFor({ state: 'visible', timeout: 30_000 });
     const expertRCount = await expertRButtons.count();
     assert(expertRCount > 0, 'The public demo did not expose its disabled Expert R capability state.');
@@ -202,7 +202,7 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     await page.screenshot({ path: umapPath, fullPage: false });
 
     await openSidebarPage(page, 'Exploratory Analysis');
-    await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true })
+    await page.getByRole('heading', { name: 'Exploratory analysis', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
     await page.getByRole('button', { name: 'Run recipe', exact: true }).click();
     const explorationJob = await waitFor(async () => page.evaluate(async () => {

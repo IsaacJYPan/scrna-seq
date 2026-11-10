@@ -300,7 +300,7 @@ it('retains a later selected publication when an original held accepted publish 
   state.publications.set(later.publicationId, later); const completion = deferred(); let accepted;
   state.onPublish = request => { accepted = acceptPublish(request); return completion.promise; };
   await seeded(); await publish(); fireEvent.click(screen.getByRole('button', { name: 'Browse published snapshots' }));
-  const row = (await screen.findByText('Later selected publication · Saved analysis 3')).closest('li'); fireEvent.click(within(row).getByRole('button', { name: 'Open published snapshot' }));
+  const row = (await screen.findByText('Later selected publication · Dataset 3')).closest('li'); fireEvent.click(within(row).getByRole('button', { name: 'Open published snapshot' }));
   await screen.findByTestId('published-findings'); await act(async () => completion.resolve(accepted));
   expect(screen.getByLabelText('Finding audience and viewer')).toHaveTextContent(later.publicationId); expect(screen.queryByRole('heading', { name: 'Publication accepted' })).not.toBeInTheDocument();
   expect(writes()).toHaveLength(1);
@@ -432,7 +432,7 @@ it('redacts a cached active colleague summary after private accepted activity co
   state.publications.set(value.publicationId, value); const receipt = publicationReceipt({ current }); state.journal.set(receipt.requestId, receipt);
   state.onActivity = () => publicationRequests([receipt], { scope }); await frame(); await activity(); await screen.findByText(/Snapshot now withdrawn/);
   fireEvent.click(screen.getByRole('button', { name: 'Browse published snapshots' }));
-  expect(screen.getByText('Withdrawn snapshot')).toBeVisible(); expect(screen.queryByText(value.package.analysis.name + ' · Saved analysis 2')).not.toBeInTheDocument();
+  expect(screen.getByText('Withdrawn snapshot')).toBeVisible(); expect(screen.queryByText(value.package.analysis.name + ' · Dataset 2')).not.toBeInTheDocument();
 });
 
 it('does not mark retained content missing from a 500 response with a misleading missing code', async () => {

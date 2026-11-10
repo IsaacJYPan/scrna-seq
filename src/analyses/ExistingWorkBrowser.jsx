@@ -112,14 +112,14 @@ export default function ExistingWorkBrowser({ projectId, userId, projectName, ca
     setOpening(true); setError('');
     try { await onOpenOriginal(objectId); }
     catch (failure) { if (mounted.current) setError(failure.code === 'UNSAVED_LIVE_WORK'
-      ? 'Save your current live analysis in Data workspace before switching objects.'
+      ? 'Save your current live analysis on the Projects page before switching objects.'
       : publicErrorMessage(failure, 'The original object history could not be opened. Your saved reference is unchanged.')); }
     finally { if (mounted.current) setOpening(false); }
   };
   return <section aria-label="Existing saved work" className="flex h-full min-h-0 flex-col bg-background px-4 py-6 text-text sm:px-8">
     <header className="mx-auto mb-5 w-full max-w-6xl shrink-0">
       <button type="button" className="mb-4 inline-flex items-center gap-2 text-sm text-textMuted underline" onClick={onClose}><ArrowLeft size={14} />Back to analyses</button>
-      <p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold">Bring saved work into an analysis</h2>
+      <p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold">Link saved work into an analysis</h2>
       <p className="mt-2 max-w-2xl text-sm text-textMuted">Start from a saved version. Its data stays in place, and its original access rules still apply.</p>
     </header>
     {error && <p role="alert" className="mx-auto mb-4 w-full max-w-6xl shrink-0 rounded border border-danger/30 p-3 text-sm text-danger">{error}</p>}
@@ -136,7 +136,7 @@ export default function ExistingWorkBrowser({ projectId, userId, projectName, ca
           </button></li>)}
         </ul>
         {loading && <p role="status" className="py-4 text-sm text-textMuted">Finding saved work…</p>}
-        {loaded && !error && !items.length && <div className="py-6 text-sm"><p className="font-medium">No {kind === 'objects' ? 'analysis objects' : kind === 'workflows' ? 'saved workflows' : 'saved results or files'} yet</p><p className="mt-2 text-textMuted">{kind === 'workflows' ? 'Save a workflow in Pipelines to retain its method source, settings and results here.' : 'Save work in Data workspace, or start an analysis and import an ordinary script.'}</p></div>}
+        {loaded && !error && !items.length && <div className="py-6 text-sm"><p className="font-medium">No {kind === 'objects' ? 'datasets' : kind === 'workflows' ? 'saved workflows' : 'saved results or files'} yet</p><p className="mt-2 text-textMuted">{kind === 'workflows' ? 'Save a workflow in Pipelines to retain its method source, settings and results here.' : 'Save work on the Projects page, or start an analysis and import an ordinary script.'}</p></div>}
         {cursor && <button type="button" className="btn btn-secondary mt-3 shrink-0 text-sm" disabled={loading || blocked || !!pending} onClick={() => void load(cursor)}>More saved work</button>}
       </div>
       <div ref={detail} className="min-h-0 overflow-auto pb-6 pr-1" style={{ display: !wide && !detailOpen ? 'none' : 'block' }}>
@@ -154,7 +154,7 @@ export default function ExistingWorkBrowser({ projectId, userId, projectName, ca
               <button type="submit" className="btn btn-primary" disabled={blocked || busy}>{busy ? 'Creating…' : pending ? 'Retry analysis creation' : 'Start analysis with this saved version'}</button>
               {pending && !busy && <p role="status" className="text-xs text-textMuted">Retry checks the same request. Keep this window open until creation is confirmed.</p>}</form>}
             {inspecting && isActive && !blocked && <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening saved version…</p>}><RetainedWorkView key={version(selected)} projectId={projectId} userId={userId} reference={selected.reference} canWrite={canWrite} onOpenWorkflow={onOpenWorkflow} /></React.Suspense>}
-          </> : <div className="space-y-4 border-t border-border pt-4"><p className="text-sm text-textMuted">{selected.savedState === 'restricted' ? 'Your project role does not grant access to this colleague’s private saved source. Ask its owner to publish the evidence they want to share.' : 'No usable saved version is recorded. Open the original object history to review it, or save a version in Data workspace first.'}</p>
+          </> : <div className="space-y-4 border-t border-border pt-4"><p className="text-sm text-textMuted">{selected.savedState === 'restricted' ? 'Your project role does not grant access to this colleague’s private saved source. Ask its owner to publish the evidence they want to share.' : 'No usable saved version is recorded. Open the original object history to review it, or save a version on the Projects page first.'}</p>
             {onOpenOriginal && selected.kind === 'analysis-object' && <button type="button" className="btn btn-secondary text-sm" disabled={blocked || opening} onClick={() => void original()}>Open original object history</button>}</div>}
         </div>}
       </div>

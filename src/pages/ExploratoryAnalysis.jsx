@@ -121,7 +121,7 @@ export default function ExploratoryAnalysis({
   const launch = async () => {
     setError('');
     if (blocked) return setError(TARGET_DISCONNECTED_MESSAGE);
-    if (!userEmail || !projectId || !analysisObjectId) return setError('Select a saved analysis first.');
+    if (!userEmail || !projectId || !analysisObjectId) return setError('Select a dataset first.');
     if (!canWrite) return setError('Your project role cannot start analyses.');
     if (!ownsObject) return setError('Create a branch from this saved version in your private analysis workspace before exploring it.');
     if (recipe === 'feature_by_group' && params.features.length === 0) return setError('Enter at least one feature.');
@@ -145,7 +145,7 @@ export default function ExploratoryAnalysis({
   return (
     <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
       <div className="mx-auto max-w-6xl space-y-5">
-        <PageHeader title="Exploratory Analysis" icon={BarChart3} description="Run guided recipes against a saved analysis. Outputs are aggregate summaries suitable for inspection and supplemental-figure drafting; no arbitrary code is accepted." />
+        <PageHeader title="Exploratory Analysis" icon={BarChart3} description="Run guided recipes against a dataset. Outputs are aggregate summaries suitable for inspection and supplemental-figure drafting; no arbitrary code is accepted." />
         {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Previously loaded summaries remain available.</p>}
 
         {!canLaunch && (

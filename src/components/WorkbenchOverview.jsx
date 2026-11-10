@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, FolderTree } from 'lucide-react';
+import {  } from 'lucide-react';
 
 const PROJECT_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 
@@ -18,26 +18,26 @@ export default function WorkbenchOverview({
 
   const liveAttached = selectedObject?.liveState === 'attached';
   let nextAction = 'Select or create a project.';
-  let actionLabel = 'Create Project';
+  let actionLabel = 'Create project';
   let action = null;
   if (hasProject && !hasObject && hasObjectsInProject) {
     nextAction =
-      'Select a saved analysis from the project list below before opening analysis tools.';
+      'Select a dataset from the project list below before opening analysis tools.';
     actionLabel = 'Select analysis';
   } else if (hasProject && !hasObject) {
     if (canWriteProject) {
-      nextAction =
-        'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
-      // The Saved analyses empty state owns the single primary add action.
-      actionLabel = 'Add analysis';
+      // The Datasets empty state below explains how to add one, so this
+      // summary does not repeat it.
+      nextAction = '';
+      actionLabel = 'Add dataset';
     } else {
       nextAction =
-        'This project is read-only for your role. You can inspect saved analyses, results, and lineage when they are available.';
+        'This project is read-only for your role. You can inspect datasets, results, and lineage when they are available.';
     }
   } else if (hasProject && hasObject && !liveAttached) {
     if (selectedObject?.metadata?.curatedDemo === true) {
       nextAction =
-        'Open Runs & Results to restore this saved analysis.';
+        'Open Runs & Results to restore this dataset.';
       actionLabel = 'Open Runs & Results';
       action = () => setActiveTab('history');
     } else if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
@@ -69,26 +69,18 @@ export default function WorkbenchOverview({
     action = () => setActiveTab('history');
   }
 
-  if (!hasProject) return null;
+  if (!hasProject || !hasObjectsInProject) return null;
 
   return (
     <section
-      className="border-b border-border pb-5"
       aria-label="Current analysis"
     >
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="min-w-0">
-          <p className="flex items-center gap-2 text-xs text-textMuted">
-            <FolderTree size={14} aria-hidden="true" /> {activeProject.name}
-            <span className="capitalize">· {activeProject.role}</span>
-          </p>
-          <h3 className="mt-2 flex items-center gap-2 text-lg font-semibold text-text">
-            <Database size={18} className="shrink-0 text-primary" aria-hidden="true" />
-            <span className="truncate">
-              {selectedObject?.name || selectedObject?.displayName || 'No analysis selected'}
-            </span>
-          </h3>
-          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-textMuted">{nextAction}</p>
+          {selectedObject?.name || selectedObject?.displayName
+            ? <h3 className="truncate text-lg font-semibold text-text">{selectedObject.name || selectedObject.displayName}</h3>
+            : <p className="text-sm text-textMuted">No dataset selected</p>}
+          {nextAction && <p className="mt-1 max-w-2xl text-sm leading-relaxed text-textMuted">{nextAction}</p>}
         </div>
         {action && (
           <button onClick={action} className="btn btn-primary text-sm">

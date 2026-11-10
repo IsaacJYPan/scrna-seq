@@ -74,7 +74,7 @@ export default function ExecutionHistory({ projectId, userId }) {
   };
   if (!projectId) return null;
   const preview = inspection?.preview;
-  return <section aria-label="Execution history" className="rounded-xl border border-border bg-surface/50 p-5 space-y-4">
+  return <section aria-label="Execution history" className="space-y-4">
     {connection.blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Previously loaded evidence remains visible. Reconnect and refresh to inspect current status.</p>}
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-lg font-semibold">Execution history</h3><p className="text-sm text-textMuted">Review recorded inputs, methods, environments, and results. Missing replay evidence is shown explicitly.</p></div><button className="btn btn-secondary text-sm" disabled={loading} onClick={() => refresh()}>{loading ? 'Refreshing executions…' : 'Refresh executions'}</button></div>
     <label className="text-sm">Execution category<select aria-label="Execution category" className="input ml-2" value={kind} onChange={event => setKind(event.target.value)}>{Object.entries(kinds).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>

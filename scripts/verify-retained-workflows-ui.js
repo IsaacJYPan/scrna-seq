@@ -62,7 +62,7 @@ async function main({ artifactDirectory } = {}) {
       try { const value = sha(await response.body()); assets[pathname] = value; if (assetsBefore.get(pathname.split('/').at(-1)) !== value) errors.push('Compiled assets changed during workflow acceptance.'); } catch { /* Page loading also must succeed. */ }
     });
     await target.goto(service.endpoint); await target.getByPlaceholder('researcher@lab.edu').fill(account.email);
-    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor(); return target;
   }
   async function nav(target, name) {
@@ -70,8 +70,8 @@ async function main({ artifactDirectory } = {}) {
     await target.getByRole('button', { name: typeof name === 'string' ? new RegExp('^' + escape(name) + '(?:$|,)') : name }).click();
   }
   async function selectObject(target, label = 'Small saved Seurat object') {
-    await nav(target, /^Data workspace,/); await target.getByRole('button', { name: row(service.project.name) }).click();
-    const object = target.getByRole('group', { name: `Saved analysis ${label}. Press Enter or Space to select.`, exact: true });
+    await nav(target, /^Projects,/); await target.getByRole('button', { name: row(service.project.name) }).click();
+    const object = target.getByRole('group', { name: `Dataset ${label}. Press Enter or Space to select.`, exact: true });
     await object.focus(); await target.keyboard.press('Enter');
   }
   async function capture(target, name, expectedTheme) {
@@ -124,7 +124,7 @@ async function main({ artifactDirectory } = {}) {
   }
   async function browse(target, name = snapshot.name) {
     await nav(target, 'Analyses');
-    if (!(await existing(target).isVisible())) await target.getByRole('button', { name: 'Bring saved work', exact: true }).click();
+    if (!(await existing(target).isVisible())) await target.getByRole('button', { name: 'Link saved work', exact: true }).click();
     const back = existing(target).getByRole('button', { name: 'All saved work', exact: true });
     const category = existing(target).getByRole('combobox', { name: 'Saved work category', exact: true });
     await until(async () => await category.isVisible() || await back.isVisible(), 'The saved-work list or detail navigation did not become visible.');

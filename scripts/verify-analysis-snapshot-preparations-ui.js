@@ -88,7 +88,7 @@ async function verifyPreparations(env) {
     && await form(page).getByRole('textbox', { name: 'Summary (optional)', exact: true }).inputValue() === 'Private exact preview with four supplied result formats.'
     && await form(page).getByRole('checkbox', { name: /Supplied R method/ }).isChecked(), 'Ordinary analysis navigation discarded or changed the private preparation draft.');
   check('Ordinary back/save focus and navigation to another analysis preserve the unsent exact selection and overview draft without saving or leaking the selection to another analysis.');
-  await matrix(page, 'snapshot-choose-saved-material', () => form(page).getByRole('heading', { name: '1. Choose a saved analysis version', exact: true }).scrollIntoViewIfNeeded());
+  await matrix(page, 'snapshot-choose-saved-material', () => form(page).getByRole('heading', { name: '1. Choose a dataset version', exact: true }).scrollIntoViewIfNeeded());
   await matrix(page, 'snapshot-prepare-private-action', () => form(page).getByRole('button', { name: 'Prepare private preview', exact: true }).scrollIntoViewIfNeeded());
   let aborted = false;
   const interrupt = async route => { if (!aborted && route.request().method() === 'POST') { aborted = true; await route.abort('failed'); } else await route.continue(); };

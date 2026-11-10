@@ -20,7 +20,7 @@ describe('Sidebar component', () => {
     setTheme: () => {},
   };
 
-  it('renders disabled downstream options when data is not loaded', () => {
+  it('hides dataset-only analysis steps until a dataset is selected', () => {
     render(
       <Sidebar 
         activeTab="home"
@@ -29,11 +29,9 @@ describe('Sidebar component', () => {
       />
     );
 
-    const qcButton = screen.getByRole('button', { name: /Quality Control/i });
-    expect(qcButton).toBeDisabled();
-
-    const clusterButton = screen.getByRole('button', { name: /Cluster/i });
-    expect(clusterButton).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Quality Control/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cluster/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Lineage/i })).not.toBeInTheDocument();
   });
 
   it('opens account security from the authenticated-user rail', () => {
@@ -165,7 +163,7 @@ describe('Sidebar component', () => {
   it('reopens the project group when Runs & Results becomes the current page', () => {
     const props = { ...baseProps, workspaces: [{ ...mockWorkspaces[0], selectedProjectId: 'proj_1' }], selectedObjects: [] };
     const view = render(<Sidebar {...props} activeTab="workspace" />);
-    const project = screen.getByRole('button', { name: 'Project', exact: true });
+    const project = screen.getByRole('button', { name: 'Workflow', exact: true });
     fireEvent.click(project);
     expect(project).toHaveAttribute('aria-expanded', 'false');
     view.rerender(<Sidebar {...props} activeTab="history" />);
@@ -208,10 +206,10 @@ describe('Sidebar component', () => {
       />
     );
 
-    const advancedAnalysisButtons = screen.getAllByRole('button', { name: /Advanced analysis/i });
+    const advancedAnalysisButtons = screen.getAllByRole('button', { name: /R console/i });
     expect(advancedAnalysisButtons).toHaveLength(1);
     advancedAnalysisButtons.forEach(button => expect(button).not.toBeDisabled());
-    expect(advancedAnalysisButtons[0]).toHaveAccessibleName('Advanced analysis, R setup & availability');
+    expect(advancedAnalysisButtons[0]).toHaveAccessibleName('R console, R setup & availability');
   });
 
   it('keeps public demo R setup and execution unavailable', () => {
@@ -220,7 +218,7 @@ describe('Sidebar component', () => {
       selectedObjects={[]}
       deploymentPolicy={{ demoMode: true, expertREnabled: false }}
     />);
-    expect(screen.getByRole('button', { name: /Advanced analysis/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /R console/i })).toBeDisabled();
   });
 
   it('does not require icons for pipeline-generated tabs', () => {
@@ -234,7 +232,7 @@ describe('Sidebar component', () => {
 
     const qcButton = screen.getByRole('button', { name: /Quality Control/i });
     expect(qcButton.querySelector('svg')).toBeNull();
-    expect(container.textContent).toContain('Quality Control');
+    expect(container.textContent).toContain('Quality control');
   });
 
   it('uses a readable token-based selected state in light mode', () => {
@@ -256,7 +254,7 @@ describe('Sidebar component', () => {
       />
     );
 
-    const workbench = screen.getByRole('button', { name: /Data workspace, Project selected/i });
+    const workbench = screen.getByRole('button', { name: /Projects, Project selected/i });
     expect(workbench).toHaveClass('bg-primary/10');
     expect(workbench).toHaveClass('border-primary/30');
     expect(workbench).toHaveClass('text-text');
@@ -430,7 +428,7 @@ describe('Sidebar component', () => {
     fireEvent.click(explore);
     expect(explore).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('button', { name: 'Heatmap' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Data workspace/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Projects/ })).toBeInTheDocument();
     view.rerender(<Sidebar {...baseProps} activeTab="heatmap" selectedObjects={[{ id: 'ao_1' }]} />);
     expect(explore).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('button', { name: 'Heatmap' })).toHaveAttribute('aria-current', 'page');

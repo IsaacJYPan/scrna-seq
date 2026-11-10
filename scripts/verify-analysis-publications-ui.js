@@ -107,7 +107,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
   async function login(actor = 'owner') {
     const context = await browser.newContext({ viewport: { width: 1366, height: 768 } }); const target = registerPage(await context.newPage(), actor);
     await target.goto(service.endpoint); await target.getByPlaceholder('researcher@lab.edu').fill(accounts[actor].email);
-    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor(); return target;
   }
   async function nav(target, name) {
@@ -115,7 +115,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openAnalysis(target, selectedStudy = study) {
-    await nav(target, /^Data workspace,/); await target.getByRole('button', { name: new RegExp('^' + escape(service.project.name) + '(?:$|\\s)') }).click();
+    await nav(target, /^Projects,/); await target.getByRole('button', { name: new RegExp('^' + escape(service.project.name) + '(?:$|\\s)') }).click();
     await nav(target, 'Analyses');
     if (await panel(target).isVisible()) await panel(target).getByRole('button', { name: /Back to (?:analysis|private preparation)/ }).click();
     if (await prep(target).isVisible()) await prep(target).getByRole('button', { name: 'Back to analysis', exact: true }).click();
@@ -234,17 +234,17 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     if (linkedResults) {
       const selectVersion = version => choices.getByRole('radio', { name: new RegExp(`Saved version ${version} ·`) }).check();
       await selectVersion(selectedAnalysisVersion);
-      let linked = choices.getByRole('region', { name: `Linked in saved analysis ${selectedAnalysisVersion}`, exact: true });
+      let linked = choices.getByRole('region', { name: `Linked in dataset ${selectedAnalysisVersion}`, exact: true });
       await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ has: page.getByText(findings.table.name, { exact: true }) }).getByRole('button', { name: 'Add linked table excerpt', exact: true }).click();
-      await linked.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).fill('A deliberate treated-cell excerpt from the older saved analysis');
+      await linked.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).fill('A deliberate treated-cell excerpt from the older dataset');
       await linked.getByRole('spinbutton', { name: 'First data row for linked finding 1', exact: true }).fill('2');
       await linked.getByRole('spinbutton', { name: 'Rows to include for linked finding 1', exact: true }).fill('1');
       await selectVersion(latestAnalysisVersion);
-      await choices.getByRole('region', { name: `Linked in saved analysis ${latestAnalysisVersion}`, exact: true }).waitFor();
+      await choices.getByRole('region', { name: `Linked in dataset ${latestAnalysisVersion}`, exact: true }).waitFor();
       assert(!(await choices.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).count()), 'An older version selection leaked into the later saved version.');
       await selectVersion(selectedAnalysisVersion);
-      linked = choices.getByRole('region', { name: `Linked in saved analysis ${selectedAnalysisVersion}`, exact: true });
-      assert(await linked.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).inputValue() === 'A deliberate treated-cell excerpt from the older saved analysis'
+      linked = choices.getByRole('region', { name: `Linked in dataset ${selectedAnalysisVersion}`, exact: true });
+      assert(await linked.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).inputValue() === 'A deliberate treated-cell excerpt from the older dataset'
         && await linked.getByRole('spinbutton', { name: 'First data row for linked finding 1', exact: true }).inputValue() === '2', 'Returning to the older saved version lost its deliberate caption or table window.');
       await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ has: page.getByText(findings.figure.name, { exact: true }) }).getByRole('button', { name: 'Add linked figure', exact: true }).click();
       await linked.getByRole('textbox', { name: 'Caption for linked finding 2', exact: true }).fill(attached[1].caption);
@@ -280,7 +280,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
         if (embeddingResults) {
           const direct = linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ hasText: typedFindings.outputs.embedding.id });
           await direct.getByRole('button', { name: 'Add linked embedding', exact: true }).click();
-          await linked.getByRole('textbox', { name: 'Caption for linked finding 6', exact: true }).fill('Five exact PCA points linked to this saved analysis');
+          await linked.getByRole('textbox', { name: 'Caption for linked finding 6', exact: true }).fill('Five exact PCA points linked to this dataset');
           await linked.getByRole('spinbutton', { name: 'Maximum included points for linked finding 6', exact: true }).fill('5');
           await captured.getByRole('list', { name: 'Recorded workflow outputs' }).getByRole('listitem').filter({ hasText: typedFindings.outputs.embedding.id })
             .getByRole('button', { name: 'Add captured embedding', exact: true }).click();
@@ -331,7 +331,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
       await prep(page).getByRole('button', { name: 'Back to analysis', exact: true }).click();
       await page.getByRole('textbox', { name: 'Research question or notes', exact: true }).fill('An unsaved interpretation stays outside the published snapshot.');
       await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click();
-      check('An older exact saved analysis keeps separate linked captions/windows and safe opaque/restricted reference-only prerequisites; the genuine mixed v2 preparation survives a lost accepted reply and real browser restart without retaining prerequisite bytes.');
+      check('An older exact dataset keeps separate linked captions/windows and safe opaque/restricted reference-only prerequisites; the genuine mixed v2 preparation survives a lost accepted reply and real browser restart without retaining prerequisite bytes.');
     }
     await prep(page).getByRole('button', { name: 'Publish to project', exact: true }).click();
     const confirmation = panel(page).getByRole('region', { name: 'Confirm exact snapshot publication', exact: true });
@@ -398,7 +398,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     await detail(colleague).getByRole('cell', { name: 'control', exact: true }).waitFor(); await detail(colleague).getByRole('cell', { name: 'treated', exact: true }).waitFor();
     await matrix(colleague, 'sharing-colleague-fixed-counts-producer-stopped', () => detail(colleague).getByRole('table').scrollIntoViewIfNeeded());
     if (linkedResults) {
-      await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: 'A deliberate treated-cell excerpt from the older saved analysis' }).click();
+      await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: 'A deliberate treated-cell excerpt from the older dataset' }).click();
       await detail(colleague).getByRole('cell', { name: 'treated', exact: true }).waitFor();
       assert(!(await detail(colleague).getByRole('cell', { name: 'control', exact: true }).count()), 'The direct linked table expanded its fixed one-row excerpt.');
       const referenceOnly = detail(colleague).getByRole('region', { name: 'Reference-only prerequisites', exact: true });

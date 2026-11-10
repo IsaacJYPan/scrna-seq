@@ -1295,10 +1295,10 @@ async function main() {
   await checkSnapshot(page, `workspace_${initialTheme}`);
   await checkOverflow(page, `Workspace ${initialTheme}`);
   await runA11yAudit(page, `Workspace ${initialTheme}`);
-  await checkPrimaryButtonHover(page, 'New Project');
-  await checkPrimaryButtonHover(page, 'Add analysis');
-  await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new_project');
-  await checkReducedMotion(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new project button');
+  await checkPrimaryButtonHover(page, 'New project');
+  await checkPrimaryButtonHover(page, 'Add dataset');
+  await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New project', exact: true }).first(), 'new_project');
+  await checkReducedMotion(page, page.getByRole('button', { name: 'New project', exact: true }).first(), 'new project button');
 
   // ── Test 1b: Theme toggle to opposite mode ────────────────────────────────
   section(`STEP 3: Theme toggle (${initialTheme} → ${oppositeTheme})`);
@@ -1315,8 +1315,8 @@ async function main() {
     await checkSnapshot(page, `workspace_${activeTheme}`);
     await checkOverflow(page, `Workspace ${activeTheme}`);
     await runA11yAudit(page, `Workspace ${activeTheme}`);
-    await checkPrimaryButtonHover(page, 'New Project');
-    await checkPrimaryButtonHover(page, 'Add analysis');
+    await checkPrimaryButtonHover(page, 'New project');
+    await checkPrimaryButtonHover(page, 'Add dataset');
     // Toggle back to the default theme before continuing tab checks.
     const restoreTitle = initialTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
     const restoreBtn = page.locator(`nav button[title*="${restoreTitle}"]`).first();
@@ -1360,14 +1360,14 @@ async function main() {
     warn('QC button not found — skipping gate check');
   }
 
-  // ── Test 4: Add analysis modal ────────────────────────────────────────────
-  section('STEP 6: Add analysis modal flow');
+  // ── Test 4: Add dataset modal ────────────────────────────────────────────
+  section('STEP 6: Add dataset modal flow');
   let dataLoaded = false;
   try {
     // Keep this selector exact. A broad "Add" match can accidentally choose
     // unrelated disabled navigation (for example Lineage's "requires loaded
     // object" status) before the actual workspace action.
-    const loadBtn = page.getByRole('button', { name: 'Add analysis', exact: true }).first();
+    const loadBtn = page.getByRole('button', { name: 'Add dataset', exact: true }).first();
     if (await loadBtn.count() > 0) {
       await loadBtn.click();
       await sleep(1000);
@@ -1381,7 +1381,7 @@ async function main() {
         try {
           await page.waitForSelector('text=PBMC_3k_Tutorial', { timeout: 90000 });
           dataLoaded = true;
-          pass('Add analysis modal: PBMC3k demo dataset loaded successfully');
+          pass('Add dataset modal: PBMC3k demo dataset loaded successfully');
 
           await sleep(1500);
 
@@ -1432,10 +1432,10 @@ async function main() {
         await sleep(500);
       }
     } else {
-      warn('Add analysis button not found — skipping modal test');
+      warn('Add dataset button not found — skipping modal test');
     }
   } catch (e) {
-    warn('Add analysis flow error', e.message);
+    warn('Add dataset flow error', e.message);
     // Safety dismiss
     await page.keyboard.press('Escape').catch(() => {});
     await sleep(300);
@@ -1455,7 +1455,7 @@ async function main() {
     { id: 'pipeline-manager', label: 'Pipelines',   requiresData: false },
     { id: 'branches',      label: 'Analysis Branches',        requiresData: true  },
     { id: 'study-design',  label: 'Study Design',             requiresData: true  },
-    { id: 'expert-r',      label: 'Advanced analysis',        requiresData: true  },
+    { id: 'expert-r',      label: 'R console',        requiresData: true  },
     { id: 'inspect',      label: 'Inspect',                  requiresData: true  },
     { id: 'qc',           label: 'Quality Control',           requiresData: true  },
     { id: 'normalize',    label: 'Normalize',                 requiresData: true  },
@@ -1565,16 +1565,16 @@ async function main() {
         }
 
         if (tab.id === 'expert-r') {
-          assert('Advanced analysis: approved Expert R workbench is visible',
-            await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).count() === 1);
+          assert('R console: approved Expert R workbench is visible',
+            await page.getByRole('heading', { name: 'R console', exact: true }).count() === 1);
           await page.locator('summary').filter({ hasText: 'Private input files' }).click();
-          assert('Advanced analysis: controlled private input is visible',
+          assert('R console: controlled private input is visible',
             await page.getByText('sample-annotations.csv', { exact: true }).first().isVisible());
           await page.locator('summary').filter({ hasText: 'Private input files' }).click();
         }
 
         if (tab.id === 'explore') {
-          await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+          await page.getByRole('heading', { name: 'Exploratory analysis', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
           await page.screenshot({ path: path.join(REPORT_DIR, 'exploratory-analysis.png'), fullPage: true });
           assert('Exploratory Analysis: guided recipe controls are visible',
             await page.getByRole('button', { name: 'Run recipe', exact: true }).count() === 1);
@@ -1584,7 +1584,7 @@ async function main() {
 
         if (tab.id === 'lineage') {
           const durableLineageCopy = page.getByText(
-            'Recorded relationships for the selected saved analysis. This view is read-only.'
+            'Recorded relationships for the selected dataset. This view is read-only.'
           );
           assert('Lineage: recorded read-only relationships visible', await durableLineageCopy.count() === 1);
           const forkExplanation = page.getByText('Created from a saved version. The source analysis remains unchanged.');

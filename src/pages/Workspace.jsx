@@ -1,13 +1,9 @@
+import RefreshButton from '../components/RefreshButton';
 import WorkbenchOverview from '../components/WorkbenchOverview';
 import DetailsPopover from '../components/DetailsPopover';
 import SeuratPipelineSettings from '../components/SeuratPipelineSettings';
 import React, { useRef, useState } from 'react';
-import {
-  Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
-  LayoutGrid, List, Edit2, FolderOpen, HardDrive, FlaskConical,
-  X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2,
-  FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive
-} from 'lucide-react';
+import { Database, FileUp, Zap, CheckCircle, Info, LayoutGrid, Edit2, FolderOpen, HardDrive, FlaskConical, X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2, FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive } from 'lucide-react';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 import { publicErrorMessage } from '../publicError';
 
@@ -344,7 +340,7 @@ function LoadModal({
       id: 'pipeline-manager',
       icon: <Archive size={22} className="text-blue-400" />,
       title: '10X H5 analysis workflow',
-      desc: 'Upload a 10X filtered feature-barcode .h5 dataset and run the approved Seurat workflow.',
+      desc: 'Upload a 10X filtered feature-barcode .h5 file and run the approved Seurat workflow.',
       tag: 'Production',
       tagColor: 'text-blue-400 bg-blue-500/10 border-blue-500/20',
       action: onOpenPipelineManager,
@@ -383,8 +379,8 @@ function LoadModal({
       id: 'rds',
       legacy: true,
       icon: <HardDrive size={22} className="text-violet-400" />,
-      title: 'Saved analysis file (.rds)',
-      desc: 'Load a trusted local saved analysis file. This option is available only in approved local environments.',
+      title: 'Dataset file (.rds)',
+      desc: 'Load a trusted local dataset file. This option is available only in approved local environments.',
       tag: '.rds',
       tagColor: 'text-violet-400 bg-violet-500/10 border-violet-500/20',
       action: loadRds,
@@ -411,8 +407,7 @@ function LoadModal({
             {/* Header */}
             <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800 flex-shrink-0">
               <div>
-                <h3 id="multi-sample-loader-title" className="text-lg font-black text-white tracking-tight flex items-center gap-2">
-                  <FolderTree size={18} className="text-cyan-400" />
+                <h3 id="multi-sample-loader-title" className="text-lg font-semibold text-white tracking-tight flex items-center gap-2">
                   Configure Multi-Sample Merge
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
@@ -435,18 +430,18 @@ function LoadModal({
             {/* Metadata column + filter params */}
             <div className="px-7 pt-5 pb-3 flex flex-col gap-3 border-b border-slate-800 flex-shrink-0">
               <div className="flex justify-between items-center mb-1">
-                <label className="text-[10px] font-black text-slate-400">Global Settings</label>
+                <label className="text-xs font-semibold text-slate-400">Global Settings</label>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={scanRoot10X}
                     title="Pick a root folder and auto-discover all nested 10X data directories"
-                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-violet-500/10 border border-violet-500/20 text-violet-400 text-[10px] font-black hover:bg-violet-500/20 transition-colors"
+                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs font-semibold hover:bg-violet-500/20 transition-colors"
                   >
                     <Search size={12} /> Scan Root Folder
                   </button>
                   <button
                     onClick={addMore10X}
-                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-[10px] font-black hover:bg-cyan-500/20 transition-colors"
+                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-xs font-semibold hover:bg-cyan-500/20 transition-colors"
                   >
                     <Plus size={12} /> Add Manually
                   </button>
@@ -485,7 +480,7 @@ function LoadModal({
             {/* Sample list */}
             <div className="flex-1 overflow-x-auto overflow-y-auto custom-scrollbar px-7 py-4 space-y-2">
               <div 
-                className="grid gap-x-4 gap-y-2 items-center text-[10px] font-bold text-slate-400 mb-2 px-1 pb-2 border-b border-slate-700/50"
+                className="grid gap-x-4 gap-y-2 items-center text-xs font-medium text-slate-400 mb-2 px-1 pb-2 border-b border-slate-700/50"
                 style={{ gridTemplateColumns: `auto minmax(200px, 2fr) ${'minmax(120px, 1fr) '.repeat(extraMetaCols.length)}auto` }}
               >
                 <span className="w-6 text-center">#</span>
@@ -514,7 +509,7 @@ function LoadModal({
                   className="grid gap-x-4 gap-y-2 items-center p-3 rounded-xl bg-slate-800/60 border border-slate-700/50 group/row hover:bg-slate-800/80 transition-colors"
                   style={{ gridTemplateColumns: `auto minmax(200px, 2fr) ${'minmax(120px, 1fr) '.repeat(extraMetaCols.length)}auto` }}
                 >
-                  <span className="text-[10px] font-black text-cyan-400 w-6 text-center flex-shrink-0">{i + 1}</span>
+                  <span className="text-xs font-semibold text-cyan-400 w-6 text-center flex-shrink-0">{i + 1}</span>
                   <div className="min-w-0">
                     <input
                       type="text"
@@ -523,7 +518,7 @@ function LoadModal({
                       className="w-full bg-slate-900 border border-slate-700 text-sm text-white px-3 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500 font-bold mb-1"
                       placeholder={`Sample ${i + 1}`}
                     />
-                    <p className="text-[10px] text-slate-400 truncate pl-1">Selected local folder</p>
+                    <p className="text-xs text-slate-400 truncate pl-1">Selected local folder</p>
                   </div>
                   {extraMetaCols.map((c, colIdx) => (
                     <input
@@ -582,8 +577,8 @@ function LoadModal({
           {/* Header */}
           <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800">
             <div>
-              <h3 id="dataset-loader-title" className="text-lg font-black text-white tracking-tight">Load saved analysis</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a saved analysis and open a private analysis workspace.</p>
+              <h3 id="dataset-loader-title" className="text-lg font-semibold text-white tracking-tight">Load dataset</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a dataset and open a private analysis workspace.</p>
             </div>
             <button onClick={requestClose} disabled={isLoading} aria-label="Close demo loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
               <X size={16} />
@@ -602,7 +597,7 @@ function LoadModal({
           <div className="px-7 pt-4">
             <button
               onClick={() => setShowFilters(v => !v)}
-              className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 hover:text-white transition"
+              className="flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white transition"
             >
               <SlidersHorizontal size={11} />
               Filter Parameters
@@ -653,11 +648,11 @@ function LoadModal({
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2 mb-0.5">
                       <span className="font-bold text-text text-sm">{opt.title}</span>
-                      <span role={active ? 'status' : undefined} className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${opt.tagColor}`}>
+                      <span role={active ? 'status' : undefined} className={`text-xs font-semibold px-1.5 py-0.5 rounded border ${opt.tagColor}`}>
                         {active ? <>Loading…<span className="sr-only"> {opt.title}</span></> : opt.tag}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 leading-snug">{opt.desc}</p>
+                    <p className="text-xs text-slate-400 leading-snug">{opt.desc}</p>
                   </div>
                 </button>
               );
@@ -680,7 +675,7 @@ function StatusPill({ label, tone = 'slate' }) {
     slate: 'bg-slate-800 text-slate-300 border-slate-700',
   };
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-black ${tones[tone] || tones.slate}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold ${tones[tone] || tones.slate}`}>
       {label}
     </span>
   );
@@ -783,7 +778,7 @@ function datasetDisplayName(dataset) {
 
 function rawDatasetObjectName(dataset) {
   const base = datasetDisplayName(dataset).replace(/\.[^.]+$/, '');
-  return `${base} raw dataset`;
+  return `${base} raw input`;
 }
 
 function scrubEmptyParams(params) {
@@ -970,7 +965,7 @@ export function SeuratPipelinePanel({
     if (inputObject?.id) return inputObject;
     const api = window.electronAPI || {};
     if (!api.createProjectAnalysisObject) {
-      throw new Error('Creating a saved analysis is temporarily unavailable.');
+      throw new Error('Preparing the input file is temporarily unavailable.');
     }
     const created = await api.createProjectAnalysisObject(activeProjectId, {
       datasetId: selectedDatasetId,
@@ -1027,7 +1022,7 @@ export function SeuratPipelinePanel({
     const files = Array.from(event.target.files || []);
     event.target.value = '';
     if (!canWriteProject) {
-      setDatasetStatus(prev => ({ ...prev, error: 'Your project role is read-only and cannot upload datasets.' }));
+      setDatasetStatus(prev => ({ ...prev, error: 'Your project role is read-only and cannot upload input files.' }));
       return;
     }
     if (files.length === 0) return;
@@ -1055,7 +1050,7 @@ export function SeuratPipelinePanel({
     }
     const api = window.electronAPI || {};
     if (!api.uploadDataset) {
-      setDatasetStatus(prev => ({ ...prev, error: 'Dataset upload is temporarily unavailable.' }));
+      setDatasetStatus(prev => ({ ...prev, error: 'Uploading input files is temporarily unavailable.' }));
       return;
     }
     setDatasetStatus({ loading: false, uploading: true, error: null });
@@ -1239,9 +1234,9 @@ export function SeuratPipelinePanel({
   }, [multiSampleMode, multiSampleRows]);
 
   return (
-    <section className="rounded-lg border border-border bg-surface/70 p-4 sm:p-5" data-testid="seurat-pipeline-panel">
-      <h3 className="text-xl font-bold tracking-tight text-text">Seurat analysis</h3>
-      <div className="mt-4 flex border-b border-border" role="tablist" aria-label="Analysis approach">
+    <section data-testid="seurat-pipeline-panel">
+      <h3 className="sr-only">Seurat analysis</h3>
+      <div className="flex border-b border-border" role="tablist" aria-label="Analysis approach">
         {[['automatic', 'Run whole pipeline'], ['guided', 'Inspect step by step']].map(([mode, label]) => (
           <button key={mode} type="button" role="tab" id={`${approachId}-${mode}-tab`}
             aria-controls={`${approachId}-${mode}-panel`} aria-selected={analysisApproach === mode}
@@ -1267,12 +1262,12 @@ export function SeuratPipelinePanel({
             hidden={analysisApproach !== 'automatic'} className="space-y-4">
             <p className="text-sm text-textMuted">Set every step below, then submit one job from input to UMAP. Inspect the results when it finishes.</p>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap gap-2" role="group" aria-label="Seurat workflow type">
+              <div className="flex flex-wrap items-center gap-3"><span className="text-sm text-textMuted" aria-hidden="true">Data type</span><div className="segmented" role="group" aria-label="Data type">
             <button
               type="button"
               aria-pressed={workflowMode === 'scrna'}
               onClick={() => selectWorkflowMode('scrna')}
-              className={`btn text-xs ${workflowMode === 'scrna' ? 'btn-primary' : 'btn-secondary'}`}
+              className="segmented-option"
             >
               Single-cell RNA
             </button>
@@ -1280,7 +1275,7 @@ export function SeuratPipelinePanel({
               type="button"
               aria-pressed={multiSampleMode}
               onClick={() => selectWorkflowMode('multisample')}
-              className={`btn text-xs ${multiSampleMode ? 'btn-primary' : 'btn-secondary'}`}
+              className="segmented-option"
             >
               Multiple conditions
             </button>
@@ -1288,21 +1283,23 @@ export function SeuratPipelinePanel({
               type="button"
               aria-pressed={spatialMode}
               onClick={() => selectWorkflowMode('spatial')}
-              className={`btn text-xs ${spatialMode ? 'btn-primary' : 'btn-secondary'}`}
+              className="segmented-option"
             >
               Spatial transcriptomics (Visium)
             </button>
-              </div>
-              <button onClick={loadDatasets} disabled={datasetStatus.loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
-                {datasetStatus.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                Refresh datasets
-              </button>
+              </div></div>
             </div>
-            <div className="rounded border border-border bg-background/40 p-4">
+            <div className="border-t border-border pt-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h4 className="font-bold text-text">Dataset upload / selection</h4>
+                  <div className="flex items-center gap-1.5">
+                    <h4 className="font-semibold text-text">Input files</h4>
+                    <RefreshButton onClick={loadDatasets} disabled={datasetStatus.loading} loading={datasetStatus.loading} label="Refresh input files" />
+                  </div>
                   <p className="mt-1 text-xs text-textMuted">Supported format: {workflow.formatLabel}.</p>
+                  {!(datasetUploadsEnabled && canWriteProject) && <p className="mt-1 text-xs text-textMuted">
+                    {canWriteProject ? 'Uploads are turned off on this server.' : 'Read-only project; uploads are disabled for your role.'}
+                  </p>}
                   {spatialMode && <p className="mt-1 text-xs text-textMuted">Visium HD and Xenium are not accepted by this workflow.</p>}
                   {multiSampleMode && <p className="mt-1 text-xs text-textMuted">Use one file per biological sample and assign its condition below.</p>}
                 </div>
@@ -1322,13 +1319,7 @@ export function SeuratPipelinePanel({
                     disabled={datasetStatus.uploading || !canWriteProject}
                     onChange={uploadDataset}
                   />
-                </label> : (
-                  <span className="rounded border border-border px-3 py-2 text-xs text-textMuted">
-                    {canWriteProject
-                      ? 'Public demo uses curated data; uploads are disabled.'
-                      : 'Read-only project; uploads are disabled for your role.'}
-                  </span>
-                )}
+                </label> : null}
               </div>
               {datasetStatus.error && (
                 <div className="mb-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
@@ -1336,9 +1327,9 @@ export function SeuratPipelinePanel({
                 </div>
               )}
               {datasets.length === 0 ? (
-                <div className="rounded border border-dashed border-border p-4 text-sm text-textMuted">
-                  No compatible {workflow.shortFormatLabel} datasets are recorded for this project yet.
-                </div>
+                <p className="text-sm text-textMuted">
+                  This project has no {workflow.shortFormatLabel} files yet.
+                </p>
               ) : (
                 <div className="space-y-2">
                   {datasets.map(dataset => {
@@ -1357,7 +1348,7 @@ export function SeuratPipelinePanel({
                             className="mt-1"
                           />
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || 'Uploaded dataset'}</span>
+                            <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || 'Uploaded file'}</span>
                             <span className="mt-1 block text-xs text-textMuted">
                               {workflow.shortFormatLabel} · {datasetResearchStatus(dataset)}
                             </span>
@@ -1397,7 +1388,7 @@ export function SeuratPipelinePanel({
               )}
             </div>
 
-            <div className="overflow-hidden rounded border border-border bg-background/40">
+            <div className="overflow-hidden rounded border border-border bg-surface">
               <h4 className="border-b border-border px-4 py-3 font-semibold text-text sm:px-5">Pipeline settings</h4>
               <SeuratPipelineSettings params={params} setParams={setParams} controls={SEURAT_NUMERIC_CONTROLS} />
               <div className="border-t border-border p-4 sm:p-5">
@@ -1430,7 +1421,7 @@ export function SeuratPipelinePanel({
                   <p className="font-bold text-text">
                     {activeDataset.validationStatus === 'invalid'
                       ? 'This Visium ZIP cannot be started until its contents are corrected.'
-                      : 'This Visium ZIP is still being checked. Refresh datasets before starting the run.'}
+                      : 'This Visium ZIP is still being checked. Refresh input files before starting the run.'}
                   </p>
                   <p className="mt-2">Required files under one Space Ranger output directory:</p>
                   <ul className="mt-1 list-disc space-y-1 pl-5">
@@ -1470,7 +1461,7 @@ export function SeuratPipelinePanel({
             <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-border bg-background/40 px-4 py-3">
               <div className="min-w-0">
                 <p className="text-xs text-textMuted">Analysis to inspect</p>
-                <p className="mt-1 break-words font-semibold text-text">{selectedObject?.displayName || selectedObject?.name || 'No analysis selected'}</p>
+                <p className="mt-1 break-words font-semibold text-text">{selectedObject?.displayName || selectedObject?.name || 'No dataset selected'}</p>
                 {!guidedReady && <p className="mt-1 text-sm text-textMuted">Open an analysis in the workspace to start inspecting its steps.</p>}
               </div>
               <button type="button" onClick={() => setActiveTab?.('workspace')} className="btn btn-secondary text-sm">
@@ -1489,7 +1480,7 @@ export function SeuratPipelinePanel({
               ].map(([route, title, description], index) => (
                 <li key={route} className="flex flex-wrap items-center justify-between gap-3 p-4">
                   <div className="flex min-w-0 flex-1 items-baseline gap-3">
-                    <span className="pipeline-step-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="pipeline-step-number" aria-hidden="true">{index + 1}.</span>
                     <div><h4 className="font-semibold text-text">{title}</h4><p className="mt-1 text-xs leading-relaxed text-textMuted">{description}</p></div>
                   </div>
                   <button type="button" onClick={() => openGuidedStep(route)} disabled={!guidedReady}
@@ -1523,7 +1514,7 @@ export function SeuratPipelinePanel({
                   <div className="grid grid-cols-1 gap-2 text-xs">
                     <div>{multiSampleMode ? 'Primary dataset' : 'Dataset'}: <span className="text-text">{activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset'}</span></div>
                     <div>Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || selectedObject?.displayName || selectedObject?.name || 'Selected analysis'}</span></div>
-                    <div>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Saved analysis is ready' : 'Preparing saved analysis')}</span></div>
+                    <div>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Dataset is ready' : 'Preparing dataset')}</span></div>
                   </div>
                   {job.error?.message && (
                     <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-danger">
@@ -1535,12 +1526,12 @@ export function SeuratPipelinePanel({
             </div>
 
             <div className="rounded border border-border bg-background/40 p-4">
-              <h4 className="mb-3 flex items-center gap-2 font-bold text-text"><Archive size={16} /> Continue this analysis</h4>
+              <h4 className="mb-3 flex items-center gap-2 font-bold text-text">Continue this analysis</h4>
               {safeSummary ? (
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
                     <div key={key} className="rounded border border-border bg-surface p-2">
-                      <div className="font-bold text-textMuted">{key}</div>
+                      <div className="font-medium text-textMuted">{key}</div>
                       <div className="mt-1 truncate text-text">{Array.isArray(value) ? value.join(', ') : String(value)}</div>
                     </div>
                   ))}
@@ -1549,7 +1540,7 @@ export function SeuratPipelinePanel({
                 <p className="text-sm text-textMuted">A summary will appear here when the analysis run finishes.</p>
               )}
               <div className="mt-3 space-y-2 text-xs text-textMuted">
-                <p>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Saved analysis is ready' : 'Not available yet')}</span></p>
+                <p>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Dataset is ready' : 'Not available yet')}</span></p>
                 <p>Saved version: <span className="text-text">{checkpointArtifact ? 'Available' : 'Not available yet'}</span></p>
                 {resultObjectId && resultObject?.liveState !== 'attached' && (
                   <p>Open this saved version in your private analysis workspace before continuing with downstream analysis.</p>
@@ -1875,66 +1866,12 @@ export default function Workspace({
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
-      {/* Header */}
-      <div className="px-4 pt-5 pb-4 flex justify-between items-end border-b border-border bg-slate-800/10 sm:px-8 sm:pt-6">
-        <div className="min-w-0">
-          <h2 className="page-title min-w-0">
-            <span className="truncate">{currentWs.name}</span>
-            {currentWs.type === 'personal'
-              ? <Lock size={16} className="text-slate-400" />
-              : <Globe size={16} className="text-primary" />}
-          </h2>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
-        <div className="max-w-5xl mx-auto space-y-6">
-          <WorkbenchOverview
-            activeProject={activeProject}
-            selectedObject={selectedObject}
-            activeProjectObjects={activeProjectObjects}
-            pipelineState={pipelineState}
-            setActiveTab={setActiveTab}
-            setShowLoadModal={setShowLoadModal}
-            onReloadPbmcDemo={canReloadPbmcDemo ? reloadPbmcDemo : undefined}
-          />
-
-          {loadError && (
-            <div role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
-              {loadError}
-            </div>
-          )}
-
-          {/* Stats Block */}
-          {displayObject && (
-            <div className="flex flex-wrap items-center justify-between gap-4" aria-label="Dataset summary">
-              <dl className="flex flex-wrap gap-x-8 gap-y-3">
-                {[
-                  { label: 'Cells', value: Number.isFinite(displayObject.cells) ? displayObject.cells.toLocaleString() : 'Unavailable' },
-                  { label: 'Features', value: Number.isFinite(displayObject.features) ? displayObject.features.toLocaleString() : 'Unavailable' },
-                ].map(stat => <div key={stat.label}>
-                  <dt className="text-xs text-textMuted">{stat.label}</dt>
-                  <dd className="mt-1 text-xl font-semibold tabular-nums text-text">{stat.value}</dd>
-                </div>)}
-              </dl>
-              <DetailsPopover label="Dataset details">
-                {activeCount > 1 && <p className="mb-2">{activeCount} analyses selected. Counts describe the primary analysis.</p>}
-                <dl className="space-y-2">
-                  <div><dt className="text-textMuted">Matrix density</dt><dd>{Number.isFinite(displayObject.density) ? `${displayObject.density}% non-zero values` : 'Unavailable for this saved analysis'}</dd></div>
-                  <div><dt className="text-textMuted">Branch</dt><dd className="break-words">{currentWs.activeBranch}</dd></div>
-                </dl>
-                <p className="mt-3 text-textMuted">Your live workspace is private. Share saved versions through Runs &amp; Results.</p>
-              </DetailsPopover>
-            </div>
-          )}
-
+      <div className="page-scroll flex-1 custom-scrollbar">
+        <div className="page-column space-y-6">
           {/* Projects Navigation */}
           <div>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-              <h3 className="text-lg font-bold text-text flex items-center gap-3">
-                <FolderTree size={18} className="text-slate-400" />
-                Projects
-              </h3>
+              <h2 className="page-title">Projects</h2>
               {isCreatingProject ? (
                 <div className="flex items-center gap-2">
                   <input
@@ -1956,9 +1893,9 @@ export default function Workspace({
               ) : (
                 <button
                   onClick={() => setIsCreatingProject(true)}
-                  className="btn btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm transition-colors"
+                  className="btn btn-secondary"
                 >
-                  <Plus size={14} /> New Project
+                  New project
                 </button>
               )}
             </div>
@@ -1969,19 +1906,13 @@ export default function Workspace({
               </div>
             )}
 
-            <div className="flex gap-2 overflow-x-auto pb-4 border-b border-border/50 custom-scrollbar">
+            <div className="flex gap-2 overflow-x-auto pb-4 border-b border-border custom-scrollbar">
               {backendModelStatus?.projectsLoading ? (
                 <div className="text-sm text-textMuted px-1 py-3">Loading projects...</div>
               ) : currentWs.projects?.length === 0 ? (
-                <div className="w-full rounded border border-dashed border-border p-6 text-center">
-                  <h4 className="text-text font-bold mb-2">No projects yet</h4>
-                  <p className="text-sm text-textMuted mb-4">Create a project before loading a saved analysis.</p>
-                  <button
-                    onClick={() => setIsCreatingProject(true)}
-                    className="btn btn-primary text-xs px-4 py-2 inline-flex items-center gap-2"
-                  >
-                    <Plus size={14} /> Create Project
-                  </button>
+                <div className="flex w-full flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm text-textMuted">No projects yet. Create one to start adding datasets.</p>
+                  <button onClick={() => setIsCreatingProject(true)} className="btn btn-primary">Create project</button>
                 </div>
               ) : currentWs.projects?.map(proj => {
                 const isActive = activeProjectId === proj.id;
@@ -1998,14 +1929,10 @@ export default function Workspace({
                   >
                     <div className="flex flex-col">
                       <span className="font-bold text-sm">{proj.name}</span>
-                      {proj.role && <span className="text-[11px] font-medium px-1.5 py-px rounded bg-primary/10 text-primary">{proj.role}</span>}
+                      {proj.role && <span className="mt-0.5 self-start text-xs capitalize px-1.5 rounded-sm border border-primary/40 text-primary">{proj.role}</span>}
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-primary/20 text-primary' : 'bg-slate-900 text-slate-400'}`}>
-                        {projObjects.length}
-                      </span>
-                    </div>
+                    {projObjects.length > 0 && <span className="text-sm text-textMuted" aria-label={`${projObjects.length} datasets`}>{projObjects.length}</span>}
                   </button>
                 );
               })}
@@ -2016,52 +1943,86 @@ export default function Workspace({
           <div className="pt-2">
             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <h3 ref={analysisHeadingRef} tabIndex={-1} className="text-lg font-bold text-text flex items-center gap-3">
-                Saved analyses{' '}
-                <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
-                  {activeProjectObjects.length}
-                </span>
+                Datasets
+                {activeProjectObjects.length > 0 && <>{' '}<span className="ml-1 text-sm font-normal text-textMuted">{activeProjectObjects.length}</span></>}
               </h3>
               {activeProjectObjects.length > 0 && <button
                 onClick={() => setShowLoadModal(true)}
                 disabled={!!loadingId || !activeProjectId || !canWriteProject}
                 title={!canWriteProject && activeProjectId ? 'Your project role is read-only.' : undefined}
-                className="btn btn-primary flex items-center gap-2 px-5 text-sm"
+                className="btn btn-primary flex items-center gap-2 px-5 text-sm shadow-lg shadow-primary/20"
               >
-                <FileUp size={16} /> Add analysis
+                <FileUp size={16} /> Add dataset
               </button>}
+            </div>
+            <div className="mb-5 space-y-4">
+              <WorkbenchOverview
+                activeProject={activeProject}
+                selectedObject={selectedObject}
+                activeProjectObjects={activeProjectObjects}
+                pipelineState={pipelineState}
+                setActiveTab={setActiveTab}
+                setShowLoadModal={setShowLoadModal}
+                onReloadPbmcDemo={canReloadPbmcDemo ? reloadPbmcDemo : undefined}
+              />
+
+              {loadError && (
+                <div role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
+                  {loadError}
+                </div>
+              )}
+
+              {/* Stats Block */}
+              {displayObject && (
+                <div className="flex flex-wrap items-center justify-between gap-4" aria-label="Dataset summary">
+                  <dl className="flex flex-wrap gap-x-8 gap-y-3">
+                    {[
+                      { label: 'Cells', value: Number.isFinite(displayObject.cells) ? displayObject.cells.toLocaleString() : 'Unavailable' },
+                      { label: 'Features', value: Number.isFinite(displayObject.features) ? displayObject.features.toLocaleString() : 'Unavailable' },
+                    ].map(stat => <div key={stat.label}>
+                      <dt className="text-xs text-textMuted">{stat.label}</dt>
+                      <dd className="mt-1 text-xl font-semibold tabular-nums text-text">{stat.value}</dd>
+                    </div>)}
+                  </dl>
+                  <DetailsPopover label="Dataset details">
+                    {activeCount > 1 && <p className="mb-2">{activeCount} analyses selected. Counts describe the primary analysis.</p>}
+                    <dl className="space-y-2">
+                      <div><dt className="text-textMuted">Matrix density</dt><dd>{Number.isFinite(displayObject.density) ? `${displayObject.density}% non-zero values` : 'Unavailable for this dataset'}</dd></div>
+                      <div><dt className="text-textMuted">Branch</dt><dd className="break-words">{currentWs.activeBranch}</dd></div>
+                    </dl>
+                    <p className="mt-3 text-textMuted">Your live workspace is private. Share saved versions through Runs &amp; Results.</p>
+                  </DetailsPopover>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3">
               {!activeProjectId ? (
-                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
-                  <FolderTree size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">Select a project</h4>
-                  <p className="text-sm text-textMuted mb-6">
-                    Select or create a project to list saved analyses.
+                <div className="empty-note">
+                  <h4 className="font-semibold text-text">Select a project</h4>
+                  <p className="mt-1 text-sm text-textMuted">
+                    Select or create a project to list datasets.
                   </p>
                 </div>
               ) : backendModelStatus?.objectsLoading ? (
-                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
-                  <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">Loading saved analyses</h4>
-                  <p className="text-sm text-textMuted">Loading saved analysis details.</p>
+                <div className="empty-note">
+                  <h4 className="font-semibold text-text">Loading datasets</h4>
+                  <p className="mt-1 text-sm text-textMuted">Loading dataset details.</p>
                 </div>
               ) : activeProjectObjects.length === 0 ? (
-                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
-                  <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">No saved analyses in this project</h4>
-                  <p className="text-sm text-textMuted mb-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm text-textMuted">
                     {canWriteProject
-                      ? 'Use an approved workflow or the PBMC demo to create a saved analysis.'
-                      : 'Your project role is read-only. An owner, administrator, or analyst can add a saved analysis.'}
+                      ? 'No datasets yet. Start from the PBMC demo dataset or an approved workflow.'
+                      : 'No datasets yet. Your project role is read-only; an owner, administrator, or analyst can add one.'}
                   </p>
                   <button
                     onClick={() => setShowLoadModal(true)}
                     disabled={!canWriteProject}
                     title={!canWriteProject ? 'Your project role is read-only.' : undefined}
-                    className="btn btn-primary flex items-center gap-2"
+                    className="btn btn-primary"
                   >
-                    <FileUp size={15} /> Add analysis
+                    Add dataset
                   </button>
                 </div>
               ) : activeProjectObjects.map(obj => {
@@ -2079,7 +2040,7 @@ export default function Workspace({
                       }
                     }}
                     role="group"
-                    aria-label={`Saved analysis ${obj.name}. Press Enter or Space to select.`}
+                    aria-label={`Dataset ${obj.name}. Press Enter or Space to select.`}
                     tabIndex={0}
                     className={`p-4 sm:p-5 rounded-xl border transition-colors cursor-pointer group relative grid grid-cols-[40px_minmax(0,1fr)_44px] items-start gap-3 sm:flex sm:items-center sm:gap-5 ${
                       isSelected
@@ -2112,7 +2073,7 @@ export default function Workspace({
                           <>
                             <div className="text-sm font-bold text-text break-words" title={obj.name}>{obj.name}</div>
                             {obj.isSubset && (
-                              <span className="text-[9px] font-black px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/10 border-amber-500/20">
+                              <span className="text-xs font-semibold px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/10 border-amber-500/20">
                                 subset
                               </span>
                             )}
@@ -2129,24 +2090,24 @@ export default function Workspace({
                         )}
                       </div>
                       <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                        <span className="text-[10px] text-primary font-bold">
+                        <span className="text-xs text-primary font-medium">
                           {Number.isFinite(obj.cells) && Number.isFinite(obj.features)
                             ? `${obj.cells.toLocaleString()} cells × ${obj.features.toLocaleString()} features`
                             : 'Dimensions unavailable'}
                         </span>
                         <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                        <span className="text-[10px] text-slate-400">
+                        <span className="text-xs text-slate-400">
                           {new Date(obj.timestamp).toLocaleDateString()}
                         </span>
                         {obj.isBackendAnalysisObject && (
                           <>
                             <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded border text-text bg-primary/10 border-primary/20">
+                            <span className="text-xs font-semibold px-1.5 py-0.5 rounded border text-text bg-primary/10 border-primary/20">
                               Saved
                             </span>
                           </>
                         )}
-                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${
+                        <span className={`text-xs font-semibold px-1.5 py-0.5 rounded border ${
                           obj.liveState === 'attached'
                             ? 'text-success bg-success/10 border-success/30'
                             : 'text-amber-400 bg-amber-500/10 border-amber-500/30'
@@ -2160,7 +2121,7 @@ export default function Workspace({
                     <div className="flex items-center gap-3 flex-shrink-0 relative">
 
                       {isSelected && (
-                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-text shadow-sm">
+                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-xs font-semibold text-text shadow-sm">
                           <CheckCircle size={10} /> Selected
                         </div>
                       )}
@@ -2188,7 +2149,7 @@ export default function Workspace({
                             {!obj.isBackendAnalysisObject && currentWs.projects?.length > 1 && (
                               <>
                                 <div className="h-px bg-slate-700/50 my-1" />
-                                <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400">
+                                <div className="px-3 py-1.5 text-xs font-medium text-slate-400">
                                   Move to Project
                                 </div>
                                 {currentWs.projects.map(p => (

@@ -40,8 +40,8 @@ describe('ExpertR', () => {
       />
     );
 
-    expect(screen.getByText('Saved analysis')).toBeInTheDocument();
-    expect(screen.getByText(/private saved analysis/i)).toBeInTheDocument();
+    expect(screen.getByText('Dataset')).toBeInTheDocument();
+    expect(screen.getByText(/private dataset/i)).toBeInTheDocument();
     expect(screen.getByText('PBMC cohort')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /run r analysis/i }));
 
@@ -75,7 +75,7 @@ describe('ExpertR', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: /run r analysis/i }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not queue Expert R. Review the saved analysis and script, then try again.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not queue Expert R. Review the dataset and script, then try again.');
     expect(container.textContent || '').not.toMatch(/C:\\private\\expert\.R|worker\.internal|job_unsafe_expert/i);
   });
 
@@ -144,7 +144,7 @@ describe('ExpertR', () => {
     expect(setActiveTab).toHaveBeenCalledWith('history');
   });
 
-  it('explains when the researcher has no eligible saved analysis', () => {
+  it('explains when the researcher has no eligible dataset', () => {
     render(
       <ExpertR
         currentWs={currentWs}
@@ -157,7 +157,7 @@ describe('ExpertR', () => {
       />
     );
 
-    expect(screen.getByText(/no saved analysis you own/i)).toBeInTheDocument();
+    expect(screen.getByText(/no dataset you own/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /run r analysis/i })).toBeDisabled();
   });
 

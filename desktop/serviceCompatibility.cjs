@@ -1,5 +1,7 @@
 'use strict';
 
+const { name: APP_NAME } = require('../shared/brand.json');
+
 const CLIENT_API_VERSION = 1;
 const MAX_DESCRIPTOR_BYTES = 1024;
 
@@ -10,10 +12,10 @@ function validateServiceCompatibility(value) {
       || !Number.isInteger(value.serviceApiVersion) || value.serviceApiVersion < 1 || value.serviceApiVersion > 1000
       || !Number.isInteger(value.minimumClientApiVersion) || value.minimumClientApiVersion < 1
       || value.minimumClientApiVersion > value.serviceApiVersion) {
-    throw failure('DESKTOP_SERVICE_INVALID', 'That address is not a compatible TraceOmics server. Ask its administrator to update the service.');
+    throw failure('DESKTOP_SERVICE_INVALID', `That address is not a compatible ${APP_NAME} server. Ask its administrator to update the service.`);
   }
   if (value.minimumClientApiVersion > CLIENT_API_VERSION || value.serviceApiVersion < CLIENT_API_VERSION) {
-    throw failure('DESKTOP_SERVICE_UPGRADE_REQUIRED', 'The TraceOmics service API is incompatible with this desktop. Update the desktop or ask the server administrator to install a compatible service.');
+    throw failure('DESKTOP_SERVICE_UPGRADE_REQUIRED', `The ${APP_NAME} service API is incompatible with this desktop. Update the desktop or ask the server administrator to install a compatible service.`);
   }
   // The public descriptor verifies only API compatibility. Do not retain any
   // unrelated fields a server might send, including authenticated diagnostics.
@@ -25,7 +27,7 @@ async function checkServiceCompatibility(endpoint, { fetchImpl = fetch, timeoutM
   signal, now = Date.now } = {}) {
   const controller = new AbortController();
   let reader, timer;
-  const cancelled = () => failure('DESKTOP_CONNECTION_CANCELLED', 'The TraceOmics connection check was canceled.');
+  const cancelled = () => failure('DESKTOP_CONNECTION_CANCELLED', `The ${APP_NAME} connection check was canceled.`);
   let rejectCancellation;
   const cancellation = new Promise((_, reject) => { rejectCancellation = reject; });
   const cancel = () => { controller.abort(); rejectCancellation(cancelled()); };
@@ -34,7 +36,7 @@ async function checkServiceCompatibility(endpoint, { fetchImpl = fetch, timeoutM
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(failure('DESKTOP_SERVICE_TIMEOUT', 'The TraceOmics connection check timed out. Check the server and retry.'));
+      reject(failure('DESKTOP_SERVICE_TIMEOUT', `The ${APP_NAME} connection check timed out. Check the server and retry.`));
     }, timeoutMs);
   });
   async function verify() {
@@ -47,11 +49,11 @@ async function checkServiceCompatibility(endpoint, { fetchImpl = fetch, timeoutM
     } catch (error) {
       if (error.code === 'DESKTOP_TLS_REJECTED') throw error;
       if (signal?.aborted) throw cancelled();
-      throw failure('DESKTOP_SERVICE_UNREACHABLE', 'TraceOmics could not reach that server. Check the address, network connection, and server status.');
+      throw failure('DESKTOP_SERVICE_UNREACHABLE', `${APP_NAME} could not reach that server. Check the address, network connection, and server status.`);
     }
     if (response.status === 404) throw failure('DESKTOP_SERVICE_UPGRADE_REQUIRED',
-      'This server does not publish a TraceOmics compatibility descriptor. Ask its administrator to update the service before connecting.');
-    if (!response.ok) throw failure('DESKTOP_SERVICE_REJECTED', 'That server did not accept the TraceOmics compatibility check. Ask its administrator to check the public service endpoint.');
+      `This server does not publish a ${APP_NAME} compatibility descriptor. Ask its administrator to update the service before connecting.`);
+    if (!response.ok) throw failure('DESKTOP_SERVICE_REJECTED', `That server did not accept the ${APP_NAME} compatibility check. Ask its administrator to check the public service endpoint.`);
     let value;
     try {
       if (Number(response.headers?.get('content-length')) > MAX_DESCRIPTOR_BYTES) throw new Error('response limit');
@@ -73,7 +75,7 @@ async function checkServiceCompatibility(endpoint, { fetchImpl = fetch, timeoutM
         if (Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_DESCRIPTOR_BYTES) throw new Error('response limit');
       }
     } catch {
-      throw failure('DESKTOP_SERVICE_INVALID', 'That address did not return a valid TraceOmics compatibility response.');
+      throw failure('DESKTOP_SERVICE_INVALID', `That address did not return a valid ${APP_NAME} compatibility response.`);
     }
     return { ...validateServiceCompatibility(value), checkedAt: new Date(now()).toISOString() };
   }

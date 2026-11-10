@@ -1,11 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  CheckCircle2, ChevronDown, ChevronLeft, Database, FileText, GitBranch, LayoutPanelTop,
-  Bot, Info, Lock, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
+  CheckCircle2, ChevronDown, ChevronLeft, FileText, FolderOpen, GitBranch, History, Images,
+  Bot, ListChecks, Lock, LogOut, Menu, Microscope, Moon, Network, SquareTerminal, Sun, TestTubes,
+  UserRound, Users, Workflow,
 } from 'lucide-react';
-import TraceMark from './TraceMark';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
+import { sentenceCase } from '../sentenceCase';
 import { workflowTabAvailability } from '../../shared/workflowState.mjs';
+import { APP_NAME } from '../brand';
+
+const WORKFLOW_IDS = ['study-design', 'pipeline-manager', 'history', 'branches', 'expert-r'];
+const DATASET_IDS = ['lineage', 'publication', 'validation'];
+const SETTINGS_IDS = ['team', 'agents'];
 
 const PRIMARY_DESTINATION_IDS = new Set([
   'workspace', 'analyses', 'pipeline-manager', 'branches', 'study-design', 'expert-r',
@@ -13,12 +19,12 @@ const PRIMARY_DESTINATION_IDS = new Set([
 ]);
 
 function researcherLabel(value) {
-  if (value === 'Expert R') return 'Advanced analysis';
+  if (value === 'Expert R') return 'R console';
   if (/seurat/i.test(String(value || ''))) return 'Standard scRNA-seq workflow';
   return value;
 }
 
-function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount, trace = false }) {
+function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }) {
   const Icon = item.icon;
   const isActive = activeTab === item.id;
   const isDisabled = disabled || item.disabled;
@@ -31,35 +37,31 @@ function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount, 
     aria-describedby={item.lockReason ? `${item.id}-dependency` : undefined}
     title={item.status || researcherLabel(item.label)}
     aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
-    data-trace-state={trace ? (isActive ? 'current' : item.done ? 'done' : 'pending') : undefined}
-    className={`nav-item relative w-full flex items-center gap-3 px-3 py-2 rounded-md border text-[14px] font-medium transition-colors group
-      ${trace ? 'trace-item' : ''}
+    className={`nav-item relative w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-sm transition-colors group
       ${isDisabled ? 'cursor-not-allowed' : ''} ${isDisabled && !item.lockReason ? 'opacity-45' : ''}
-      ${isActive ? (trace ? 'border-trace/30 bg-trace/10 text-text' : 'border-primary/30 bg-primary/10 text-text') : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
+      ${isActive ? 'nav-item-active border-primary/30 bg-primary/10 text-text' : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
   >
-    {trace && <span className="trace-node" aria-hidden="true" />}
-    {Icon && <Icon size={17} strokeWidth={1.75} className={`${isActive ? 'text-primary' : 'text-textMuted'} group-hover:text-text flex-shrink-0`} />}
-    <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
-    {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
+    {Icon ? <Icon size={18} className={`${isActive ? 'text-primary' : 'text-textMuted'} group-hover:text-text flex-shrink-0`} strokeWidth={1.75} aria-hidden="true" />
+      : <span className="w-[18px] flex-shrink-0" aria-hidden="true" />}
+    <span className="min-w-0 flex-1 truncate text-left">{sentenceCase(researcherLabel(item.label))}</span>
     {item.lockReason && <>
       <Lock size={13} className="flex-shrink-0" aria-hidden="true" />
       <span id={`${item.id}-dependency`} role="tooltip" className="pointer-events-none absolute inset-x-0 top-full z-30 hidden rounded border border-border bg-surface p-2 text-left text-xs text-text shadow group-hover:block group-focus:block">{item.lockReason}</span>
     </>}
-    {item.id === 'publication' && figuresCount > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">{figuresCount}</span>}
-    {item.done && !trace && <CheckCircle2 size={14} className="text-success flex-shrink-0" />}
-    {item.done && trace && <span className="sr-only">Complete</span>}
+    {item.id === 'publication' && figuresCount > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">{figuresCount}</span>}
+    {item.done && <CheckCircle2 size={14} className="text-success flex-shrink-0" />}
   </button>;
 }
 
-function NavSection({ id, label, open, active, onToggle, children, trace = false }) {
+function NavSection({ id, label, open, active, onToggle, children }) {
   return <section className="space-y-1">
     <button type="button" onClick={onToggle} aria-expanded={open} aria-controls={`navigation-group-${id}`}
       aria-disabled={active || undefined} title={active ? 'This group contains the current page' : undefined}
-      className="nav-section-toggle flex min-h-9 w-full items-center gap-2 rounded px-2 text-left text-[13px] font-semibold text-text hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+      className="nav-group-label flex min-h-9 w-full items-center gap-2 rounded px-2 text-left text-textMuted hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
       <ChevronDown size={14} className={`shrink-0 transition-transform motion-reduce:transition-none ${open ? '' : '-rotate-90'}`} aria-hidden="true" />
-      <span className="min-w-0 flex-1 break-words leading-relaxed">{label}</span>
+      <span className="min-w-0 flex-1 break-words leading-relaxed">{sentenceCase(label)}</span>
     </button>
-    <div id={`navigation-group-${id}`} hidden={!open} className={trace ? 'trace-list' : 'space-y-0.5'}>{children}</div>
+    <div id={`navigation-group-${id}`} hidden={!open} className="space-y-0.5">{children}</div>
   </section>;
 }
 
@@ -171,6 +173,10 @@ export default function Sidebar({
       ...section,
       items: section.items.filter((item) => !PRIMARY_DESTINATION_IDS.has(item.id)),
     }))
+    .map((section) => ({
+      ...section,
+      items: activeWorkflow || hasData ? section.items : section.items.filter((item) => !item.requiresObject),
+    }))
     .filter((section) => section.items.length > 0);
   const groupActive = items => items.some(item => item.id === activeTab);
   const toggleGroup = (id, active) => {
@@ -203,9 +209,9 @@ export default function Sidebar({
 
   return (
     <div ref={shellRef} onKeyDown={handleDrawerKeyDown} className="relative z-20 flex h-14 w-full shrink-0 sm:h-full sm:w-[72px] lg:w-auto">
-      <nav aria-label="Account and navigation controls" inert={isNarrow && !isCollapsed} className="app-rail relative z-50 flex h-14 w-full shrink-0 items-center gap-2 px-3 sm:h-full sm:w-[64px] sm:flex-col sm:px-0 sm:py-3">
-        <div className="rail-mark flex h-9 w-9 shrink-0 items-center justify-center sm:mb-1 sm:h-11 sm:w-11" title="TraceOmics">
-          <TraceMark size={26} />
+      <nav aria-label="Account and navigation controls" inert={isNarrow && !isCollapsed} className="nav-rail relative z-50 flex h-14 w-full shrink-0 items-center gap-2 px-3 sm:h-full sm:w-[72px] sm:flex-col sm:px-0 sm:py-3">
+        <div className="nav-rail-mark flex h-9 w-9 shrink-0 items-center justify-center sm:mb-1 sm:h-11 sm:w-11" title={APP_NAME}>
+          <Microscope size={22} strokeWidth={1.75} aria-hidden="true" />
         </div>
 
           <button
@@ -216,13 +222,14 @@ export default function Sidebar({
             aria-controls="workspace-navigation"
             aria-expanded={!isCollapsed}
             hidden={!isCollapsed}
-            className={`rail-button h-11 w-11 shrink-0 rounded-md transition-colors items-center justify-center ${isCollapsed ? 'flex' : 'hidden'}`}
+            className={`nav-rail-button h-11 w-11 shrink-0 rounded-md transition-colors items-center justify-center ${isCollapsed ? 'flex' : 'hidden'}`}
             title="Expand sidebar"
           >
             <Menu size={16} />
           </button>
 
-        <span className="rail-title min-w-0 flex-1 truncate text-sm font-semibold sm:hidden">{currentWorkspace?.name || 'TraceOmics'}</span>
+        <span className="nav-rail-title min-w-0 flex-1 truncate text-sm font-semibold sm:hidden">{currentWorkspace?.name || APP_NAME}</span>
+        <div className="nav-rail-divider my-1 hidden h-px w-8 sm:block" />
 
         <div className="hidden flex-1 sm:block" />
 
@@ -230,28 +237,27 @@ export default function Sidebar({
           <div className="relative mb-2 mt-auto hidden w-full flex-col items-center gap-2 sm:flex">
             <button
               aria-label="Account security"
-              aria-current={activeTab === 'account' ? 'page' : undefined}
-              className="rail-button w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
+              className={`nav-rail-button w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center ${activeTab === 'account' ? 'nav-rail-button-active' : ''}`}
               onClick={() => { setActiveTab('account'); collapseAfterMobileNavigation(); }}
               title="Account security"
             >
-              <UserRound size={19} strokeWidth={1.75} />
+              <UserRound size={20} />
             </button>
             <button
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="rail-button w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
+              className="nav-rail-button w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
               onClick={() => setTheme?.(theme === 'dark' ? 'light' : 'dark')}
               title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
             >
-              {theme === 'dark' ? <Moon size={19} strokeWidth={1.75} /> : <Sun size={19} strokeWidth={1.75} />}
+              {theme === 'dark' ? <Moon size={20} /> : <Sun size={20} />}
             </button>
             <button
               aria-label="Log out"
-              className="rail-button rail-button-danger w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
+              className="nav-rail-button nav-rail-button-danger w-11 h-11 rounded-md transition-colors duration-150 flex items-center justify-center"
               onClick={onLogout}
               title="Log Out"
             >
-              <LogOut size={19} strokeWidth={1.75} className="ml-0.5" />
+              <LogOut size={20} className="ml-0.5" />
             </button>
           </div>
         )}
@@ -262,7 +268,7 @@ export default function Sidebar({
         aria-label="Close navigation overlay"
         tabIndex={-1}
         onClick={() => setIsCollapsed(true)}
-        className="fixed inset-0 top-14 z-30 bg-black/25 dark:bg-black/45 sm:left-[64px] sm:top-0 lg:hidden"
+        className="fixed inset-0 top-14 z-30 bg-black/25 dark:bg-black/45 sm:left-[72px] sm:top-0 lg:hidden"
       />}
       <aside
         id="workspace-navigation"
@@ -271,42 +277,44 @@ export default function Sidebar({
         aria-modal={isNarrow && !isCollapsed ? true : undefined}
         aria-hidden={isCollapsed || undefined}
         inert={isCollapsed}
-        className={`fixed bottom-0 left-0 top-14 z-40 w-[min(320px,100vw)] overflow-hidden border-r border-border bg-surface shadow-xl transition-[width,transform] duration-200 ease-out motion-reduce:transition-none sm:left-[64px] sm:top-0 sm:w-60 lg:static lg:h-full lg:shadow-none ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0 lg:translate-x-0' : 'translate-x-0 lg:w-60'}`}
+        className={`fixed bottom-0 left-0 top-14 z-40 w-[min(320px,100vw)] overflow-hidden bg-surface transition-[width,transform] duration-200 ease-out motion-reduce:transition-none sm:left-[72px] sm:top-0 sm:w-60 lg:static lg:h-full lg:shadow-none lg:border-r lg:border-border ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0 lg:translate-x-0' : 'translate-x-0 shadow-xl lg:w-60'}`}
       >
         <div className="flex h-full w-[min(320px,100vw)] flex-col sm:w-60">
         <button
           ref={collapseRef}
           type="button"
           aria-label="Collapse sidebar"
-          className="h-14 w-full shrink-0 flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
+          className="h-12 w-full shrink-0 flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
           onClick={() => setIsCollapsed(true)}
         >
-          <span className="workspace-name truncate flex-1">{currentWorkspace?.name || 'TraceOmics'}</span>
+          <span className="nav-workspace-name text-text truncate flex-1 leading-none">{currentWorkspace?.name || APP_NAME}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 
-        <div className="shrink-0 border-b border-border p-2">
+        <div className="shrink-0 border-b border-border py-2 pl-2 pr-4">
+          <NavButton {...navProps} item={{ id: 'workspace', label: 'Projects', icon: FolderOpen, status: hasProject ? 'Project selected' : 'Select project' }} />
           <NavButton {...navProps} item={{ id: 'analyses', label: 'Analyses', icon: FileText }} disabled={!hasProject} />
-          <NavButton {...navProps} item={{ id: 'workspace', label: 'Data workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
         </div>
         <div ref={navigationScrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-3 custom-scrollbar" style={{ scrollbarGutter: 'stable' }}>
-          <NavSection id="project" label="Project" active={['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'agents', 'history'].includes(activeTab)} open={!closedGroups.has('project') || ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'agents', 'history'].includes(activeTab)} onToggle={() => toggleGroup('project', ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'agents', 'history'].includes(activeTab))}>
-            <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: LayoutPanelTop }} disabled={!hasProject} />
+          {/* Ordered the way the research happens: design the study, run the
+              pipeline, review what it produced. */}
+          <NavSection id="project" label="Workflow" active={WORKFLOW_IDS.includes(activeTab)} open={!closedGroups.has('project') || WORKFLOW_IDS.includes(activeTab)} onToggle={() => toggleGroup('project', WORKFLOW_IDS.includes(activeTab))}>
+            <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: TestTubes, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: Workflow, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: History }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
-            <NavButton {...navProps} item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'agents', label: 'Agent access', icon: Bot, status: deploymentPolicy.demoMode ? 'Unavailable in public demo' : hasProject ? 'Delegated AI agents' : 'Select project' }} disabled={!hasProject || deploymentPolicy.demoMode === true} />
+            <NavButton {...navProps} item={{ id: 'expert-r', label: 'R console', icon: SquareTerminal, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
           </NavSection>
-          <NavSection id="data" label="Data & analysis" active={['lineage', 'publication', 'validation'].includes(activeTab)} open={!closedGroups.has('data') || ['lineage', 'publication', 'validation'].includes(activeTab)} onToggle={() => toggleGroup('data', ['lineage', 'publication', 'validation'].includes(activeTab))}>
-              <NavButton {...navProps} item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
-              <NavButton {...navProps} item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
-              <NavButton {...navProps} item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
-          </NavSection>
+          {/* Dataset tools only appear once there is a dataset to use them on,
+              instead of sitting greyed out. */}
+          {hasData && <NavSection id="data" label="Selected dataset" active={DATASET_IDS.includes(activeTab)} open={!closedGroups.has('data') || DATASET_IDS.includes(activeTab)} onToggle={() => toggleGroup('data', DATASET_IDS.includes(activeTab))}>
+            <NavButton {...navProps} item={{ id: 'lineage', label: 'Lineage', icon: Network, status: 'Analysis lineage' }} />
+            <NavButton {...navProps} item={{ id: 'publication', label: 'Figure Gallery', icon: Images, status: 'Saved figures' }} />
+            <NavButton {...navProps} item={{ id: 'validation', label: 'Validation', icon: ListChecks }} />
+          </NavSection>}
 
           {pipelineSections.map(section => (
-            <NavSection key={section.id} trace id={section.id} label={researcherLabel(section.label)} active={groupActive(section.items)} open={!closedGroups.has(section.id) || groupActive(section.items)} onToggle={() => toggleGroup(section.id, groupActive(section.items))}>
+            <NavSection key={section.id} id={section.id} label={researcherLabel(section.label)} active={groupActive(section.items)} open={!closedGroups.has(section.id) || groupActive(section.items)} onToggle={() => toggleGroup(section.id, groupActive(section.items))}>
               {section.items.map(item => {
                 const blockedLegacyMutation = deploymentPolicy.legacyLiveMutationToolsEnabled !== true
                   && item.id === 'integrate';
@@ -319,7 +327,6 @@ export default function Sidebar({
                     : item;
                 return (
                   <NavButton {...navProps}
-                    trace
                     key={item.id}
                     item={visibleItem}
                     disabled={blockedLegacyMutation
@@ -331,6 +338,11 @@ export default function Sidebar({
               })}
             </NavSection>
           ))}
+
+          <NavSection id="settings" label="Project settings" active={SETTINGS_IDS.includes(activeTab)} open={!closedGroups.has('settings') || SETTINGS_IDS.includes(activeTab)} onToggle={() => toggleGroup('settings', SETTINGS_IDS.includes(activeTab))}>
+            <NavButton {...navProps} item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'agents', label: 'Agent access', icon: Bot, status: deploymentPolicy.demoMode ? 'Unavailable in public demo' : hasProject ? 'Delegated AI agents' : 'Select project' }} disabled={!hasProject || deploymentPolicy.demoMode === true} />
+          </NavSection>
         </div>
         {isPhone && user && <div className="shrink-0 border-t border-border p-2 space-y-1">
           <p className="truncate px-3 py-1 text-xs text-textMuted" title={user.email}>{user.email || 'Account'}</p>

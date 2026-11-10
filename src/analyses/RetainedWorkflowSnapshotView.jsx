@@ -77,7 +77,7 @@ export default function RetainedWorkflowSnapshotView({ projectId, userId, refere
         'WORKFLOW_EVIDENCE_UNAVAILABLE', 'WORKFLOW_WORKSPACE_FULL', 'WORKFLOW_GENERATION_EXHAUSTED', 'WORKFLOW_SNAPSHOT_NOT_FOUND', 'FORBIDDEN'].includes(failure.code);
       if (freshRejection) { frozen.current = null; setPending(null); }
       else uncertain.current = true;
-      setError(failure.code === 'UNSAVED_LIVE_WORK' ? 'Save your current live analysis in Data workspace before opening another workflow.'
+      setError(failure.code === 'UNSAVED_LIVE_WORK' ? 'Save your current live analysis on the Projects page before opening another workflow.'
         : freshRejection && failure.code === 'FORBIDDEN' ? 'Your current project role cannot reopen a working workflow. Its saved source remains available if you still have read access.'
           : freshRejection && failure.code === 'WORKFLOW_WORKSPACE_FULL' ? 'Close an unused working workflow in Pipelines, then refresh these details before opening another.'
             : freshRejection && failure.code === 'WORKFLOW_GENERATION_EXHAUSTED' ? 'This working workflow has reached its supported revision limit. Its saved source remains available for inspection.'

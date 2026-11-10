@@ -19,7 +19,7 @@ export default function InertSnapshotChoices({ state, disabled }) {
     if (event.currentTarget.open && !disabled && !collection && !loading) void loadOptions(kind);
   }}>
     <summary className="cursor-pointer text-sm font-medium">Text and JSON source excerpts (optional)</summary>
-    <p className="mt-3 text-xs text-textMuted">Select a prefix from an owned text or JSON file linked to saved analysis {analysisVersion}. You will choose whether to include its source text, then review the exact private preview before publishing.</p>
+    <p className="mt-3 text-xs text-textMuted">Select a prefix from an owned text or JSON file linked to dataset {analysisVersion}. You will choose whether to include its source text, then review the exact private preview before publishing.</p>
     <ul aria-label="Linked text and JSON sources" className="space-y-3">{collection?.items.map(option => <li key={JSON.stringify(option.reference)} className="min-w-0 space-y-2 border-t border-border pt-3">
       <p className="break-words text-sm font-medium">{option.label}</p>
       <p className="text-xs text-textMuted">{option.sourceFormatId === 'org.ietf.json' ? 'JSON source text' : 'Plain text'} · {option.sourceBytes.toLocaleString()} source bytes · contents not checked</p>

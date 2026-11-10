@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, GitBranch, GitCompare, History, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Download, GitBranch, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 
@@ -8,7 +8,7 @@ function messageFor(error, fallback) {
 }
 
 function savedAnalysisLabel(object) {
-  return object?.displayName || object?.name || 'Saved analysis';
+  return object?.displayName || object?.name || 'Dataset';
 }
 
 function analysisMethodLabel(summary) {
@@ -176,7 +176,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
         <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-5">
           <section className="space-y-3">
             <div className="rounded-xl border border-border bg-surface p-4">
-              <div className="text-xs font-bold text-textMuted">Final project analysis</div>
+              <div className="text-xs font-medium text-textMuted">Final project analysis</div>
               {finalProjectAnalysis ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-text">
                   <ShieldCheck size={18} className="text-success" />
@@ -204,11 +204,11 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
                     <div>
                       <div className="font-bold text-text">{branch.name}</div>
                       <div className="text-xs text-textMuted mt-1">Branch revision {branch.version} · Owner: {owned ? 'You' : 'Project collaborator'}</div>
-                      <div className="text-xs text-textMuted mt-1">Source: {sourceObject ? savedAnalysisLabel(sourceObject) : 'Saved analysis unavailable'}</div>
-                      <div className="text-xs text-textMuted mt-1">Current saved analysis: {headObject ? savedAnalysisLabel(headObject) : 'Saved analysis unavailable'}</div>
+                      <div className="text-xs text-textMuted mt-1">Source: {sourceObject ? savedAnalysisLabel(sourceObject) : 'Dataset unavailable'}</div>
+                      <div className="text-xs text-textMuted mt-1">Current dataset: {headObject ? savedAnalysisLabel(headObject) : 'Dataset unavailable'}</div>
                       <div className="text-xs text-textMuted mt-1">Review: {latestReview ? reviewStatusLabel(latestReview.status) : 'Not requested'}</div>
                     </div>
-                    <span className={`text-[11px] rounded-full border px-2 py-1 ${branch.visibility === 'private' ? 'border-amber-500/30 text-amber-700 dark:text-amber-300' : 'border-success/30 text-success'}`}>
+                    <span className={`text-xs rounded-full border px-2 py-1 ${branch.visibility === 'private' ? 'border-amber-500/30 text-amber-700 dark:text-amber-300' : 'border-success/30 text-success'}`}>
                       {branch.visibility === 'private' ? 'Private draft' : 'Shared with project'}
                     </span>
                   </div>
@@ -266,7 +266,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
                           ...current, [branch.id]: event.target.value,
                         }))}
                       >
-                        <option value="">Select a newer saved analysis</option>
+                        <option value="">Select a newer dataset</option>
                         {objects.filter((object) => Number(object.ownerUserId) === Number(userId)
                           && object.id !== branch.headAnalysisObjectId)
                           .map((object) => <option key={object.id} value={object.id} title={savedAnalysisLabel(object)}>{savedAnalysisLabel(object)}</option>)}
@@ -292,14 +292,14 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
               <h3 className="font-bold text-text">Create a private branch</h3>
               <label className="block space-y-1 text-sm"><span>Branch name</span><input className="input w-full" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. alternate QC strategy" maxLength={80} /></label>
               <label className="block space-y-1 text-sm"><span>Description</span><textarea className="input w-full min-h-20" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What are you testing?" maxLength={1000} /></label>
-              <label className="block space-y-1 text-sm"><span>Source saved version</span><select aria-label="Branch source saved analysis" className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
-                <option value="">Select an owned saved analysis</option>
+              <label className="block space-y-1 text-sm"><span>Source saved version</span><select aria-label="Branch source dataset" className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
+                <option value="">Select an owned dataset</option>
                 {ownedObjects.map((object) => <option key={object.id} value={object.id} title={savedAnalysisLabel(object)}>{savedAnalysisLabel(object)}</option>)}
               </select></label>
               <button className="btn btn-primary w-full" disabled={!name.trim() || !baseObjectId || !!busy}>{busy === 'create' ? 'Creating…' : 'Create private branch'}</button>
               {objects.length > ownedObjects.length && (
                 <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs text-textMuted">
-                  To continue from a collaborator&apos;s saved analysis, first create your private checkpoint copy in Runs &amp; Results.
+                  To continue from a collaborator&apos;s dataset, first create your private checkpoint copy in Runs &amp; Results.
                   {setActiveTab && (
                     <button type="button" className="mt-2 block font-semibold text-primary hover:underline" onClick={() => setActiveTab('history')}>
                       Open Runs &amp; Results
@@ -352,7 +352,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
             )}
 
             <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
-              <h3 className="font-bold text-text flex items-center gap-2"><GitCompare size={17} /> Compare branches</h3>
+              <h3 className="font-bold text-text flex items-center gap-2">Compare branches</h3>
               <label className="block space-y-1 text-sm"><span>Left branch</span><select aria-label="Left branch" className="input w-full" value={leftBranchId} onChange={(event) => setLeftBranchId(event.target.value)}><option value="">Select a branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select></label>
               <label className="block space-y-1 text-sm"><span>Right branch</span><select aria-label="Right branch" className="input w-full" value={rightBranchId} onChange={(event) => setRightBranchId(event.target.value)}><option value="">Select a branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select></label>
               <button className="btn btn-secondary w-full" disabled={!leftBranchId || !rightBranchId || !!busy} onClick={() => mutate('compare', async () => setComparison(await window.electronAPI.compareAnalysisBranches(projectId, leftBranchId, rightBranchId)))}>Compare recorded history</button>
@@ -366,13 +366,13 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
             </div>
 
             <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
-              <h3 className="font-bold text-text flex items-center gap-2"><History size={17} /> Project activity</h3>
+              <h3 className="font-bold text-text flex items-center gap-2">Project activity</h3>
               {auditEvents.length === 0 ? (
                 <p className="text-xs text-textMuted">No recorded branch or export activity yet.</p>
               ) : auditEvents.slice(0, 8).map((event) => (
                 <div key={event.id} className="border-t border-border pt-2 first:border-0 first:pt-0">
                   <div className="text-xs font-semibold text-text">{activityLabel(event.action)}</div>
-                  <div className="text-[11px] text-textMuted">{new Date(event.createdAt).toLocaleString()}</div>
+                  <div className="text-xs text-textMuted">{new Date(event.createdAt).toLocaleString()}</div>
                 </div>
               ))}
             </div>

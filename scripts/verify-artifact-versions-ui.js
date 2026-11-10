@@ -159,7 +159,7 @@ async function standalone() {
     const project = await db.createProjectForUser(owner.user.id, { organizationId: organization.id, name: 'Immutable artifact inspection' });
     const other = await db.createProjectForUser(owner.user.id, { organizationId: organization.id, name: 'Separate study' });
     await db.addProjectMemberByEmail(project.id, viewer.user.email, 'viewer', { userId: owner.user.id });
-    const object = await db.createProjectAnalysisObject(owner.user.id, project.id, { objectType: 'seurat', displayName: 'Existing saved analysis' });
+    const object = await db.createProjectAnalysisObject(owner.user.id, project.id, { objectType: 'seurat', displayName: 'Existing dataset' });
     const job = await db.createProjectJob(owner.user.id, project.id, { jobType: 'generic', analysisObjectId: object.id });
     const checkpoint = db.genId('art'); const key = storage.projectStorageFileKey(project.id, 'checkpoints', job.id, 'checkpoint.rds');
     const opaque = Buffer.from('Opaque checkpoint: never deserialize this acceptance fixture.');
@@ -201,7 +201,7 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await openArtifactInspector(page);
     const region = page.getByRole('region', { name: 'Artifact versions', exact: true });
-    await region.getByRole('button', { name: /^Saved analysis/ }).click();
+    await region.getByRole('button', { name: /^Dataset/ }).click();
     // A checkpoint has no browser preview: since 10-20 it is shown metadata-only
     // and explicitly not described as read or checksum-verified in the browser.
     await region.getByText(/Only its saved metadata is shown; its contents have not been read or verified here\./).waitFor();

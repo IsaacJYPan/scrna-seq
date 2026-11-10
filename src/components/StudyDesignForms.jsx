@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link2, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 
 export function ConditionsForm({ conditions, conditionName, setConditionName, busy, onSubmit }) {
   return (
@@ -8,19 +8,19 @@ export function ConditionsForm({ conditions, conditionName, setConditionName, bu
       <div className="flex flex-wrap gap-2">
         {conditions.map((item) => (
           <span
-            className="max-w-full break-words rounded-full border border-border bg-background px-3 py-1 text-sm"
+            className="max-w-full break-words rounded border border-border bg-surface px-2.5 py-1 text-sm font-medium"
             key={item.id}
           >
             {item.name}
           </span>
         ))}
       </div>
-      <div className="flex max-w-2xl flex-col sm:flex-row sm:items-end gap-3">
+      <div className="flex max-w-md flex-col sm:flex-row sm:items-end gap-3">
         <label className="block min-w-0 flex-1 space-y-1 text-sm">
           <span>Condition name</span>
           <input
             className="input w-full"
-            placeholder="e.g. treated"
+            placeholder="e.g. knockout"
             value={conditionName}
             onChange={(event) => setConditionName(event.target.value)}
           />
@@ -185,14 +185,13 @@ export function SampleMappings({
   return (
     <form className="card min-w-0 p-4 grid grid-cols-1 sm:grid-cols-2 gap-3" onSubmit={onSubmit}>
       <h3 className="sm:col-span-2 font-semibold flex items-center gap-2">
-        <Link2 size={16} />
         3. Map cells to samples
       </h3>
       <div className="block space-y-1 text-sm">
         <label htmlFor={selectIds.boundSample}>Biological sample</label>
         <select
           id={selectIds.boundSample}
-          className="input w-full"
+          className="input w-full max-w-md"
           value={binding.sampleId}
           onChange={(event) => setBinding({ ...binding, sampleId: event.target.value })}
         >

@@ -203,7 +203,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     await waitForTargetGroups();
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
-    expect(screen.getByText(/Select a saved analysis before starting pathway enrichment/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a dataset before starting pathway enrichment/i)).toBeInTheDocument();
   });
 
   it('restores the latest saved pathway job for the selected object', async () => {

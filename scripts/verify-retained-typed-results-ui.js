@@ -95,8 +95,8 @@ async function main() {
         metricDescriptors: parsed.preview.items?.map(({ key, label, unit }) => ({ key, label, unit })) }); } catch { /* Navigation can cancel a body. */ } }
       if (/\/image$/.test(pathname) && response.ok()) { try { const body = await response.body(); imageResponses.push({ path: pathname, sha256: sha(body), sizeBytes: body.length }); } catch { /* Navigation can cancel a body. */ } }
     });
-    await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email); await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open Workbench/ }).click();
-    await page.getByText('Connection details', { exact: true }).waitFor(); await nav(/^Data workspace,/); await page.getByRole('button', { name: new RegExp('^' + service.project.name) }).click();
+    await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email); await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open workbench/ }).click();
+    await page.getByText('Connection details', { exact: true }).waitFor(); await nav(/^Projects,/); await page.getByRole('button', { name: new RegExp('^' + service.project.name) }).click();
     await openInspector(); await select(material.outputs.metrics);
     await viewer().getByText('2638', { exact: true }).waitFor(); await viewer().getByText('13714', { exact: true }).waitFor();
     await viewer().getByText('Diagnostic', { exact: true }).waitFor(); await viewer().getByRole('heading', { name: 'PBMC3k retained dataset summary', exact: true }).waitFor();
@@ -236,7 +236,7 @@ async function main() {
     assert(requests.filter(value => value.path === `/api/artifact-versions/${service.project.id}/${material.outputs.figure.id}/image`).length === imageReadsBeforePopup, 'The full-size image fetched its source bytes again.');
     check('An explicit safe full-size image tab retains exact verified Blob bytes and native mobile pixel zoom without another source read.');
     await page.setViewportSize({ width: 1366, height: 768 }); await setTheme('light');
-    await nav(/^Data workspace,/); await page.getByRole('group', { name: 'Saved analysis Retained PBMC3k input. Press Enter or Space to select.', exact: true }).focus(); await page.keyboard.press('Enter');
+    await nav(/^Projects,/); await page.getByRole('group', { name: 'Dataset Retained PBMC3k input. Press Enter or Space to select.', exact: true }).focus(); await page.keyboard.press('Enter');
     await nav(/^Pipelines,/); const library = page.getByRole('region', { name: 'Workflow pipelines', exact: true });
     const recipeFile = path.join(directory, 'retained-review.pipeline.json'); fs.writeFileSync(recipeFile, JSON.stringify(material.recipe));
     await library.getByLabel('Workflow package file', { exact: true }).setInputFiles(recipeFile); await library.getByRole('button', { name: 'Install Retained PBMC3k review', exact: true }).click();

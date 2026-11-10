@@ -43,7 +43,7 @@ it('opens the exact saved question with a distinct current viewer and lazy permi
   expect(await screen.findByRole('cell', { name: 'donor α' }, { timeout: 5000 })).toBeVisible();
   expect(screen.getByRole('heading', { level: 1, name: props.state.record.package.analysis.name })).toBeVisible();
   expect(screen.getByText('Question retained in saved version 2.')).toBeVisible();
-  expect(screen.getByText('Saved analysis 2')).toBeVisible();
+  expect(screen.getByText('Dataset 2')).toBeVisible();
   expect(screen.getByText(/Published by Researcher α/)).toBeVisible();
   expect(screen.getByText('Signed in as Colleague β')).toBeVisible();
   expect(readSnapshotPublicationView).toHaveBeenCalledWith(props.state.target.projectId, props.state.target.analysisId,

@@ -124,11 +124,11 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
       {/* Parameters — always visible so user can re-cluster */}
       <div className="analysis-parameter-card card p-4 sm:p-6 mb-8 border-l-4 border-l-primary">
         <h3 className="font-bold flex items-center gap-2 text-text mb-5">
-          <Network size={18} className="text-primary" /> Clustering Parameters
+          Clustering parameters
         </h3>
         <div className="analysis-parameter-grid">
           <div>
-            <label htmlFor="cluster-algo" className="block text-xs text-textMuted mb-1.5 font-bold">Algorithm</label>
+            <label htmlFor="cluster-algo" className="block text-xs text-textMuted mb-1.5 font-medium">Algorithm</label>
             <select
               id="cluster-algo"
               value={algorithm}
@@ -141,7 +141,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
             <p className="text-xs text-textMuted mt-1">Louvain is the default.</p>
           </div>
           <div>
-            <label htmlFor="cluster-res" className="block text-xs text-textMuted mb-1.5 font-bold">Resolution</label>
+            <label htmlFor="cluster-res" className="block text-xs text-textMuted mb-1.5 font-medium">Resolution</label>
             <div className="analysis-resolution-row">
               <input
                 id="cluster-res"
@@ -154,7 +154,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
             <p className="text-xs text-slate-400 mt-1">Higher = more clusters. 0.4–1.2 typical range.</p>
           </div>
           <div>
-            <label htmlFor="cluster-dims" className="block text-xs text-textMuted mb-1.5 font-bold">PC Dimensions</label>
+            <label htmlFor="cluster-dims" className="block text-xs text-textMuted mb-1.5 font-medium">PC Dimensions</label>
             <input
               id="cluster-dims"
               type="number" value={dims} min={5} max={50}
@@ -167,12 +167,11 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
 
         <details className="mt-6 border-t border-border/50 pt-4 group">
           <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-textMuted hover:text-text transition-colors list-none">
-            <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" />
-            <SlidersHorizontal size={14} className="text-primary" /> Advanced Options
+            <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" /> Advanced options
           </summary>
           <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 analysis-advanced-grid">
             <div>
-              <label htmlFor="cluster-k" className="block text-xs text-textMuted mb-1.5 font-bold">k Neighbors (KNN)</label>
+              <label htmlFor="cluster-k" className="block text-xs text-textMuted mb-1.5 font-medium">k Neighbors (KNN)</label>
               <input
                 id="cluster-k"
                 type="number" value={kParam} min={5} max={100}
@@ -182,7 +181,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
               <p className="text-xs text-slate-400 mt-1">Number of nearest neighbors to find (default: 20)</p>
             </div>
             <div>
-              <label htmlFor="cluster-nstart" className="block text-xs text-textMuted mb-1.5 font-bold">Number of Starts</label>
+              <label htmlFor="cluster-nstart" className="block text-xs text-textMuted mb-1.5 font-medium">Number of Starts</label>
               <input
                 id="cluster-nstart"
                 type="number" value={nStart} min={1} max={100}
@@ -211,19 +210,19 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
           {/* Summary */}
           <div className="analysis-metrics">
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted font-bold mb-1">Clusters</div>
-              <div className="text-2xl font-black text-primary">{result.result?.n_clusters}</div>
+              <div className="text-xs text-textMuted font-medium mb-1">Clusters</div>
+              <div className="text-2xl font-semibold text-primary">{result.result?.n_clusters}</div>
             </div>
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted font-bold mb-1">Algorithm</div>
+              <div className="text-xs text-textMuted font-medium mb-1">Algorithm</div>
               <div className="text-lg font-bold text-text">{result.result?.algorithm}</div>
             </div>
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted font-bold mb-1">Resolution</div>
-              <div className="text-2xl font-black text-text">{result.result?.resolution}</div>
+              <div className="text-xs text-textMuted font-medium mb-1">Resolution</div>
+              <div className="text-2xl font-semibold text-text">{result.result?.resolution}</div>
             </div>
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted font-bold mb-1">PCs Used</div>
+              <div className="text-xs text-textMuted font-medium mb-1">PCs Used</div>
               <div className="text-lg font-bold text-text">1:{result.result?.dims_used}</div>
             </div>
           </div>

@@ -10,7 +10,7 @@ const { chromium } = require('playwright');
 
 const ROOT = path.resolve(__dirname, '..');
 const LEGACY_WORKFLOW = Object.freeze({
-  format: 'traceomics-workflow', schemaVersion: 1, id: 'browser-summary', name: 'Browser cell summary', version: '1.0.0', description: 'Count cells from the selected saved analysis.',
+  format: 'traceomics-workflow', schemaVersion: 1, id: 'browser-summary', name: 'Browser cell summary', version: '1.0.0', description: 'Count cells from the selected dataset.',
   runtime: { language: 'r', profileId: 'test-profile' }, files: { 'summary.R': 'write_output("summary", list(cells = ncol(inputs$analysis)))' },
   steps: [{ id: 'summary', label: 'Summary', entry: 'summary.R', inputs: { analysis: { from: 'input.analysis', type: 'rds' } }, parameters: [], outputs: { summary: { type: 'metrics', label: 'Cell count' } } }],
   tabs: [{ id: 'summary', label: 'Summary', step: 'summary', plots: [] }],
@@ -128,7 +128,7 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     const result = await verifyRecipeContractUi({ page, verifyLegacyOpen: async workflow => {
       await page.waitForFunction(() => window.__openedWorkflow?.id === 'legacy-browser-instance');
       assert(requests.length === 1 && same(requests[0].workflow, workflow), 'The legacy package changed or an unsupported recipe was submitted.');
-      assert(requests[0].body.analysisObjectId === 'analysis-browser', 'The selected saved analysis was not bound.');
+      assert(requests[0].body.analysisObjectId === 'analysis-browser', 'The selected dataset was not bound.');
     } });
     assert(pageErrors.length === 0, 'Browser component errors: ' + pageErrors.join('; '));
     console.log(JSON.stringify(result));

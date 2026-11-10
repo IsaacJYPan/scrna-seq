@@ -1,14 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  AlertTriangle, Archive, Briefcase, Clock, FileText,
-  GitBranch, ImageIcon, Loader2, RefreshCw,
-} from 'lucide-react';
+import { AlertTriangle, Archive, Briefcase, GitBranch, Loader2, RefreshCw } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import ArtifactInspector from '../components/ArtifactInspector';
 import ExecutionHistory from '../components/ExecutionHistory';
 import RunMonitor from '../components/RunMonitor';
 import SubmissionRecovery from '../components/SubmissionRecovery';
 import PageHeader from '../components/PageHeader';
+import RefreshButton from '../components/RefreshButton';
 
 function formatDate(value) {
   if (!value) return 'Unknown';
@@ -94,7 +92,7 @@ function badgeClass(tone = 'slate') {
 
 function StatusBadge({ children, tone = 'slate' }) {
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold ${badgeClass(tone)}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${badgeClass(tone)}`}>
       {children}
     </span>
   );
@@ -112,7 +110,7 @@ const JOB_LABELS = {
   'cellchat.infer.v1': 'CellChat candidate analysis',
   'explore.summarize.v1': 'Exploratory analysis',
   'condition.pseudobulk_de.v1': 'Condition comparison',
-  'expert.r.v1': 'Advanced analysis',
+  'expert.r.v1': 'R console',
 };
 
 const ARTIFACT_LABELS = {
@@ -145,7 +143,7 @@ const PROVENANCE_LABELS = {
   'cellchat.infer.v1': 'CellChat candidate analysis',
   'explore.summarize.v1': 'Exploratory analysis',
   'condition.pseudobulk_de.v1': 'Condition comparison',
-  'expert.r.v1': 'Advanced analysis',
+  'expert.r.v1': 'R console',
 };
 
 function displayJobLabel(jobType) {
@@ -173,15 +171,12 @@ function displayStatus(status) {
   return labels[status] || 'Unknown';
 }
 
-function Section({ title, icon, subtitle, children }) {
+function Section({ title, subtitle, children }) {
   return (
     <section className="space-y-3">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-            {icon}
-            {title}
-          </h3>
+          <h3 className="text-lg font-semibold text-text">{title}</h3>
           {subtitle && <p className="mt-1 text-sm text-textMuted">{subtitle}</p>}
         </div>
       </div>
@@ -192,10 +187,9 @@ function Section({ title, icon, subtitle, children }) {
 
 function EmptyState({ title, children }) {
   return (
-    <div className="rounded-lg border border-dashed border-border p-6 text-center">
-      <p className="font-bold text-text">{title}</p>
-      <p className="mt-2 text-sm text-textMuted">{children}</p>
-    </div>
+    <p className="text-sm text-textMuted">
+      {title}.{children ? <> {children}</> : null}
+    </p>
   );
 }
 
@@ -211,8 +205,8 @@ function JobList({
   userId,
   onRetry,
   retryState,
-  emptyTitle = 'No analysis runs yet',
-  emptyCopy = 'No recorded analysis runs are associated with this analysis.',
+  emptyTitle = 'No runs yet',
+  emptyCopy = '',
 }) {
   if (!jobs.length) {
     return (
@@ -223,7 +217,7 @@ function JobList({
   }
 
   const analysisNamesById = new Map(analysisObjects.map((analysis) => [
-    analysis.id, analysis.displayName || analysis.name || 'Saved analysis',
+    analysis.id, analysis.displayName || analysis.name || 'Dataset',
   ]));
   const jobsById = new Map(jobs.map((job) => [job.id, job]));
   const retryChildrenBySource = new Map(
@@ -244,7 +238,7 @@ function JobList({
         const canRetry = Boolean(onRetry) && retryEligible;
         const activeRetry = retryState?.sourceJobId === job.id ? retryState : null;
         return (
-        <div key={job.id} className="rounded-lg border border-border bg-surface p-4">
+        <div key={job.id} className="panel">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex flex-wrap items-center gap-2">
@@ -307,9 +301,7 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
   const [downloadState, setDownloadState] = useState(null);
   if (!artifacts.length) {
     return (
-      <EmptyState title="No saved results yet">
-        This project has no saved versions, summaries, or result tables to show yet.
-      </EmptyState>
+      <EmptyState title="No saved results yet" />
     );
   }
 
@@ -331,7 +323,7 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
     <div tabIndex={0} role="region" aria-label="Saved results table"
       className="overflow-x-auto rounded-lg border border-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2">
       <table className="min-w-[560px] w-full text-left text-xs">
-        <thead className="bg-slate-800 text-[10px] font-bold text-textMuted">
+        <thead className="bg-slate-800 text-xs font-medium text-textMuted">
           <tr>
             <th className="p-3">Saved result</th>
             <th className="p-3">Status</th>
@@ -435,16 +427,14 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
 function ProvenanceList({ provenance }) {
   if (!provenance.length) {
     return (
-      <EmptyState title="No recorded analysis steps yet">
-        No recorded analysis steps are available for this project yet.
-      </EmptyState>
+      <EmptyState title="No recorded analysis steps yet" />
     );
   }
 
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       {provenance.map(record => (
-        <div key={record.id} className="rounded-lg border border-border bg-surface p-4">
+        <div key={record.id} className="panel">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-bold text-text">Recorded analysis step</p>
             <StatusBadge tone="blue">{displayProvenanceLabel(record.operation)}</StatusBadge>
@@ -461,16 +451,14 @@ function ProvenanceList({ provenance }) {
 function LineageSummary({ lineage, selectedObjectId }) {
   if (!selectedObjectId) {
     return (
-      <EmptyState title="No analysis selected">
-        Select a saved analysis to view its recorded lineage.
+      <EmptyState title="No dataset selected">
+        Select one on the Projects page to see its lineage.
       </EmptyState>
     );
   }
   if (!lineage) {
     return (
-      <EmptyState title="No lineage graph available">
-        This analysis has no recorded relationships yet.
-      </EmptyState>
+      <EmptyState title="No recorded relationships yet" />
     );
   }
 
@@ -479,9 +467,9 @@ function LineageSummary({ lineage, selectedObjectId }) {
 
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      <div className="rounded-lg border border-border bg-surface p-4">
+      <div className="panel">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h4 className="text-sm font-bold text-text">Saved analyses</h4>
+          <h4 className="text-sm font-bold text-text">Datasets</h4>
           <StatusBadge tone={lineage.truncated ? 'amber' : 'green'}>{lineage.truncated ? 'truncated' : 'bounded'}</StatusBadge>
         </div>
         {nodes.length === 0 ? (
@@ -490,14 +478,14 @@ function LineageSummary({ lineage, selectedObjectId }) {
           <div className="space-y-2">
             {nodes.map(node => (
               <div key={node.id} className="rounded border border-border/60 bg-black/10 p-3">
-                <div className="text-sm font-bold text-text">{node.label || 'Saved analysis'}</div>
-                <div className="mt-1 text-xs text-textMuted">Saved analysis</div>
+                <div className="text-sm font-bold text-text">{node.label || 'Dataset'}</div>
+                <div className="mt-1 text-xs text-textMuted">Dataset</div>
               </div>
             ))}
           </div>
         )}
       </div>
-      <div className="rounded-lg border border-border bg-surface p-4">
+      <div className="panel">
         <h4 className="mb-3 text-sm font-bold text-text">Edges</h4>
         {edges.length === 0 ? (
           <p className="text-sm text-textMuted">No recorded relationships for this analysis.</p>
@@ -520,16 +508,14 @@ function LineageSummary({ lineage, selectedObjectId }) {
 function FigureList({ figures }) {
   if (!figures.length) {
     return (
-      <EmptyState title="No project figure metadata yet">
-        Project-scoped figure metadata is readable here when present. Figure bytes and downloads are not exposed.
-      </EmptyState>
+      <EmptyState title="No figures yet" />
     );
   }
 
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       {figures.map(figure => (
-        <div key={figure.id} className="rounded-lg border border-border bg-surface p-4">
+        <div key={figure.id} className="panel">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-bold text-text">{figure.title || 'Saved figure'}</p>
             <StatusBadge tone="blue">{figure.plotType || 'Figure'}</StatusBadge>
@@ -878,10 +864,10 @@ export default function ProjectHistory({
 
   if (!activeProjectId) {
     return (
-      <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
-        <div className="mx-auto max-w-5xl">
+      <div className="page-scroll custom-scrollbar">
+        <div className="page-column">
           <EmptyState title="Select a project">
-            Analysis runs, saved results, provenance, figures, and lineage are scoped to a project.
+            Runs and results are listed per project.
           </EmptyState>
         </div>
       </div>
@@ -889,36 +875,13 @@ export default function ProjectHistory({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
-      <div className="mx-auto max-w-6xl space-y-5">
-        <PageHeader title="Runs & Results" icon={Briefcase} description="Review recorded analysis history, saved results, and reproducible branches." actions={
-          <button
-            onClick={loadHistory}
-            disabled={historyState.loading}
-            className="btn btn-secondary inline-flex items-center gap-2 text-sm"
-          >
-            {historyState.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-            Refresh
-          </button>
+    <div className="page-scroll custom-scrollbar">
+      <div className="page-column space-y-8">
+        <PageHeader title="Runs & Results" icon={Briefcase} titleAction={<RefreshButton onClick={loadHistory} disabled={historyState.loading} loading={historyState.loading} />} />
 
-        } />
-
-        <div className="rounded-lg border border-border bg-surface/40 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-3 text-sm">
-            <div>
-              <div className="text-[10px] font-bold text-textMuted">Project</div>
-              <div className="font-bold text-text">{activeProject?.name || 'Selected project'}</div>
-            </div>
-            <div>
-              <div className="text-[10px] font-bold text-textMuted">Selected analysis</div>
-              <div className="text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
-            </div>
-            <details className="text-sm">
-              <summary className="cursor-pointer text-primary hover:underline">Visibility &amp; privacy</summary>
-              <p className="mt-2 max-w-md text-xs text-textMuted">History access does not open another researcher’s private workspace.</p>
-            </details>
-          </div>
-        </div>
+        <p className="text-sm text-textMuted">
+          Selected dataset: <span className="font-medium text-text">{selectedObject?.displayName || selectedObject?.name || 'none'}</span>
+        </p>
 
         <SubmissionRecovery projectId={activeProjectId} userId={userId} />
 
@@ -927,7 +890,6 @@ export default function ProjectHistory({
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                  <Archive size={18} className="text-primary" />
                   Restore a saved version
                 </h3>
                 <p className="mt-1 max-w-3xl text-sm text-textMuted">
@@ -990,14 +952,14 @@ export default function ProjectHistory({
           </div>
         ) : (
           <>
-            <div role="group" aria-label="Selected analysis counts" className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border pb-3 text-xs text-textMuted">
+            {(selectedJobs.length + selectedArtifacts.length + historyState.provenance.length + (historyState.lineage?.edges?.length || 0)) > 0 && <div role="group" aria-label="Selected analysis counts" className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border pb-3 text-xs text-textMuted">
               <span><strong className="text-text">{selectedJobs.length}</strong> selected run{selectedJobs.length === 1 ? '' : 's'}</span>
               <span><strong className="text-text">{selectedArtifacts.length}</strong> selected result{selectedArtifacts.length === 1 ? '' : 's'}</span>
               <span><strong className="text-text">{historyState.provenance.length}</strong> project records</span>
               <span><strong className="text-text">{historyState.lineage?.edges?.length || 0}</strong> lineage links</span>
-            </div>
+            </div>}
 
-            <Section title="Selected Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Only runs whose input or saved result is the selected analysis are shown here.">
+            <Section title="Runs for this dataset">
               <JobList
                 jobs={selectedJobs}
                 analysisObjects={currentWs?.objects || []}
@@ -1007,7 +969,7 @@ export default function ProjectHistory({
               />
             </Section>
 
-            <Section title="Selected Analysis Results" icon={<Archive size={18} className="text-primary" />} subtitle="Only saved results associated with the selected analysis are shown here. Reviewed result tables and Expert R bundles have authenticated, audited downloads; saved versions are never downloadable.">
+            <Section title="Saved results for this dataset">
               <ArtifactList
                 artifacts={selectedArtifacts}
                 jobs={historyState.jobs}
@@ -1025,7 +987,7 @@ export default function ProjectHistory({
 
             {!historyState.loading && <RunMonitor key={`monitor:${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />}
 
-            <div className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="space-y-2">
               <button
                 type="button"
                 aria-expanded={executionHistoryOpen}
@@ -1034,13 +996,9 @@ export default function ProjectHistory({
                   setExecutionHistoryMounted(true);
                   setExecutionHistoryOpen(open => !open);
                 }}
-                className="flex min-h-10 w-full items-center justify-between gap-3 text-left"
+                className="block min-h-10 w-full text-left"
               >
-                <span>
-                  <span className="block font-semibold text-text">Execution history</span>
-                  <span className="block text-xs text-textMuted">Recorded inputs, methods, environments, and results</span>
-                </span>
-                <span className="text-sm text-primary">{executionHistoryOpen ? 'Hide details' : 'Show details'}</span>
+                <span className="disclosure-title text-base font-semibold text-text">Execution history<span className="sr-only"> {executionHistoryOpen ? 'Hide details' : 'Show details'}</span></span>
               </button>
               <div id="execution-history-panel" hidden={!executionHistoryOpen} className="mt-3">
                 {executionHistoryMounted && (
@@ -1049,51 +1007,45 @@ export default function ProjectHistory({
               </div>
             </div>
 
-            <details className="rounded-lg border border-border bg-surface/40 p-4">
-              <summary className="cursor-pointer font-medium text-text">Inspect or import artifact files</summary>
+            <details className="space-y-2">
+              <summary className="cursor-pointer text-base font-semibold text-text">Inspect or import artifact files</summary>
               <p className="mt-2 mb-4 text-sm text-textMuted">Imports stay private. Inspect exact saved versions or add a file without changing earlier contents.</p>
               <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
             </details>
 
             {(otherJobs.length > 0 || otherArtifacts.length > 0) && (
-              <details className="rounded-lg border border-border bg-surface/50 p-4">
-                <summary className="cursor-pointer font-bold text-text">
+              <details className="space-y-2">
+                <summary className="cursor-pointer text-base font-semibold text-text">
                   Other project activity ({otherJobs.length} runs, {otherArtifacts.length} results)
                 </summary>
                 <p className="mb-3 mt-2 text-sm text-textMuted">
-                  These records belong to other saved analyses in this project. Select the relevant analysis before taking a recovery action.
+                  These records belong to other datasets in this project. Select the relevant analysis before taking a recovery action.
                 </p>
                 <JobList
                   jobs={otherJobs}
                   analysisObjects={currentWs?.objects || []}
                   userId={userId}
                   emptyTitle="No other project runs"
-                  emptyCopy="Only saved results from other analyses are recorded."
+                  emptyCopy="Only their saved results are recorded."
                 />
               </details>
             )}
 
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-5 text-sm text-textMuted">
-              <div className="mb-2 flex items-center gap-2 font-bold text-text">
-                <GitBranch size={17} className="text-primary" />
-                How branches support parallel, reproducible work
-              </div>
-              <p>
-                The source analysis and saved version remain unchanged. Creating a branch opens that version in a new analysis owned by the collaborator, within only that collaborator&apos;s private analysis workspace. Both branches can then evolve independently while preserving their shared lineage.
-              </p>
-            </div>
-
-            <Section title="Lineage" icon={<GitBranch size={18} className="text-primary" />} subtitle="Recorded relationships between saved analyses.">
+            <Section title="Branches and derived datasets" subtitle="A branch is a new dataset in your workspace; the original is unchanged.">
               <LineageSummary lineage={historyState.lineage} selectedObjectId={selectedObjectId} />
             </Section>
 
-            <Section title="Project Provenance" icon={<FileText size={18} className="text-primary" />} subtitle="Project-scoped provenance records. Scripts and parameters are not expanded here.">
-              <ProvenanceList provenance={historyState.provenance} />
-            </Section>
-
-            <Section title="Project Figures" icon={<ImageIcon size={18} className="text-primary" />} subtitle="Figure metadata only. File bytes and downloads are not exposed.">
-              <FigureList figures={historyState.figures} />
-            </Section>
+            <details className="space-y-2">
+              <summary className="cursor-pointer text-base font-semibold text-text">Project records</summary>
+              <div className="mt-4 space-y-6">
+                <Section title="Provenance">
+                  <ProvenanceList provenance={historyState.provenance} />
+                </Section>
+                <Section title="Figures">
+                  <FigureList figures={historyState.figures} />
+                </Section>
+              </div>
+            </details>
 
           </>
         )}

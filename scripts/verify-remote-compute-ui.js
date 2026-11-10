@@ -81,7 +81,7 @@ async function savedSeurat(database, service, image) {
 function remoteRecipe(profileId) {
   return {
     format: 'traceomics-workflow', schemaVersion: 1, id: 'remote-inspection', name: 'Remote inspection',
-    version: '1.0.0', description: 'Subset a saved analysis on the selected service and inspect a bounded summary.',
+    version: '1.0.0', description: 'Subset a dataset on the selected service and inspect a bounded summary.',
     runtime: { language: 'r', profileId },
     steps: [{ id: 'subset', label: 'Remote subset', entry: 'subset.R',
       inputs: { analysis: { from: 'input.analysis', type: 'rds' } },
@@ -295,10 +295,10 @@ async function main() {
       assert(![job?.claim_token, job?.worker_id, service.storageRoot].filter(Boolean).some(secret => serialized.includes(secret)),
         'Run monitoring exposed a private claim, worker identity or absolute server path.');
     }
-    await workspace.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await workspace.getByRole('button', { name: /^R console,/ }).click();
     await workspace.getByRole('button', { name: 'Interactive console', exact: true }).click();
     const consoleUi = workspace.getByRole('region', { name: 'Private R console', exact: true });
-    await consoleUi.getByLabel('Initial saved analysis', { exact: true }).selectOption(fixture.analysisId);
+    await consoleUi.getByLabel('Initial dataset', { exact: true }).selectOption(fixture.analysisId);
     await consoleUi.getByRole('button', { name: 'Start private session', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor({ timeout: 125_000 });
     await consoleUi.getByLabel('R console source').fill('stopifnot(inherits(obj,"Seurat")); remote_cells<-ncol(obj); cat("Remote cells:",remote_cells); display_table(data.frame(cells=remote_cells,features=nrow(obj)),name="Remote dimensions"); plot(seq_len(remote_cells))');
@@ -373,9 +373,9 @@ async function main() {
     const explore = workspace.locator('[data-destination="explore"]');
     if (!await explore.isVisible()) await workspace.getByRole('button', { name: 'Explore', exact: true }).click();
     await explore.click();
-    await workspace.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor();
+    await workspace.getByRole('heading', { name: 'Exploratory analysis', exact: true }).waitFor();
     await waitFor(() => workspace.getByRole('button', { name: 'Run recipe', exact: true }).isEnabled(),
-      'The connected saved analysis never enabled its guided recipe.', 30_000);
+      'The connected dataset never enabled its guided recipe.', 30_000);
     const [guidedResponse] = await Promise.all([
       workspace.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/jobs')),
       workspace.getByRole('button', { name: 'Run recipe', exact: true }).click(),
@@ -556,7 +556,7 @@ async function main() {
       catch (error) { return error.code; }
     }, { projectId: service.project.id, analysisId: fixture.analysisId });
     assert(denied === 'TARGET_DISCONNECTED' && requests.length === requestsBeforeBlockedSubmit, 'Disconnected compute submission was not blocked before browser transport.');
-    await workspace.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await workspace.getByRole('button', { name: /^R console,/ }).click();
     await workspace.getByRole('button', { name: 'Interactive console', exact: true }).click();
     const disconnectedConsole = workspace.getByRole('region', { name: 'Private R console', exact: true });
     await disconnectedConsole.getByRole('button', { name: 'Run R cell', exact: true }).waitFor();

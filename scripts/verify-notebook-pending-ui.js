@@ -65,7 +65,7 @@ async function main() {
     await target.goto(service.endpoint);
     await target.getByPlaceholder('researcher@lab.edu').fill(account.email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
   }
@@ -78,7 +78,7 @@ async function main() {
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openDocuments(target, analysis) {
-    await navigate(target, /^Data workspace,/);
+    await navigate(target, /^Projects,/);
     await target.getByRole('button', { name: exact(service.project.name) }).click();
     await navigate(target, 'Analyses');
     const overview = target.getByRole('button', { name: 'Analysis overview', exact: true });

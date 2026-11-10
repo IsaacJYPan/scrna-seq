@@ -235,7 +235,7 @@ it('presents mixed v2 attached and linked findings with honest context and just 
   await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2));
   const finding = within(screen.getByLabelText('Retained prepared finding'));
   expect(finding.getByRole('heading', { name: 'Caption supplied for a linked result' })).toBeVisible();
-  expect(finding.getByText('measured.csv · Linked in saved analysis 2')).toBeVisible(); expect(finding.getByText('Caption supplied for this snapshot.')).toBeVisible();
+  expect(finding.getByText('measured.csv · Linked in dataset 2')).toBeVisible(); expect(finding.getByText('Caption supplied for this snapshot.')).toBeVisible();
   expect(finding.queryByText(/Saved attachment revision|Saved revision/)).not.toBeInTheDocument();
   expect(screen.getAllByLabelText('Retained prepared finding')).toHaveLength(1); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
 });
@@ -326,7 +326,7 @@ it('presents typed findings with supplied captions, frozen declared meaning and 
   fireEvent.click(screen.getByRole('button', { name: /2\. Supplied QC interpretation/ })); await screen.findByLabelText('Saved scalar metrics');
   const section = within(screen.getByLabelText('Retained prepared finding'));
   expect(section.getByRole('heading', { name: 'Supplied QC interpretation' })).toBeVisible();
-  expect(section.getByText('recorded.json · Linked in saved analysis 2')).toBeVisible();
+  expect(section.getByText('recorded.json · Linked in dataset 2')).toBeVisible();
   expect(section.getByText('Caption supplied for this snapshot.')).toBeVisible();
   expect(section.getByRole('heading', { name: 'Recorded QC metrics' })).toBeVisible(); expect(section.getByText('Coverage (%)')).toBeVisible();
   expect(section.queryByText(/Saved attachment revision|Saved revision|Producing workflow|Captured settings/)).not.toBeInTheDocument();
@@ -385,9 +385,9 @@ it('renders selected captured settings beside a supplied caption without inventi
   const value = await capturedFindingFixture({ notes: { summary: 'A supplied rationale, separate from recorded settings.', decisions: null, limitations: null } });
   render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
   const finding = within(screen.getByLabelText('Retained prepared finding'));
-  expect(finding.getByText('recorded.json · Recorded in workflow capture · Saved analysis 2')).toBeVisible();
+  expect(finding.getByText('recorded.json · Recorded in workflow capture · Dataset 2')).toBeVisible();
   expect(finding.getByText('Caption supplied for this snapshot.')).toBeVisible(); expect(screen.getByText('A supplied rationale, separate from recorded settings.')).toBeVisible();
-  expect(finding.queryByText(/Saved attachment revision|Linked in saved analysis/)).not.toBeInTheDocument();
+  expect(finding.queryByText(/Saved attachment revision|Linked in dataset/)).not.toBeInTheDocument();
   const context = openRecordedContext(), settings = within(context.getByRole('region', { name: 'Recorded settings' }));
   expect(settings.getAllByRole('term').map(node => node.textContent)).toEqual(['Include empty conditions', 'Minimum cells']);
   expect(settings.getAllByRole('definition').map(node => node.textContent)).toEqual(['false', '0']);
@@ -470,7 +470,7 @@ it('clears recorded method/settings/environment evidence with the published pack
 it('presents deliberately included inert source as its own supplied-caption finding with distinct source and view identities', async () => {
   const value = await inertFindingFixture(); render(<RetainedSnapshotFindings {...value.props} />);
   await screen.findByLabelText('Saved text preview');
-  expect(screen.getByRole('button', { name: /1\. Selected inert source text/ })).toHaveTextContent('Source text included · Saved analysis 2');
+  expect(screen.getByRole('button', { name: /1\. Selected inert source text/ })).toHaveTextContent('Source text included · Dataset 2');
   const detail = within(screen.getByLabelText('Retained prepared finding'));
   expect(detail.getByRole('heading', { name: 'Selected inert source text' })).toBeVisible(); expect(detail.getByText('Caption supplied for this snapshot.')).toBeVisible();
   expect(detail.queryByLabelText('Recorded workflow context')).not.toBeInTheDocument();
@@ -509,7 +509,7 @@ it('uses current colleague publication authority for included text and unmounts 
   expect(readView.mock.calls[0][2]).toBe(publicId); expect(readView.mock.calls[0][3].source.ownerUserId).toBe(7); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
   expect(document.querySelector('script')).toBeNull();
   view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
-  expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument(); expect(screen.queryByText('Source text included · Saved analysis 2')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument(); expect(screen.queryByText('Source text included · Dataset 2')).not.toBeInTheDocument();
   expect(readView).toHaveBeenCalledOnce();
 });
 

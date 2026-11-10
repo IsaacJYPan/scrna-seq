@@ -79,7 +79,7 @@ describe('Workspace backend-backed project/object UI', () => {
     fireEvent.click(trigger);
     const inspect = screen.getByRole('button', { name: 'Inspect Data' });
     expect(inspect.closest('div[aria-labelledby]')?.parentElement).toBe(document.body);
-    fireEvent.mouseLeave(screen.getByRole('group', { name: /Saved analysis PBMC 3k/ }));
+    fireEvent.mouseLeave(screen.getByRole('group', { name: /Dataset PBMC 3k/ }));
     expect(inspect).toBeVisible();
     inspect.focus();
     fireEvent.keyDown(inspect, { key: 'Escape' });
@@ -111,17 +111,16 @@ describe('Workspace backend-backed project/object UI', () => {
     const update = view.props.updateActiveWorkspace.mock.calls.at(-1)[0];
     expect(update.objects).toEqual([]);
     view.rerender(<Workspace {...view.props} currentWs={{ ...workspaceWithAnalysis, ...update }} />);
-    expect(screen.getByRole('heading', { name: 'Saved analyses 0' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Datasets' })).toHaveFocus();
   });
 
   it('does not show a fake Default Project when no projects exist', () => {
     renderWorkspace();
 
-    expect(screen.getByText('No projects yet')).toBeInTheDocument();
-    expect(screen.getByText(/Create a project before loading a saved analysis/i)).toBeInTheDocument();
+    expect(screen.getByText(/No projects yet. Create one to start adding datasets./i)).toBeInTheDocument();
     expect(screen.queryByText('Default Project')).not.toBeInTheDocument();
     expect(screen.queryByText('proj-default')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Add analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Add dataset/i })).not.toBeInTheDocument();
   });
 
   it('keeps analysis creation controls read-only for project viewers', () => {
@@ -133,17 +132,17 @@ describe('Workspace backend-backed project/object UI', () => {
       },
     });
 
-    expect(screen.getAllByRole('button', { name: /Add analysis/i })).toHaveLength(1);
-    for (const button of screen.getAllByRole('button', { name: /Add analysis/i })) {
+    expect(screen.getAllByRole('button', { name: /Add dataset/i })).toHaveLength(1);
+    for (const button of screen.getAllByRole('button', { name: /Add dataset/i })) {
       expect(button).toBeDisabled();
       fireEvent.click(button);
     }
     expect(screen.getAllByText(/project role is read-only/i).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: /Load analysis/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: /Load saved analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Load dataset/i })).not.toBeInTheDocument();
   });
 
-  it('shows saved analyses returned for the selected project after refresh', () => {
+  it('shows datasets returned for the selected project after refresh', () => {
     const { container } = renderWorkspace({
       currentWs: {
         ...baseWorkspace,
@@ -169,7 +168,7 @@ describe('Workspace backend-backed project/object UI', () => {
     expect(screen.getAllByText('PBMC 3k').length).toBeGreaterThan(0);
     expect(screen.getByText(/2,700 cells/i)).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Current analysis' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Saved analyses 1' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Datasets 1' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reload PBMC demo' })).toBeEnabled();
     expect(screen.queryByText(/No Objects in Project/i)).not.toBeInTheDocument();
     expect(container.textContent).not.toMatch(/ao_abc123|pbmc3k_demo|DB-backed|Live R/i);
@@ -222,8 +221,8 @@ describe('Workspace backend-backed project/object UI', () => {
       },
     });
 
-    expect(screen.getByText(/No analysis selected/i)).toBeInTheDocument();
-    expect(screen.getByText(/Select a saved analysis from the project list below/i)).toBeInTheDocument();
+    expect(screen.getByText(/No dataset selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a dataset from the project list below/i)).toBeInTheDocument();
     expect(screen.queryByText(/Data Info: Unselected PBMC/i)).not.toBeInTheDocument();
   });
 
@@ -247,7 +246,7 @@ describe('Workspace backend-backed project/object UI', () => {
       onAnalysisObjectLoaded,
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: /Add analysis/i })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /Add dataset/i })[0]);
     fireEvent.click(screen.getByRole('button', { name: /PBMC 3k Demo Dataset/i }));
 
     await waitFor(() => {
@@ -294,7 +293,7 @@ describe('Workspace backend-backed project/object UI', () => {
       onAnalysisObjectLoadFailed,
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: /Add analysis/i })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /Add dataset/i })[0]);
     fireEvent.click(screen.getByRole('button', { name: /PBMC 3k Demo Dataset/i }));
 
     await waitFor(() => {
@@ -364,7 +363,7 @@ describe('Workspace backend-backed project/object UI', () => {
       deploymentPolicy: { demoMode: true },
     });
     expect(screen.queryByRole('button', { name: /Reload PBMC demo/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/restore this saved analysis/)).toBeInTheDocument();
+    expect(screen.getByText(/restore this dataset/)).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('button', { name: 'Open Runs & Results', exact: true })[0]);
     expect(props.setActiveTab).toHaveBeenCalledWith('history');
     expect(window.electronAPI.apiRequest).not.toHaveBeenCalled();
@@ -384,7 +383,7 @@ describe('Workspace backend-backed project/object UI', () => {
       },
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: /Add analysis/i })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /Add dataset/i })[0]);
     expect(screen.getByRole('button', { name: /PBMC 3k Demo Dataset/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /10X H5 analysis workflow/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Local 10X Directory/i })).not.toBeInTheDocument();

@@ -61,7 +61,7 @@ export default function WorkflowLibrary({ userEmail, projectId, selectedObject, 
         }} />
       </label>
     </div>
-    <p className="mt-2 text-sm text-textMuted">Review and share versioned methods, inputs, analysis steps, and results. Supported workflows open on a saved analysis.</p>
+    <p className="mt-2 text-sm text-textMuted">Review and share versioned methods, inputs, analysis steps, and results. Supported workflows open on a dataset.</p>
     {error && <p role="alert" className="mt-3 text-danger">{error}</p>}
     {pending && <div className="mt-4 border-t border-border pt-4">
       <p className="font-medium">{pending.name} · {pending.version}</p><p className="text-sm text-textMuted">{pending.description}</p>

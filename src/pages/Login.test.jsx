@@ -20,7 +20,7 @@ describe('Login registration policy', () => {
   it('offers an explicitly public compute-free example without submitting login or starting a guest session', async () => {
     auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false, demoMode: true });
     render(<Login onLogin={vi.fn()} allowDemo={false} />);
-    const link = screen.getByRole('link', { name: 'Inspect a public saved example' });
+    const link = screen.getByRole('link', { name: 'View an example project' });
     expect(link.href).toBe(window.location.origin + '/#/examples/qc-retention/v1');
     expect(link).toHaveAttribute('target', '_blank'); expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     await screen.findByText(/Accounts are provisioned/);
@@ -46,7 +46,7 @@ describe('Login registration policy', () => {
 
     expect(await screen.findByText(/accounts are provisioned by your deployment administrator/i))
       .toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Sign Up' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign up' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /open workbench/i })).toBeInTheDocument();
   });
 
@@ -54,7 +54,7 @@ describe('Login registration policy', () => {
     auth.registrationPolicy.mockResolvedValue({ registrationEnabled: true });
     render(<Login onLogin={vi.fn()} />);
 
-    const signup = await screen.findByRole('button', { name: 'Sign Up' });
+    const signup = await screen.findByRole('button', { name: 'Sign up' });
     fireEvent.click(signup);
     expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
     expect(screen.getByText(/at least 15 characters/i)).toBeInTheDocument();
@@ -63,7 +63,7 @@ describe('Login registration policy', () => {
   it('requires the full passphrase length without claiming shorter passwords are strong', async () => {
     auth.registrationPolicy.mockResolvedValue({ registrationEnabled: true });
     render(<Login onLogin={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign Up' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign up' }));
     fireEvent.change(screen.getByLabelText('Full name'), { target: { value: 'Researcher' } });
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'researcher@example.org' } });
     const password = screen.getByLabelText('Password');
@@ -100,7 +100,7 @@ describe('Login registration policy', () => {
     render(<Login onLogin={vi.fn()} />);
 
     expect(await screen.findByText(/accounts are provisioned/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Sign Up' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign up' })).not.toBeInTheDocument();
   });
 
   it('keeps a named action while login is pending and announces a recoverable error', async () => {

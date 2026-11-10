@@ -66,7 +66,7 @@ function summary(value, viewer) {
   fields(value.selection, ['analysisVersion', 'analysisName', 'resultCount', 'documentCount', 'prerequisiteCount']);
   integer(value.selection.analysisVersion, 1, 2147483647);
   const name = value.selection.analysisName;
-  // Copied saved analysis names preserve the owning contract's codepoint bound.
+  // Copied dataset names preserve the owning contract's codepoint bound.
   if (typeof name !== 'string' || !name.isWellFormed() || !name || name !== name.trim() || [...name].length > 160
       || [...name].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) fail();
   integer(value.selection.resultCount, 1, A.results); integer(value.selection.documentCount, 0, A.documents);

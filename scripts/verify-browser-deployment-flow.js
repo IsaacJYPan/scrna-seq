@@ -125,7 +125,7 @@ async function startFakeR() {
 }
 
 async function signUp(page, { name, email, password }) {
-  await page.getByRole('button', { name: 'Sign Up', exact: true }).click();
+  await page.getByRole('button', { name: 'Sign up', exact: true }).click();
   await page.getByPlaceholder('Dr. Jane Doe').fill(name);
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
@@ -135,10 +135,10 @@ async function signUp(page, { name, email, password }) {
 }
 
 async function logIn(page, { email, password }) {
-  await page.getByRole('button', { name: 'Log In', exact: true }).click();
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: /Open Workbench/ }).click();
+  await page.getByRole('button', { name: /Open workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
 
@@ -237,14 +237,14 @@ async function main() {
     const projectName = `Browser Project ${suffix}`;
 
     await page.goto(origin, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: 'Log in', exact: true }).waitFor({ state: 'visible' });
     await signUp(page, second);
     await page.getByRole('button', { name: 'Log out' }).click();
-    await page.getByRole('button', { name: /Open Workbench/ }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: /Open workbench/ }).waitFor({ state: 'visible' });
 
     await signUp(page, owner);
-    await page.getByText('No projects yet', { exact: true }).waitFor({ state: 'visible' });
-    await page.getByRole('button', { name: 'Create Project', exact: true }).click();
+    await page.getByText(/^No projects yet\./).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: 'Create project', exact: true }).click();
     await page.getByPlaceholder('Project Name').fill(projectName);
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
@@ -277,7 +277,7 @@ async function main() {
       if (response.status() >= 500) serverErrors.push(`[analyst] ${response.status()} ${response.url()}`);
     });
     await analystPage.goto(origin, { waitUntil: 'domcontentloaded' });
-    await analystPage.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
+    await analystPage.getByRole('button', { name: 'Log in', exact: true }).waitFor({ state: 'visible' });
     await logIn(analystPage, second);
     await analystPage.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
     await analystPage.getByRole('button', { name: /^Collaborators/ }).click();
@@ -292,7 +292,7 @@ async function main() {
     await page.getByRole('button', { name: `Confirm remove ${second.email} from ${projectName}` })
       .click();
     await analystPage.reload({ waitUntil: 'domcontentloaded' });
-    await analystPage.getByText('No projects yet', { exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+    await analystPage.getByText(/^No projects yet\./).waitFor({ state: 'visible', timeout: 15000 });
     assert(await analystPage.getByText(projectName, { exact: true }).count() === 0,
       'Removed analyst retained project visibility after a real browser refresh.');
 
@@ -310,7 +310,7 @@ async function main() {
     assert(ownerCookie?.httpOnly === true, 'Browser session cookie is not HttpOnly.');
 
     await page.getByRole('button', { name: 'Log out' }).click();
-    await page.getByRole('button', { name: /Open Workbench/ }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: /Open workbench/ }).waitFor({ state: 'visible' });
     assert(!(await context.cookies()).some((cookie) => cookie.name === 'traceomics_session'),
       'Logout did not clear the browser session cookie.');
 

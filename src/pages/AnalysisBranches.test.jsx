@@ -66,7 +66,7 @@ describe('AnalysisBranches', () => {
     };
     render(<AnalysisBranches currentWs={sharedWorkspace} datasetInfo={sharedWorkspace.objects[1]} userId={1} setActiveTab={setActiveTab} />);
 
-    const source = await screen.findByRole('combobox', { name: /Branch source saved analysis/i });
+    const source = await screen.findByRole('combobox', { name: /Branch source dataset/i });
     expect(source).toHaveValue('ao_abc123');
     expect(screen.queryByRole('option', { name: 'PI checkpoint' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Open Runs & Results/i }));

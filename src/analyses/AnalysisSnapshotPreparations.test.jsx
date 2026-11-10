@@ -280,7 +280,7 @@ it('prepares distinct direct five-point and captured nine-point samples without 
   expect(state.requests.every(request => request.pathname === base || request.pathname === base + '/options')).toBe(true);
 });
 
-it('preserves a separate point bound and caption for each chosen saved analysis version', async () => {
+it('preserves a separate point bound and caption for each chosen dataset version', async () => {
   offerEmbedding(); await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
   fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: '5' } });
   fireEvent.change(screen.getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Original five points' } });
@@ -429,7 +429,7 @@ it('keeps a missing captured source local to its chooser without revoking unrela
   expect(screen.queryByText('Access to this private preparation is unavailable. Reconnect to the same workspace and refresh.')).not.toBeInTheDocument(); expect(writes()).toHaveLength(0);
 });
 
-it('ignores an old capture reply after switching the chosen saved analysis version', async () => {
+it('ignores an old capture reply after switching the chosen dataset version', async () => {
   offerCaptured(); const held = deferred(); state.onCapturedOptions = () => held.promise;
   await frame(); await inspectCaptured(); await waitFor(() => expect(state.requests.some(request => request.query.get('kind') === 'captured-workflow-outputs')).toBe(true));
   const request = state.requests.find(value => value.query.get('kind') === 'captured-workflow-outputs');
@@ -556,25 +556,25 @@ it('does not let a held positive typed descriptor validation restore writes afte
   expect(screen.getByRole('button', { name: 'Add linked table excerpt' })).toBeDisabled(); expect(writes()).toHaveLength(0);
 });
 
-it('keeps linked caption, row window and reference-only selections separate for each saved analysis version', async () => {
+it('keeps linked caption, row window and reference-only selections separate for each dataset version', async () => {
   state.onLinkedOptions = request => {
     const version = Number(request.query.get('analysisVersion'));
     return snapshotOptions('analysis-references', true, [linkedOption(version)], version);
   };
   const storage = vi.spyOn(Storage.prototype, 'setItem'); await frame();
-  let linked = await screen.findByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  let linked = await screen.findByRole('region', { name: 'Linked in dataset 2', exact: true });
   fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
   fireEvent.change(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Keep my old-version interpretation' } });
   fireEvent.change(within(linked).getByRole('spinbutton', { name: 'First data row for linked finding 1' }), { target: { value: '8' } });
   fireEvent.click(within(linked).getByRole('button', { name: 'Include reference only', exact: true }));
   fireEvent.change(within(linked).getByRole('textbox', { name: 'Note for linked prerequisite 1' }), { target: { value: 'The contents require a separate data agreement.' } });
   fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
-  linked = screen.getByRole('region', { name: 'Linked in saved analysis 1', exact: true });
+  linked = screen.getByRole('region', { name: 'Linked in dataset 1', exact: true });
   expect(within(linked).queryByRole('textbox', { name: 'Caption for linked finding 1' })).not.toBeInTheDocument();
   fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
   expect(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Linked measured result for version 1');
   fireEvent.click(screen.getByRole('radio', { name: /Saved version 2/ }));
-  linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  linked = screen.getByRole('region', { name: 'Linked in dataset 2', exact: true });
   expect(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Keep my old-version interpretation');
   expect(within(linked).getByRole('spinbutton', { name: 'First data row for linked finding 1' })).toHaveValue(8);
   expect(within(linked).getByRole('textbox', { name: 'Note for linked prerequisite 1' })).toHaveValue('The contents require a separate data agreement.');
@@ -601,7 +601,7 @@ it('fences a late linked-options reply and can explicitly revisit a version whos
 it('keeps restricted prerequisites inert and requires an actual finding before preparation', async () => {
   const option = linkedOption(2, { label: 'Saved linked reference', viewFamily: null, referenceOnlyReason: 'restricted-or-unavailable' });
   state.onLinkedOptions = request => snapshotOptions('analysis-references', true, [option], Number(request.query.get('analysisVersion')));
-  await frame(); const linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  await frame(); const linked = screen.getByRole('region', { name: 'Linked in dataset 2', exact: true });
   fireEvent.click(await within(linked).findByRole('button', { name: 'Include reference only', exact: true }));
   expect(within(linked).queryByRole('button', { name: /Add linked/ })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Prepare private preview', exact: true })).toBeDisabled();
@@ -627,7 +627,7 @@ it('loads another saved version after a source-choice service failure while pres
 it('submits one explicit mixed v2 intent with supplied captions and reference-only prerequisites, keeping attached context exact', async () => {
   const restricted = linkedOption(4, { label: 'Saved restricted reference', viewFamily: null, referenceOnlyReason: 'restricted-or-unavailable' });
   state.onLinkedOptions = request => snapshotOptions('analysis-references', true, [linkedOption(2), restricted], Number(request.query.get('analysisVersion')));
-  await frame(); await choose(); const linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  await frame(); await choose(); const linked = screen.getByRole('region', { name: 'Linked in dataset 2', exact: true });
   fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
   fireEvent.change(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: '  Supplied snapshot finding\nwith context  ' } });
   fireEvent.click(within(screen.getByText('Saved restricted reference', { exact: true }).closest('li')).getByRole('button', { name: 'Include reference only', exact: true }));
@@ -646,7 +646,7 @@ it('retries only the original normalized v2 selection after a genuine missing ch
     if (writes().length === 1) throw new Error('The original request did not reach acceptance.');
     const record = linkedRecord(request.body); state.records.set(record.requestId, record); return record;
   };
-  await frame(); const linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  await frame(); const linked = screen.getByRole('region', { name: 'Linked in dataset 2', exact: true });
   fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
   const original = await submit(); await screen.findByRole('alert');
   expect(screen.queryByRole('button', { name: 'Retry original preparation', exact: true })).not.toBeInTheDocument();
@@ -739,7 +739,7 @@ it('never enables a retry after an unreadable GET or inconsistent accepted recei
   expect(screen.queryByRole('button', { name: 'Retry original preparation' })).not.toBeInTheDocument(); expect(writes()).toHaveLength(1);
 });
 
-it('pins saved analysis N when the working overview advances and excludes unsaved overview text', async () => {
+it('pins dataset N when the working overview advances and excludes unsaved overview text', async () => {
   const { rerender, props } = await frame(propsFor({ overviewDirty: true })); await choose();
   expect(screen.getByText('Unsaved overview edits are excluded from this preview.')).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: 'Return to save changes' })); expect(props.onReturnToSave).toHaveBeenCalledOnce();
@@ -821,7 +821,7 @@ it('retains current-reader metadata when only resuming write access is refused',
   state.onResume = () => { state.allowed = false; return failure(403, 'ANALYSIS_SNAPSHOT_WRITE_REQUIRED'); };
   await reviewSaved(); fireEvent.click(screen.getByRole('button', { name: 'Resume original preparation' })); await screen.findByRole('alert');
   fireEvent.click(screen.getByRole('button', { name: 'Saved preparations' }));
-  expect(await screen.findByText('PBMC saved question 2 · Saved analysis 2')).toBeVisible();
+  expect(await screen.findByText('PBMC saved question 2 · Dataset 2')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Open private preparation' })).toBeEnabled(); expect(writes('resume')).toHaveLength(1);
 });
 

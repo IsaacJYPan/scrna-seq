@@ -49,7 +49,7 @@ async function main() {
     });
     await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
     await page.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByText('Connection details', { exact: true }).waitFor();
     assert(observations.length === 0, 'Login started a readiness check without an explicit request.');
     const initial = (await database.query('SELECT (SELECT count(*) FROM jobs)::int AS jobs,(SELECT count(*) FROM private_r_kernels)::int AS kernels')).rows[0];
@@ -137,7 +137,7 @@ async function main() {
     await page.setViewportSize({ width: 1440, height: 1000 });
     const expand = page.getByRole('button', { name: 'Expand sidebar', exact: true });
     if (await expand.isVisible()) await expand.click();
-    await page.getByRole('button', { name: /^Advanced analysis,/ }).click(); await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
+    await page.getByRole('button', { name: /^R console,/ }).click(); await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
     const consoleUi = page.getByRole('region', { name: 'Private R console', exact: true });
     await consoleUi.getByRole('button', { name: 'Start private session', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor({ timeout: 125000 });

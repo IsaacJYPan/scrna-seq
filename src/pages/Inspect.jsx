@@ -125,7 +125,7 @@ function MetadataTab({ info }) {
               <span className="text-sm font-bold text-white font-mono">{toStr(col.name)}</span>
               <Badge color={toStr(col.type) === 'numeric' ? 'primary' : 'amber'}>{toStr(col.type)}</Badge>
             </div>
-            <div className="text-[11px] text-slate-400">
+            <div className="text-xs text-slate-400">
               {toStr(col.type) === 'numeric' ? (
                 <span>
                   <span className="text-slate-400">min </span><span className="text-slate-300">{col.min}</span>
@@ -254,7 +254,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         {legacyLiveMutationToolsEnabled && (
           <button
             onClick={() => { setMode('csv'); setResult(null); setError(null); }}
-            className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
+            className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-all ${
               mode === 'csv' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
             }`}
           >
@@ -263,7 +263,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         )}
         <button
           onClick={() => { setMode('map'); setResult(null); setError(null); }}
-          className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
+          className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-all ${
             mode === 'map' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
           }`}
         >
@@ -281,8 +281,8 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
       {mode === 'csv' && (
         <>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Import a CSV/TSV file and join its columns to the saved analysis by cell barcode.
-            The key column must contain barcodes exactly matching those in the saved analysis.
+            Import a CSV/TSV file and join its columns to the dataset by cell barcode.
+            The key column must contain barcodes exactly matching those in the dataset.
           </p>
 
       {/* File picker */}
@@ -309,7 +309,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         <>
           {/* Key column */}
           <div>
-            <label className="block text-[10px] font-bold text-slate-400 mb-1.5">
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
               Barcode / Key Column
             </label>
             <select
@@ -323,7 +323,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
 
           {/* Value columns */}
           <div>
-            <label className="block text-[10px] font-bold text-slate-400 mb-2">
+            <label className="block text-xs font-medium text-slate-400 mb-2">
               Columns to Import
             </label>
             <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
@@ -366,7 +366,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
 
           <div className="flex gap-4">
             <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-400 mb-1.5">
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
                 Source Column
               </label>
               <select
@@ -382,7 +382,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
             </div>
             
             <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-400 mb-1.5">
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
                 New Column Name
               </label>
               <input
@@ -397,7 +397,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
 
           {sourceCol && (
             <div>
-              <label className="block text-[10px] font-bold text-slate-400 mb-1.5">
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
                 Value Mapping
               </label>
               {loadingVals ? (
@@ -408,7 +408,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
                     <div key={value} className="flex items-center gap-3 bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
                       <div className="w-1/2 flex items-center justify-between px-2">
                         <span className="text-sm font-mono text-white truncate" title={value}>{value}</span>
-                        <span className="text-[10px] text-slate-400">{count?.toLocaleString()} cells</span>
+                        <span className="text-xs text-slate-400">{count?.toLocaleString()} cells</span>
                       </div>
                       <div className="text-slate-400">→</div>
                       <input
@@ -535,7 +535,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       </div>
 
       <div>
-        <label className="block text-[10px] font-bold text-slate-400 mb-1.5">
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">
           Subset by Column
         </label>
         <select
@@ -551,11 +551,11 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       {column && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className="text-[10px] font-bold text-slate-400">
+            <label className="text-xs font-medium text-slate-400">
               Select Values
             </label>
             {selected.length > 0 && (
-              <span className="text-[10px] text-primary font-bold">
+              <span className="text-xs text-primary font-bold">
                 ~{selectedCells.toLocaleString()} cells
               </span>
             )}
@@ -581,7 +581,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
                       ? <CheckSquare size={14} className="text-primary flex-shrink-0" />
                       : <Square size={14} className="text-slate-400 flex-shrink-0" />}
                     <span className="flex-1 text-sm font-mono text-white">{value}</span>
-                    <div className="flex items-center gap-2 text-[10px]">
+                    <div className="flex items-center gap-2 text-xs">
                       <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-primary/60 rounded-full"
@@ -601,7 +601,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       )}
 
       <div>
-        <label className="block text-[10px] font-bold text-slate-400 mb-1.5">
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">
           New analysis name
         </label>
         <input
@@ -685,9 +685,9 @@ export default function Inspect({
     return (
       <div className="flex-1 w-full h-full flex flex-col items-center justify-center bg-background">
         <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-        <h4 className="text-text font-bold mb-2">No saved analysis selected</h4>
+        <h4 className="text-text font-bold mb-2">No dataset selected</h4>
         <p className="text-sm text-textMuted text-center max-w-sm">
-          Select a saved analysis in the workspace to inspect its contents.
+          Select a dataset in the workspace to inspect its contents.
         </p>
       </div>
     );

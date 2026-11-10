@@ -1,10 +1,13 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import SharedSnapshotRouter from './sharing/SharedSnapshotRouter';
-import '@fontsource-variable/instrument-sans';
-import '@fontsource-variable/newsreader/opsz.css';
+import '@fontsource/public-sans/latin-400.css';
+import '@fontsource/public-sans/latin-400-italic.css';
+import '@fontsource/public-sans/latin-500.css';
+import '@fontsource/public-sans/latin-600.css';
 import './App.css';
 import { electronAPI } from './api';
+import { APP_NAME } from './brand';
 
 window.electronAPI = electronAPI;
 
@@ -19,7 +22,7 @@ class GlobalErrorBoundary extends React.Component {
     if (this.state.hasError) {
       return (
         <main className="bg-background text-text" style={{ padding: '2rem', minHeight: '100vh' }}>
-          <h1>Unable to open TraceOmics</h1>
+          <h1>Unable to open {APP_NAME}</h1>
           <p role="alert">Reload the page to reconnect to your saved session.</p>
           <button className="btn btn-primary" onClick={() => window.location.reload()}>Reload page</button>
         </main>

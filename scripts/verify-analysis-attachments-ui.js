@@ -79,7 +79,7 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes, verif
     await target.goto(service.endpoint);
     await target.getByPlaceholder('researcher@lab.edu').fill(accounts[actor].email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
   }
@@ -89,7 +89,7 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes, verif
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openAnalysis(target, analysis = study) {
-    await nav(target, /^Data workspace,/);
+    await nav(target, /^Projects,/);
     await target.getByRole('button', { name: new RegExp('^' + escape(service.project.name) + '(?:$|\\s)') }).click();
     await nav(target, 'Analyses');
     const outside = region(target);
@@ -204,7 +204,7 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes, verif
     await closeDetails(page); await region(page).getByRole('button', { name: 'Back to analysis', exact: true }).click();
     assert(await notes.inputValue() === dirtyNotes, 'Attaching or inspecting overwrote unrelated analysis notes.');
     assert((await api(page, `${base()}/${study.id}`)).analysis.version === 1, 'Attaching rewrote the analysis metadata revision.');
-    check('A real owned exact CSV attachment retains supplied context, uses checked bounded inspection and preserves unrelated unsaved analysis notes and metadata revisions.');
+    check('A real owned exact CSV attachment retains supplied context, uses checked bounded inspection and preserves unrelated undataset notes and metadata revisions.');
 
     await openOutside(page); await prepare(page, figure, 'Synthetic figure: imported evidence, with unknown execution context.');
     await submit(page); await region(page).getByRole('button', { name: 'Inspect attached result', exact: true }).click();

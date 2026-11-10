@@ -73,7 +73,7 @@ async function main({ artifactDirectory } = {}) {
     await target.goto(service.endpoint);
     await target.getByPlaceholder('researcher@lab.edu').fill(account.email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
   }
@@ -83,7 +83,7 @@ async function main({ artifactDirectory } = {}) {
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openAnalyses(target, project = service.project) {
-    await navigation(target, /^Data workspace,/);
+    await navigation(target, /^Projects,/);
     await target.getByRole('button', { name: rowName(project.name) }).click();
     await navigation(target, 'Analyses');
     await target.getByRole('heading', { name: 'Analyses', exact: true }).waitFor();
@@ -96,8 +96,8 @@ async function main({ artifactDirectory } = {}) {
     await selected(target).getByLabel('Analysis name', { exact: true }).waitFor();
   }
   async function bring(target) {
-    await target.getByRole('button', { name: 'Bring saved work', exact: true }).click();
-    await work(target).getByRole('heading', { name: 'Bring saved work into an analysis', exact: true }).waitFor();
+    await target.getByRole('button', { name: 'Link saved work', exact: true }).click();
+    await work(target).getByRole('heading', { name: 'Link saved work into an analysis', exact: true }).waitFor();
     await until(async () => !(await work(target).getByText('Finding saved work…', { exact: true }).isVisible()), 'The saved-work catalog did not load.');
   }
   async function showList(target) {
@@ -374,7 +374,7 @@ async function main({ artifactDirectory } = {}) {
     const outsider = await login(users.outsider);
     for (const url of [catalog(), catalog() + '?kind=results', `/api/artifact-versions/${service.project.id}/${material.ownerCsv.reference.versionId}/preview`]) assert((await api(outsider, url)).status === 404, 'A nonmember discovered project saved source.');
     const boundary = await login(users.owner); await openAnalyses(boundary, secondProject); await bring(boundary);
-    await work(boundary).getByText('No analysis objects yet', { exact: true }).waitFor();
+    await work(boundary).getByText('No datasets yet', { exact: true }).waitFor();
     assert((await api(boundary, `/api/artifact-versions/${secondProject.id}/${material.ownerCsv.reference.versionId}/preview`)).status === 404, 'An authorized other project granted access to the original project source.');
     await capture(boundary, 'separate-project-no-source-leak-light-1366', 'light');
     check('A project reader inspects only their own saved CSV without adoption; colleague/private versions, nonmembers and other project namespaces retain their actual access boundaries.');

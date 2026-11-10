@@ -34,7 +34,7 @@ export default function CapturedWorkflowChoices({ snapshotReference, state, disa
     <button type="button" className="text-xs text-primary underline" disabled={disabled || loading} aria-expanded={visible}
       onClick={() => visible ? setOpened(null) : open()}>{visible ? 'Hide captured outputs' : 'Inspect captured outputs'}</button>
     {visible && <section aria-label={`Captured outputs from ${snapshotReference.snapshotId}`} className="space-y-3">
-      <p className="text-xs text-textMuted">Choose existing outputs from this exact capture in saved analysis {analysisVersion}. Its working workflow is not opened.</p>
+      <p className="text-xs text-textMuted">Choose existing outputs from this exact capture in dataset {analysisVersion}. Its working workflow is not opened.</p>
       {loading && <p role="status" className="text-sm text-textMuted">Finding captured outputs…</p>}
       {collection && !collection.items.length && <p className="text-sm text-textMuted">This capture has no recorded output references to include.</p>}
       <ul aria-label="Recorded workflow outputs" className="space-y-3">{collection?.items.map(option => {

@@ -241,4 +241,4 @@ removeButton.addEventListener('click', async () => {
   finally { setBusy(false); }
 });
 if (window.desktopShell) refreshProfiles().catch(showError);
-else showError(new Error('Use TraceOmics desktop to configure execution targets.'));
+else showError(new Error('Open the desktop app to configure execution targets.'));

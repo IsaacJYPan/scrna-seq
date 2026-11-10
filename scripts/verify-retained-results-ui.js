@@ -44,7 +44,7 @@ async function main() {
     await page.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openProject(project) {
-    await nav(/^Data workspace,/); await page.getByRole('button', { name: prefix(project.name) }).click();
+    await nav(/^Projects,/); await page.getByRole('button', { name: prefix(project.name) }).click();
     await nav('Runs & Results'); await page.getByText('Inspect or import artifact files', { exact: true }).click();
     await inspector().getByRole('heading', { name: 'Artifact versions', exact: true }).waitFor();
   }
@@ -106,7 +106,7 @@ async function main() {
       if (/^\/assets\/.*\.js$/.test(pathname) && response.ok()) { try { compiledAssets[pathname] = sha256(await response.body()); } catch { /* A failed asset also raises a browser error. */ } }
     });
     await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
-    await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open Workbench/ }).click();
+    await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open workbench/ }).click();
     await page.getByText('Connection details', { exact: true }).waitFor(); await openProject(service.project);
     const csv = await importFile(files.csv, 'Donor scores');
     await viewer().getByRole('columnheader', { name: 'gene' }).waitFor();

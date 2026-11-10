@@ -56,7 +56,7 @@ export default function AnalysisSnapshotPublications(props) {
         {state.loading && <p role="status" className="text-sm text-textMuted">Finding published snapshots…</p>}
         {state.loaded && !state.items.length && <p className="text-sm text-textMuted">No snapshots have been published in this analysis. A researcher can prepare selected findings, review them, then publish them here.</p>}
         <ul className="space-y-3">{state.items.map(item => <li key={item.publicationId} className="min-w-0 rounded border border-border bg-surface p-4">
-          <p className="break-words text-sm font-semibold">{item.selection ? `${item.selection.analysisName} · Saved analysis ${item.selection.analysisVersion}` : 'Withdrawn snapshot'}</p>
+          <p className="break-words text-sm font-semibold">{item.selection ? `${item.selection.analysisName} · Dataset ${item.selection.analysisVersion}` : 'Withdrawn snapshot'}</p>
           <p className="mt-1 break-words text-xs text-textMuted">Published by {item.publisherLabel} · {time(item.publishedAt)}</p>
           <p className="mt-2 text-xs">{item.selection ? `${item.selection.resultCount} findings · ${item.selection.documentCount} supporting documents` : 'Viewing through this publication has ended.'}</p>
           <button type="button" className="mt-3 text-sm text-primary underline" disabled={!props.available} onClick={() => void state.open(item)}>Open published snapshot</button>
@@ -69,7 +69,7 @@ export default function AnalysisSnapshotPublications(props) {
         {!acknowledgement ? <><p className="text-sm text-textMuted">Check the acknowledged private preparation before publishing. It will not be replaced with a newer selection.</p>
           {props.seed && <button type="button" className="btn btn-secondary text-sm" disabled={busy || !props.available || pending} onClick={() => void state.reviewSeed(props.seed.preparation)}>Check selected private preparation</button>}</>
           : <><p className="break-words font-semibold">{acknowledgement.package.analysis.name}</p>
-            <p className="text-sm text-textMuted">Saved analysis {acknowledgement.package.analysis.version} · {acknowledgement.package.results.length} findings · {acknowledgement.package.documents.length} supporting documents</p>
+            <p className="text-sm text-textMuted">Dataset {acknowledgement.package.analysis.version} · {acknowledgement.package.results.length} findings · {acknowledgement.package.documents.length} supporting documents</p>
             <p className="text-sm">Current project members will be able to view the retained findings, supplied notes and any included saved supporting source. Members can save content they can view.</p>
             {acknowledgement.package.results.some(item => item.origin?.kind === 'inert-analysis-reference') && <p className="text-sm">Selected text and JSON source excerpts are included as plain text. Only the reviewed prefixes are shared; JSON syntax is not checked.</p>}
             <p className="text-sm text-textMuted">Original datasets, private scratch, editing and execution access remain governed by their own permissions. Supporting source does not establish producing code or reproducibility.</p>
@@ -94,7 +94,7 @@ export default function AnalysisSnapshotPublications(props) {
             <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-sm" disabled={!props.available} onClick={() => void state.open(selected, { preserveMode: true })}>Check current snapshot access</button>
               {selected.canWithdraw && <button type="button" className="text-sm text-textMuted underline" disabled={busy || pending || !props.available} onClick={state.confirmWithdrawal}>Withdraw from project</button>}</div>
           </div>
-            {selected.package && !state.bodyBlocked && <><div><h3 className="break-words text-lg font-semibold">{selected.package.analysis.name}</h3><p className="mt-1 text-xs text-textMuted">Saved analysis {selected.package.analysis.version}</p>
+            {selected.package && !state.bodyBlocked && <><div><h3 className="break-words text-lg font-semibold">{selected.package.analysis.name}</h3><p className="mt-1 text-xs text-textMuted">Dataset {selected.package.analysis.version}</p>
               {props.savedAnalysis.version !== selected.package.analysis.version && <p className="mt-2 text-sm text-textMuted">The working overview now has another saved version. This publication keeps the original version above.</p>}
               <p className="mt-3 whitespace-pre-wrap break-words text-sm">{selected.package.analysis.description}</p></div>
               <p className="text-xs text-textMuted">Producing code has not been established. Runtime state is excluded, and original data access has not been granted.</p>

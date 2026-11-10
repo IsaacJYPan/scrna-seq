@@ -105,7 +105,7 @@ async function main({ artifactDirectory, configureServerData, verifyServerImport
     await target.goto(service.endpoint);
     await target.getByPlaceholder('researcher@lab.edu').fill(accounts[actor].email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password);
-    await target.getByRole('button', { name: /Open Workbench/ }).click();
+    await target.getByRole('button', { name: /Open workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
   }
@@ -127,7 +127,7 @@ async function main({ artifactDirectory, configureServerData, verifyServerImport
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
   async function openArtifacts(target) {
-    await nav(target, /^Data workspace,/);
+    await nav(target, /^Projects,/);
     await target.getByRole('button', { name: new RegExp('^' + escaped(service.project.name) + '(?:$|\\s)') }).click();
     await nav(target, 'Runs & Results');
     const summary = target.locator('summary').filter({ hasText: /^Inspect or import artifact files$/ });
