@@ -409,7 +409,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       <div className="card shrink-0 p-5 mb-6 border-l-4 border-l-primary">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Dimensions</label>
+            <label className="block text-xs text-textMuted mb-1.5 font-bold">Dimensions</label>
             <div className="flex bg-black/5 dark:bg-slate-800 rounded-lg p-0.5 border border-border">
               <button
                 onClick={() => setParam('nComponents', 2)}
@@ -420,7 +420,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                 disabled={!canUse3D}
                 aria-describedby={!canUse3D ? 'umap-3d-unavailable' : undefined}
                 title={!canUse3D ? '3D UMAP requires WebGL, which is unavailable in this renderer.' : undefined}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'} ${!canUse3D ? 'cursor-not-allowed opacity-50' : ''}`}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-primary text-white shadow' : 'text-textMuted'} ${!canUse3D ? 'cursor-not-allowed opacity-50' : ''}`}
               >3D</button>
             </div>
             <p className="text-[10px] text-textMuted mt-1">2D for publications</p>
@@ -431,7 +431,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             )}
           </div>
           <div>
-            <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Neighbors</label>
+            <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 font-bold">Number of Neighbors</label>
             <input
               id="umap-neighbors"
               type="number" value={nNeighborsInput} min={2} max={100} step={1}
@@ -442,7 +442,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <p className="text-[10px] text-textMuted mt-1">Local vs global structure</p>
           </div>
           <div>
-            <label htmlFor="umap-dist" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Minimum Distance</label>
+            <label htmlFor="umap-dist" className="block text-xs text-textMuted mb-1.5 font-bold">Minimum Distance</label>
             <input
               id="umap-dist"
               type="number" value={minDistInput} min={0} max={1.0} step={0.05}
@@ -453,7 +453,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <p className="text-[10px] text-textMuted mt-1">Packing density</p>
           </div>
           <div>
-            <label htmlFor="umap-dims" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Input Dimensions (PCs)</label>
+            <label htmlFor="umap-dims" className="block text-xs text-textMuted mb-1.5 font-bold">Input Dimensions (PCs)</label>
             <input
               id="umap-dims"
               type="number" value={dimsInput} min={1} max={100} step={1}
@@ -496,12 +496,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               {loadingBase64 ? (
                 <div className="flex flex-col items-center">
                   <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
-                  <p className="text-textMuted font-bold uppercase tracking-widest text-xs">Rendering High-Res PNG...</p>
+                  <p className="text-textMuted font-bold text-xs">Rendering High-Res PNG...</p>
                 </div>
               ) : base64Image ? (
                 <>
                   <img src={base64Image} alt={`UMAP embedding scatter plot (${nComponents}D), cells colored by cluster`} className="max-w-full max-h-full object-contain p-2" />
-                  <div className="absolute top-4 right-4 bg-primary/20 text-primary border border-primary/40 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase">
+                  <div className="absolute top-4 right-4 bg-primary/20 text-primary border border-primary/40 px-3 py-1 rounded-full text-[10px] font-black">
                     High-Performance View
                   </div>
                 </>

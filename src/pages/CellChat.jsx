@@ -338,7 +338,7 @@ function StatusBadge({ children, tone = 'slate' }) {
     slate: 'bg-background text-textMuted border-border',
   };
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${tones[tone] || tones.slate}`}>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold ${tones[tone] || tones.slate}`}>
       {children}
     </span>
   );
@@ -357,7 +357,7 @@ function Metric({ label, value, detail }) {
   return (
     <div className="rounded border border-border bg-surface/70 p-4">
       <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-textMuted">{label}</div>
+      <div className="mt-1 text-[10px] font-bold text-textMuted">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
@@ -390,7 +390,7 @@ function InteractionTable({ interactions }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[760px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold text-textMuted">
           <tr>
             <th className="p-3">Source group</th>
             <th className="p-3">Target group</th>
@@ -424,7 +424,7 @@ function PathwayTable({ pathways }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[680px] text-left text-xs">
-        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold text-textMuted">
           <tr>
             <th className="p-3">Signaling pathway</th>
             <th className="p-3">Source group</th>
@@ -834,32 +834,32 @@ export default function CellChat({
           </p>
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group labels (required)</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Group labels (required)</span>
               <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose grouping</option>
                 {GROUP_BY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Assay</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Assay</span>
               <input value="RNA" readOnly aria-label="Assay" className="w-full cursor-not-allowed rounded border border-border bg-surface/70 p-2.5 text-sm text-textMuted" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Species (required)</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Species (required)</span>
               <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose species</option>
                 {SPECIES_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Database category (required)</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Database category (required)</span>
               <select value={params.databaseCategory} onChange={event => setParam('databaseCategory', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose database category</option>
                 {DATABASE_CATEGORY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Analysis intent (required)</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Analysis intent (required)</span>
               <select value={params.analysisIntent} onChange={event => setParam('analysisIntent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Confirm analysis scope</option>
                 {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
@@ -871,31 +871,31 @@ export default function CellChat({
             <p className="mt-2 text-xs text-textMuted">Sampling bounds, display limits, statistical cutoff, and reproducibility seed.</p>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Minimum cells per group</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Minimum cells per group</span>
               <input type="number" min="5" max="200" value={params.minCellsPerGroup} onChange={event => setParam('minCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells per group</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Maximum cells per group</span>
               <input type="number" min="100" max="10000" value={params.maxCellsPerGroup} onChange={event => setParam('maxCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells total</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Maximum cells total</span>
               <input type="number" min="1000" max="10000" value={params.maxTotalCells} onChange={event => setParam('maxTotalCells', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">p-value cutoff</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">p-value cutoff</span>
               <input type="number" min="0.000001" max="0.1" step="0.01" value={params.pValueCutoff} onChange={event => setParam('pValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Interactions shown</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Interactions shown</span>
               <input type="number" min="5" max="100" value={params.topInteractions} onChange={event => setParam('topInteractions', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Pathways shown</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Pathways shown</span>
               <input type="number" min="5" max="100" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
+              <span className="mb-1.5 block text-xs font-bold text-textMuted">Random seed</span>
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
@@ -928,8 +928,8 @@ export default function CellChat({
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
-                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
-                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
+                <div><div className="text-[10px] font-bold text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
+                <div><div className="text-[10px] font-bold text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
               </div>
               {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{publicErrorMessage(job.error, 'This analysis needs attention. Review the settings and try again.')}</div>}
               <JobLogs logs={visibleLogs} />
@@ -957,10 +957,10 @@ export default function CellChat({
 
               <h4 className="text-sm font-bold text-text">Recorded run settings</h4>
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Grouping</div><div className="mt-1 font-bold text-text">{formatGroupBy(summary.groupBy || resolvedParams.groupBy)}</div></div>
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Species / assay</div><div className="mt-1 font-bold text-text">{summary.species || resolvedParams.species || 'Not recorded'} / {summary.assay || resolvedParams.assay || 'RNA'}</div></div>
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Database category</div><div className="mt-1 font-bold text-text">{formatCategory(summary.databaseCategory || resolvedParams.databaseCategory)}</div></div>
-                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis scope</div><div className="mt-1 font-bold text-text">{(summary.analysisIntent || resolvedParams.analysisIntent) === 'single_context' ? 'One biological context' : 'Not recorded'}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Grouping</div><div className="mt-1 font-bold text-text">{formatGroupBy(summary.groupBy || resolvedParams.groupBy)}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Species / assay</div><div className="mt-1 font-bold text-text">{summary.species || resolvedParams.species || 'Not recorded'} / {summary.assay || resolvedParams.assay || 'RNA'}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Database category</div><div className="mt-1 font-bold text-text">{formatCategory(summary.databaseCategory || resolvedParams.databaseCategory)}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold text-textMuted">Analysis scope</div><div className="mt-1 font-bold text-text">{(summary.analysisIntent || resolvedParams.analysisIntent) === 'single_context' ? 'One biological context' : 'Not recorded'}</div></div>
               </div>
 
               {summary.warnings.length > 0 && (

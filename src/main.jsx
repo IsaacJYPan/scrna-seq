@@ -1,6 +1,8 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import SharedSnapshotRouter from './sharing/SharedSnapshotRouter';
+import '@fontsource-variable/instrument-sans';
+import '@fontsource-variable/newsreader/opsz.css';
 import './App.css';
 import { electronAPI } from './api';
 

@@ -194,7 +194,7 @@ export default function BatchIntegration({
 
           {/* Method selector */}
           <div className="card p-5 border-l-4 border-l-primary">
-            <h3 className="font-bold text-white mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
+            <h3 className="font-bold text-white mb-4 text-sm flex items-center gap-2">
               <Zap size={14} className="text-primary" /> Integration Method
             </h3>
             <div className="space-y-2.5">
@@ -224,7 +224,7 @@ export default function BatchIntegration({
 
           {/* Batch column selector */}
           <div className="card p-5 border-l-4 border-l-violet-500">
-            <h3 className="font-bold text-white mb-3 text-sm uppercase tracking-wider flex items-center gap-2">
+            <h3 className="font-bold text-white mb-3 text-sm flex items-center gap-2">
               <Layers size={14} className="text-violet-400" /> Batch Variable
             </h3>
             {colsError ? (
@@ -268,7 +268,7 @@ export default function BatchIntegration({
             {/* Batch preview */}
             {batchPreview && batchCol && (
               <div className="mt-3 pt-3 border-t border-border">
-                <p className="text-[10px] text-slate-400 uppercase font-bold mb-2">
+                <p className="text-[10px] text-slate-400 font-bold mb-2">
                   Batch Groups ({batchPreview.n_unique})
                 </p>
                 <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto custom-scrollbar">
@@ -294,7 +294,7 @@ export default function BatchIntegration({
 
           {/* Method pros */}
           <div className={`card p-4 ${selectedMethod.bgColor} border ${selectedMethod.borderColor}`}>
-            <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${selectedMethod.textColor}`}>
+            <p className={`text-xs font-bold mb-2 ${selectedMethod.textColor}`}>
               {selectedMethod.name} Advantages
             </p>
             <ul className="space-y-1">
@@ -350,17 +350,17 @@ export default function BatchIntegration({
               {/* Stats grid */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="card p-4 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Method</div>
+                  <div className="text-[10px] text-textMuted font-bold mb-1">Method</div>
                   <div className="text-lg font-bold text-white">{(result.result?.method || '').toUpperCase()}</div>
                 </div>
                 <div className="card p-4 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Batch Column</div>
+                  <div className="text-[10px] text-textMuted font-bold mb-1">Batch Column</div>
                   <div className="text-lg font-bold text-white font-mono truncate" title={result.result?.batch_col}>
                     {result.result?.batch_col}
                   </div>
                 </div>
                 <div className="card p-4 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Batches</div>
+                  <div className="text-[10px] text-textMuted font-bold mb-1">Batches</div>
                   <div className="text-2xl font-black text-primary">
                     {(result.result?.batches || []).length}
                   </div>
@@ -370,7 +370,7 @@ export default function BatchIntegration({
               {/* Batch list */}
               {result.result?.batches?.length > 0 && (
                 <div className="card p-4">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  <h4 className="text-xs font-bold text-slate-400 mb-3">
                     Integrated Batches
                   </h4>
                   <div className="flex flex-wrap gap-2">
@@ -391,7 +391,7 @@ export default function BatchIntegration({
 
               {/* Next steps */}
               <div className="card p-4 bg-black/10 border border-border/50">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Next Steps</h4>
+                <h4 className="text-xs font-bold text-slate-400 mb-3">Next Steps</h4>
                 <div className="space-y-2">
                   {[
                     { step: 'PCA', desc: method === 'harmony' ? 'Harmony uses integrated embeddings; run PCA anyway for consistency' : 'PCA was already re-run on the integrated assay' },

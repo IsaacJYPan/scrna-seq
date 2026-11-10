@@ -17,7 +17,7 @@ const PLOT_TYPE_COLORS = {
 function PlotTypeBadge({ plotType }) {
   const c = PLOT_TYPE_COLORS[plotType] || PLOT_TYPE_COLORS.Unknown;
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider ${c.bg} ${c.text} ${c.border}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${c.bg} ${c.text} ${c.border}`}>
       {plotType}
     </span>
   );
@@ -139,7 +139,7 @@ function FigureCard({ figure, onDelete, compact }) {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wide border border-border/50 rounded px-1.5 py-0.5">
+          <span className="text-[10px] text-slate-500 font-mono border border-border/50 rounded px-1.5 py-0.5">
             {(figure.fileFormat || 'png').toUpperCase()}
           </span>
           <span className="text-[10px] text-slate-500">{dateStr}</span>

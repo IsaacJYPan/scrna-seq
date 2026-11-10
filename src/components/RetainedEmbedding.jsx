@@ -40,7 +40,7 @@ export default function RetainedEmbedding({ preview, pointLimit, onPointLimitCha
   // update can leave the displayed axes and its internal view model out of sync.
   const layout = useMemo(() => ({ autosize: true, height: 400, uirevision: revision, showlegend: grouped,
     margin: { l: 55, r: 20, t: 20, b: grouped ? 95 : 60 }, paper_bgcolor: dark ? '#111827' : '#ffffff', plot_bgcolor: dark ? '#111827' : '#ffffff',
-    font: { color: dark ? '#f1f5f9' : '#334155', family: 'Inter, system-ui' }, hoverlabel: getPlotHoverStyle(theme),
+    font: { color: dark ? '#f1f5f9' : '#334155', family: '"Instrument Sans Variable", system-ui, sans-serif' }, hoverlabel: getPlotHoverStyle(theme),
     legend: { orientation: 'h', y: -0.30, yanchor: 'top' }, xaxis: { title: { text: escape(axisTitle(axes.x, 'Coordinate 1')) }, autorange: true, gridcolor: dark ? '#34445d' : '#e2e8f0' },
     yaxis: { title: { text: escape(axisTitle(axes.y, 'Coordinate 2')) }, autorange: true, gridcolor: dark ? '#34445d' : '#e2e8f0' } }), [axes, grouped, revision, dark, theme]);
   const config = useMemo(() => ({ responsive: true, displaylogo: false, modeBarButtonsToRemove: ['toImage'] }), []);
