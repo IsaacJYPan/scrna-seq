@@ -16,8 +16,15 @@ const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
   'metadataField',
   'maxGroups',
   'histogramBins',
-  'featureNames','groupMap','conditionName','numerator','denominator','targetGroup',
+  'featureNames',
+  'groupMap',
+  'conditionName',
+  'contrastId',
+  'targetGroup',
 ]);
+// Recipes that test a condition contrast. They run on a person-registered
+// contrast (resolved and pinned server side), never on labels in cell metadata.
+const CONTRAST_RECIPES = Object.freeze(['study_de', 'study_pathways']);
 
 function requirePlainObject(value) {
   if (value === undefined || value === null) return {};
@@ -68,12 +75,20 @@ function validateExploratoryAnalysisParams(input) {
     ['groupMap', 'groupMap']
   ])
     if (raw[name] !== undefined) params[name] = require('./scientificChoices').scientificText(kind, raw[name]);
-  for (const name of ['conditionName', 'numerator', 'denominator', 'targetGroup'])
+  for (const name of ['conditionName', 'targetGroup'])
     if (raw[name] !== undefined) {
       if (typeof raw[name] !== 'string' || (raw[name] !== '' && !/^[A-Za-z0-9_.-]{1,80}$/.test(raw[name])))
         throw codedError('INVALID_PARAMETER', `Invalid ${name}.`);
       params[name] = raw[name];
     }
+  if (CONTRAST_RECIPES.includes(recipe)) {
+    if (typeof raw.contrastId !== 'string' || !/^contrast_[a-f0-9]+$/.test(raw.contrastId)) {
+      throw codedError('INVALID_PARAMETER', `${recipe} requires contrastId, a registered condition contrast.`);
+    }
+    params.contrastId = raw.contrastId;
+  } else if (raw.contrastId !== undefined) {
+    throw codedError('INVALID_PARAMETER', `contrastId applies only to ${CONTRAST_RECIPES.join(' and ')}.`);
+  }
 
   if (recipe === 'feature_by_group') {
     if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {
@@ -92,6 +107,7 @@ function validateExploratoryAnalysisParams(input) {
 }
 
 module.exports = {
+  CONTRAST_RECIPES,
   EXPLORATORY_ANALYSIS_RECIPES,
   EXPLORATORY_ANALYSIS_PARAM_NAMES,
   validateExploratoryAnalysisParams,

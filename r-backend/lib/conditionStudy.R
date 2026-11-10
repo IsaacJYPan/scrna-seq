@@ -24,40 +24,22 @@ study_frame <- function(frame, limit = 3000L) {
   )
 }
 
-study_condition_design <- function(obj, numerator, denominator) {
-  meta <- obj[[]]
-  if (!all(c("sample_id", "condition", "donor_code") %in% names(meta))) stop("Sample design unavailable")
-  if (identical(numerator, denominator) || !all(c(numerator, denominator) %in% meta$condition)) stop(
-    "Invalid condition contrast"
-  )
-  samples <- unique(meta[, c("sample_id", "condition", "donor_code"), drop = FALSE])
-  if (anyDuplicated(samples$sample_id)) stop("Samples have inconsistent condition/donor labels")
-  samples <- samples[samples$condition %in% c(numerator, denominator), , drop = FALSE]
-  if (any(table(factor(samples$condition, levels = c(numerator, denominator))) < 2L)) stop(
-    "Insufficient independent samples"
-  )
-  # This reviewed recipe supports independent donors only; paired designs use
-  # registered condition-pseudobulk contrasts instead.
-  if (anyNA(samples$donor_code) || any(!nzchar(samples$donor_code)) || anyDuplicated(samples$donor_code)) stop(
-    "Independent unique donors required"
-  )
+# Contrast recipes test a person-registered contrast. The server resolves its
+# pinned sample snapshot; labels in cell metadata never define the design.
+study_contrast_design <- function(design, contrast_labels) {
+  if (is.null(design)) stop("A registered condition contrast is required for this recipe")
+  labels <- if (is.list(contrast_labels)) contrast_labels else list()
+  label <- function(value, fallback) {
+    if (is_scalar_string(value) && grepl("^[A-Za-z0-9 ._+()-]{1,80}$", value)) value else fallback
+  }
   list(
-    unit_of_replication = "donor",
-    paired = FALSE,
-    model_formula = "~ condition",
-    cell_type_column = "seurat_clusters",
-    samples = lapply(seq_len(nrow(samples)), function(i) list(
-      sample_id = samples$sample_id[i],
-      condition = if (samples$condition[i] == numerator) "numerator" else "denominator",
-      donor_code = samples$donor_code[i],
-      unit_id = samples$donor_code[i],
-      cell_metadata_column = "sample_id",
-      cell_metadata_value = samples$sample_id[i]
-    ))
+    design = normalize_condition_pseudobulk_design(design),
+    numerator = label(labels$numerator, "numerator"),
+    denominator = label(labels$denominator, "denominator")
   )
 }
 
-condition_study_analysis <- function(input_obj, params) {
+condition_study_analysis <- function(input_obj, params, design = NULL, contrast_labels = NULL) {
   obj <- study_group_map(input_obj, params$groupMap)
   if (!all(c("sample_id", "condition") %in% colnames(obj[[]]))) stop("Multi-sample metadata required")
   if (!is.null(params$conditionName) && params$conditionName != "all") {
@@ -132,7 +114,8 @@ condition_study_analysis <- function(input_obj, params) {
       theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
       labs(x = "Condition", y = "Mean log-normalized expression per donor", color = "Population")
   } else if (recipe %in% c("study_de", "study_pathways")) {
-    design <- study_condition_design(obj, params$numerator, params$denominator)
+    contrast <- study_contrast_design(design, contrast_labels)
+    design <- contrast$design
     analysis <- run_condition_pseudobulk_de(obj, design)
     frame <- analysis$table
     if (!nrow(frame)) stop("No populations have sufficient replication and counts")
@@ -155,7 +138,7 @@ condition_study_analysis <- function(input_obj, params) {
         scale_color_manual(values = c("grey70", "#B22222"), labels = c("FDR > 0.05", "FDR <= 0.05")) +
         theme_classic(11) +
         labs(
-          x = paste0("Log2 fold change: ", params$numerator, " / ", params$denominator),
+          x = paste0("Log2 fold change: ", contrast$numerator, " / ", contrast$denominator),
           y = "-log10 FDR (capped at 100)",
           color = "Within-population FDR"
         )
@@ -201,7 +184,7 @@ condition_study_analysis <- function(input_obj, params) {
         geom_point(size = 3) +
         theme_classic(10) +
         labs(
-          title = paste(params$targetGroup, params$numerator, "versus", params$denominator),
+          title = paste(params$targetGroup, contrast$numerator, "versus", contrast$denominator),
           y = NULL,
           color = "Adjusted P"
         )
@@ -259,8 +242,7 @@ condition_study_analysis <- function(input_obj, params) {
   summary <- list(
     recipe = recipe,
     condition = params$conditionName,
-    numerator = params$numerator,
-    denominator = params$denominator,
+    contrastId = params$contrastId,
     nCells = ncol(obj),
     groupMap = params$groupMap,
     pointRendering = if (recipe == "study_de") "all_tested_genes_raster_points_vector_axes" else "recipe_native",

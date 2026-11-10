@@ -284,6 +284,9 @@ jobs:
       - name: Verify condition pseudobulk uses raw counts
         run: npm run test:r-condition-pseudobulk
 
+      - name: Verify workbench condition DE uses the registered contrast
+        run: npm run test:r-condition-study-contrast
+
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 

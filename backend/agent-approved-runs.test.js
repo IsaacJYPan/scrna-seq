@@ -583,6 +583,34 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     };
   }
 
+  it('refuses studies that vary a contrast, grouping or population label (Q1)', async () => {
+    const ctx = await setup();
+    await acceptedClusteringWithCheckpoint(ctx);
+    const create = (body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+    const pseudobulk = byKey('condition-pseudobulk');
+    const workbench = byKey('study-workbench');
+    await approve(ctx, pseudobulk);
+    await approve(ctx, workbench);
+    const contrast = await create({ name: 'Contrast sweep', releaseId: pseudobulk.id, sourceStudyId: ctx.study.id,
+      variations: { contrastId: ['contrast_aa', 'contrast_bb'] } });
+    expect(contrast.data.code).toBe('PROTECTED_PARAMETER');
+    for (const variations of [
+      { contrastId: ['contrast_aa', 'contrast_bb'] },
+      { groupMap: ['0=T;1=B', '0=B;1=T'] },
+      { groupMap: ['*'] },
+      { targetGroup: ['*'] },
+      { conditionName: ['disease', 'control'] },
+    ]) {
+      const refused = await create({ name: 'Workbench sweep', releaseId: workbench.id, sourceStudyId: ctx.study.id,
+        fixedParameters: { recipe: 'study_de' }, variations });
+      expect(refused.data.code, JSON.stringify(variations)).toBe('PROTECTED_PARAMETER');
+    }
+    // A display gene panel stays agent-selectable.
+    const panel = await create({ name: 'Gene panel', releaseId: workbench.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { recipe: 'study_expression' }, variations: { featureNames: ['*'] } });
+    expect(panel.status, JSON.stringify(panel.data)).toBe(201);
+  });
+
   it('fixes design choices, runs the pinned method, records a loadable result, and chains', async () => {
     const ctx = await setup();
     const sourceResult = await acceptedClusteringWithCheckpoint(ctx);

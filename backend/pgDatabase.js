@@ -231,7 +231,7 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_save', 'checkpoint_load',
   'checkpoint_fork', 'deg_markers', 'deg_summary', 'result_checkpoint',
   'enrichment_results', 'enrichment_summary',
-  'cellchat_results', 'cellchat_summary', 'exploration_summary',
+  'cellchat_results', 'cellchat_summary', 'exploration_summary', 'study_inference_summary',
   'condition_de_results', 'condition_de_summary',
   'expert_r_bundle', 'expert_r_summary', 'expert_r_environment'
 ]);
@@ -4654,15 +4654,30 @@ async function getExpertRPrivateInputsForJobByWorker(jobId, workerId, claimToken
 }
 
 async function getConditionComparisonInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
-  const row = await requireClaimedJobRowByWorker(
-    jobId, workerId, claimToken, opts, 'condition.pseudobulk_de.v1'
-  );
+  // Condition DE and the workbench's contrast recipes resolve the same
+  // person-registered contrast snapshot; neither reads design from cell labels.
+  const row = await requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts);
+  let contrastId;
+  if (row.job_type === 'condition.pseudobulk_de.v1') {
+    contrastId = validateConditionComparisonParams(parseJson(row.parameters_json, {})).params.contrastId;
+  } else if (row.job_type === 'explore.summarize.v1') {
+    const { CONTRAST_RECIPES, validateExploratoryAnalysisParams } = require('./exploratoryAnalysis');
+    const { params } = validateExploratoryAnalysisParams(parseJson(row.parameters_json, {}));
+    if (!CONTRAST_RECIPES.includes(params.recipe)) {
+      throw codedError('INVALID_JOB_TYPE', 'This exploratory recipe does not test a condition contrast.');
+    }
+    contrastId = params.contrastId;
+  } else {
+    throw codedError('INVALID_JOB_TYPE', 'A claimed condition-contrast job is required.');
+  }
   const object = await resolveOwnedAnalysisObjectForClaimedJob(row);
-  const { params } = validateConditionComparisonParams(parseJson(row.parameters_json, {}));
   const contrastResult = await query(
-    `SELECT * FROM condition_contrasts
-     WHERE id = $1 AND project_id = $2 AND analysis_object_id = $3`,
-    [params.contrastId, row.project_id, object.id]
+    `SELECT contrast.*, numerator.name AS numerator_name, denominator.name AS denominator_name
+     FROM condition_contrasts contrast
+     JOIN study_conditions numerator ON numerator.id = contrast.numerator_condition_id
+     JOIN study_conditions denominator ON denominator.id = contrast.denominator_condition_id
+     WHERE contrast.id = $1 AND contrast.project_id = $2 AND contrast.analysis_object_id = $3`,
+    [contrastId, row.project_id, object.id]
   );
   const contrast = contrastResult.rows[0];
   if (!contrast) throw codedError('CONTRAST_NOT_FOUND', 'Condition contrast not found.');
@@ -4709,6 +4724,8 @@ async function getConditionComparisonInputsForJobByWorker(jobId, workerId, claim
     contrast: {
       id: contrast.id,
       name: contrast.name,
+      numeratorName: contrast.numerator_name,
+      denominatorName: contrast.denominator_name,
       unitOfReplication: contrast.unit_of_replication,
       paired: contrast.paired === true,
       cellTypeColumn: contrast.cell_type_column,

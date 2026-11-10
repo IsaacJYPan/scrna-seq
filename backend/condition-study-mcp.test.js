@@ -12,7 +12,7 @@ describe('bounded multi-condition scientific configuration',()=>{
    const releases=currentReleases(),multi=releases.find(r=>r.key==='seurat-multisample'),work=releases.find(r=>r.key==='study-workbench');
    expect(multi.definition.parameterSchema.samples.type).toBe('sampleSheet');
    expect(work.definition.parameterSchema.featureNames.type).toBe('geneList');
-   expect(work.definition.inputs[0].fromRelease).toContain('seurat-multisample');
+   expect(work.definition.inputs[0].fromReleases).toContain('seurat-multisample');
    expect(()=>work.validateParameters({recipe:'study_expression',featureNames:'system(x)'})).toThrow();
  });
  it('derives private memory profiles from the trusted job type, preserving interactive/heatmap state',async()=>{

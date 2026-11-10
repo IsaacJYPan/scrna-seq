@@ -148,7 +148,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   const selected = releases.find((r) => r.id === (form.releaseId || approved[0]?.id));
   // A follow-on release runs on the accepted result of a study of another release.
   const composedInput = selected?.inputs?.[0]?.kind === 'analysis_object' ? selected.inputs[0] : null;
-  const composedFrom = composedInput ? (composedInput.fromReleases || [composedInput.fromRelease]) : null;
+  const composedFrom = composedInput ? (Array.isArray(composedInput.fromReleases) ? composedInput.fromReleases : []) : null;
   const releaseKey = (id) => releases.find((r) => r.id === id)?.key;
   const sourceStudies = composedFrom ? studies.filter((s) => s.acceptedRunId && composedFrom.includes(releaseKey(s.releaseId))) : [];
   const studyName = (id) => studies.find((s) => s.id === id)?.name || id;

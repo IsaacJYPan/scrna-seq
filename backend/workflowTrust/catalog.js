@@ -204,95 +204,82 @@ const DEFINITIONS = [
     validateParameters: params => validateSpatialSeuratParams(params).params
   }
 ];
-for (const entry of [
+// Follow-on releases that read an accepted clustering. Exactly one release per
+// job type: pathway enrichment and CellChat are covered by pathway-gsea and
+// cellchat-single-context above, whose design parameters a person fixes.
+// The two explore.summarize.v1 releases below have disjoint recipe enums.
+const CLUSTERED_SOURCES = ['seurat-qc-cluster', 'seurat-multisample'];
+
+DEFINITIONS.push(
   {
     key: 'standard-figures',
+    version: '1',
     title: 'Standard publication figure recipes',
     jobType: 'explore.summarize.v1',
-    schema: {
+    handlerFiles: ['backend/jobs/analysisHandlers.js', 'r-backend/plumber.R', 'r-backend/lib/standardFigures.R'],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: CLUSTERED_SOURCES, requiresStage: 'cluster' }],
+    outputs: [{ name: 'result', kind: 'artifact', artifactType: 'exploration_summary' }],
+    parameterSchema: {
       recipe: {
         type: 'enum',
         values: ['figure_qc', 'figure_pca', 'figure_umap', 'figure_heatmap', 'figure_dot', 'figure_feature'],
         default: 'figure_umap'
       }
     },
-    validate: require('../exploratoryAnalysis').validateExploratoryAnalysisParams,
-    artifact: 'exploration_summary'
-  },
-  {
-    key: 'ranked-enrichment',
-    title: 'Ranked GO pathway enrichment',
-    jobType: 'enrichment.gsea.v1',
-    schema: ENRICHMENT_GSEA_PARAM_SPEC,
-    validate: validateEnrichmentGseaParams,
-    artifact: 'enrichment_summary'
-  },
-  {
-    key: 'cellchat-candidates',
-    title: 'Single-context CellChat candidates',
-    jobType: 'cellchat.infer.v1',
-    schema: CELLCHAT_INFERENCE_PARAM_SPEC,
-    validate: validateCellChatInferenceParams,
-    artifact: 'cellchat_summary'
-  },
-  {
-    key: 'condition-pseudobulk',
-    title: 'Replicate-aware condition DE',
-    jobType: 'condition.pseudobulk_de.v1',
-    schema: { contrastId: { type: 'contrastId', required: true } },
-    validate: require('../conditionComparison').validateConditionComparisonParams,
-    artifact: 'condition_de_summary'
-  }
-])
-  DEFINITIONS.push({
-    key: entry.key,
-    version: '1',
-    title: entry.title,
-    jobType: entry.jobType,
-    handlerFiles: ['backend/jobs/analysisHandlers.js', 'r-backend/plumber.R'],
-    inputs: [
-      { name: 'clustering', kind: 'analysis_object', fromRelease: 'seurat-qc-cluster', requiresStage: 'cluster' }
-    ],
-    outputs: [{ name: 'result', kind: 'artifact', artifactType: entry.artifact }],
-    parameterSchema: entry.schema,
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.artifact.present'],
-    validateParameters: p => entry.validate(p).params
-  });
-for (const definition of DEFINITIONS)
-  if (definition.inputs[0].fromRelease === 'seurat-qc-cluster')
-    definition.inputs[0].fromRelease = ['seurat-qc-cluster', 'seurat-multisample'];
-DEFINITIONS.push({
-  key: 'study-workbench',
-  version: '1',
-  title: 'Multi-condition biological investigation and figures',
-  jobType: 'explore.summarize.v1',
-  handlerFiles: ['backend/exploratoryAnalysis.js', 'r-backend/lib/conditionStudy.R'],
-  inputs: [
-    {
-      name: 'clustering',
-      kind: 'analysis_object',
-      fromRelease: ['seurat-qc-cluster', 'seurat-multisample'],
-      requiresStage: 'cluster'
-    }
-  ],
-  outputs: [{ name: 'result', kind: 'artifact', artifactType: 'exploration_summary' }],
-  parameterSchema: {
-    recipe: {
-      type: 'enum',
-      values: ['study_composition', 'study_expression', 'study_qc', 'study_de', 'study_pathways', 'study_communication']
-    },
-    featureNames: { type: 'geneList' },
-    groupMap: { type: 'groupMap' },
-    conditionName: { type: 'safeLabel' },
-    numerator: { type: 'safeLabel' },
-    denominator: { type: 'safeLabel' },
-    targetGroup: { type: 'populationLabel' }
+    validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params
   },
-  resources: { cpus: 1, memoryMiB: 12288, maxWallSeconds: 3600 },
-  validation: ['job.completed', 'result.artifact.present'],
-  validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params
-});
+  {
+    // The contrast is registered by a person on the accepted input and pinned
+    // by digest at planning time (workflowTrust/design.js).
+    key: 'condition-pseudobulk',
+    version: '1',
+    title: 'Replicate-aware condition DE',
+    jobType: 'condition.pseudobulk_de.v1',
+    handlerFiles: ['backend/jobs/analysisHandlers.js', 'r-backend/plumber.R', 'r-backend/lib/conditionComparison.R'],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: CLUSTERED_SOURCES, requiresStage: 'cluster' }],
+    outputs: [{ name: 'result', kind: 'artifact', artifactType: 'condition_de_summary' }],
+    parameterSchema: { contrastId: { type: 'contrastId', required: true, role: 'design' } },
+    resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
+    validation: ['job.completed', 'result.artifact.present'],
+    validateParameters: p => require('../conditionComparison').validateConditionComparisonParams(p).params
+  },
+  {
+    // What the study asks (contrast, populations, condition, target group) is
+    // fixed by a person. Only the displayed gene panel may vary.
+    key: 'study-workbench',
+    version: '1',
+    title: 'Multi-condition biological investigation and figures',
+    jobType: 'explore.summarize.v1',
+    handlerFiles: [
+      'backend/exploratoryAnalysis.js',
+      'backend/jobs/analysisHandlers.js',
+      'r-backend/plumber.R',
+      'r-backend/lib/conditionStudy.R',
+      'r-backend/lib/conditionComparison.R'
+    ],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: CLUSTERED_SOURCES, requiresStage: 'cluster' }],
+    outputs: [
+      { name: 'result', kind: 'artifact', artifactType: 'exploration_summary' },
+      { name: 'inference', kind: 'artifact', artifactType: 'study_inference_summary' }
+    ],
+    parameterSchema: {
+      recipe: {
+        type: 'enum',
+        values: ['study_composition', 'study_expression', 'study_qc', 'study_de', 'study_pathways', 'study_communication']
+      },
+      featureNames: { type: 'geneList' },
+      groupMap: { type: 'groupMap', role: 'design' },
+      conditionName: { type: 'safeLabel', role: 'design' },
+      contrastId: { type: 'contrastId', role: 'design' },
+      targetGroup: { type: 'populationLabel', role: 'design' }
+    },
+    resources: { cpus: 1, memoryMiB: 12288, maxWallSeconds: 3600 },
+    validation: ['job.completed', 'result.artifact.present'],
+    validateParameters: p => require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params
+  }
+);
 
 // Files every trusted-method release runs through, in addition to its own R file.
 const TRUSTED_METHOD_HANDLER_FILES = [
@@ -350,8 +337,10 @@ function validateScalar(schema, name, value) {
   const spec = schema[name];
   if (!spec) throw new Error(`Unknown parameter '${name}'.`);
   const fail = (why) => { throw new Error(`Parameter '${name}' ${why}.`); };
-  if(spec.type==='sampleInputs'){require('../multiSampleSeuratPipeline').validateMultiSampleSeuratParams({samples:value});return;}
-  if(['geneList','groupMap','populationLabel'].includes(spec.type)){require('../scientificChoices').scientificText(spec.type,value);return;}
+  if (['geneList', 'groupMap', 'populationLabel'].includes(spec.type)) {
+    require('../scientificChoices').scientificText(spec.type, value);
+    return;
+  }
   if (spec.type === 'contrastId') {
     if (typeof value !== 'string' || !/^contrast_[a-f0-9]+$/.test(value)) fail('must be a registered contrast id');
     return;

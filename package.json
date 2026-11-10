@@ -58,6 +58,7 @@
     "test:r-expert-starter": "Rscript r-backend/tests/test_expert_starter.R",
     "test:r-execution-order": "Rscript r-backend/tests/test_execution_order.R",
     "test:r-condition-pseudobulk": "Rscript r-backend/tests/test_condition_pseudobulk_counts.R",
+    "test:r-condition-study-contrast": "Rscript r-backend/tests/test_condition_study_contrast.R",
     "test:backup-restore": "vitest run backend/backup-restore.test.js --environment node --fileParallelism=false",
     "test:backup-restore:real": "node scripts/verify-backup-restore-drill.js",
     "test:deployment:smoke": "node scripts/verify-deployment-smoke.js",

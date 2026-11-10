@@ -1544,7 +1544,9 @@ function(req, res) {
   tryCatch({
     if (!inherits(global_obj, "Seurat")) stop("Seurat object required")
     if(startsWith(recipe,"figure_"))return(standard_study_figure(global_obj,recipe))
-    if(startsWith(recipe,"study_"))return(condition_study_analysis(global_obj,params))
+    if (startsWith(recipe, "study_")) {
+      return(condition_study_analysis(global_obj, params, design = body$design, contrast_labels = body$contrast_labels))
+    }
     meta <- global_obj@meta.data
     panels <- list()
     if (identical(recipe, "overview")) {

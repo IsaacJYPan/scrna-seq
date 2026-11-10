@@ -194,3 +194,101 @@ describe('condition pseudobulk worker contract', () => {
     expect(ctx.runRBridgeOperation).not.toHaveBeenCalled();
   });
 });
+
+describe('workbench contrast recipes', () => {
+  const { exploratoryAnalysisHandler } = require('./jobs/analysisHandlers');
+  const { runRBridgeOperation } = require('./rWorkerBridge');
+  const os = require('node:os');
+  const path = require('node:path');
+  const fs = require('node:fs');
+  const design = {
+    analysisObjectId: 'ao_abc',
+    contrast: {
+      id: 'contrast_a1b2', status: 'valid', unitOfReplication: 'donor', paired: false,
+      cellTypeColumn: 'seurat_clusters', numeratorName: 'disease', denominatorName: 'control',
+    },
+    samples: [1, 2, 3, 4].map((index) => ({
+      sampleId: `sample_${index}`, condition: index < 3 ? 'numerator' : 'denominator',
+      unitId: `D${index}`, donorCode: `D${index}`,
+      cellMetadataColumn: 'sample_id', cellMetadataValue: `s${index}`,
+    })),
+  };
+  const figureBundle = { schema: 'traceomics.standard-figure.v1', nCells: 100, features: [], scientificSummary: {} };
+
+  function workbenchCtx(overrides = {}) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-'));
+    const created = [];
+    return {
+      created,
+      job: {
+        id: 'job_wb', jobType: 'explore.summarize.v1', ownerUserId: 7, projectId: 'proj_abc',
+        analysisObjectId: 'ao_abc', attempts: 1, parameters: { recipe: 'study_de', contrastId: 'contrast_a1b2' },
+      },
+      workerId: 'worker_1', heartbeat: vi.fn(), log: vi.fn(), logger: {}, callR: vi.fn(),
+      deriveRObjectStateKey: (userId, objectId) => `user-${userId}-${objectId}`,
+      getOwnedAnalysisObject: vi.fn(async () => ({ id: 'ao_abc' })),
+      getConditionComparisonInputs: vi.fn(async () => design),
+      getHydrationCheckpoint: vi.fn(async () => ({ analysisObjectId: 'ao_abc', checkpointArtifactId: 'art_cp' })),
+      removeDurableObject: vi.fn(),
+      resolveStorageWritePath: (key) => path.join(root, key),
+      createCheckpointArtifact: vi.fn(async (input) => { created.push(input); return { id: 'art_wb' }; }),
+      runRBridgeOperation: vi.fn(async (input) => {
+        if (input.operation === 'r.checkpoint.hydrate.v1') return { loaded: { loaded: true } };
+        return { name: 'Investigation', description: 'Bounded', figureBundle };
+      }),
+      ...overrides,
+    };
+  }
+
+  it('resolves the registered contrast before R and stores an inferential artifact', async () => {
+    const ctx = workbenchCtx();
+    await exploratoryAnalysisHandler(ctx);
+    expect(ctx.getConditionComparisonInputs).toHaveBeenCalledTimes(1);
+    const explore = ctx.runRBridgeOperation.mock.calls.map(([input]) => input)
+      .find((input) => input.operation === 'r.explore.summarize.v1');
+    expect(explore.exploration.design).toEqual(design);
+    expect(ctx.created[0]).toMatchObject({
+      artifactType: 'study_inference_summary',
+      metadata: { summary: { contrastId: 'contrast_a1b2', inferential: true } },
+    });
+  });
+
+  it('refuses a contrast that does not match the job before any R contact', async () => {
+    const ctx = workbenchCtx({
+      getConditionComparisonInputs: vi.fn(async () => ({ ...design, contrast: { ...design.contrast, id: 'contrast_ff' } })),
+    });
+    await expect(exploratoryAnalysisHandler(ctx)).rejects.toMatchObject({ code: 'INVALID_CONTRAST' });
+    expect(ctx.runRBridgeOperation).not.toHaveBeenCalled();
+  });
+
+  it('keeps descriptive recipes as exploration summaries without a contrast', async () => {
+    const ctx = workbenchCtx();
+    ctx.job.parameters = { recipe: 'study_qc' };
+    await exploratoryAnalysisHandler(ctx);
+    expect(ctx.getConditionComparisonInputs).not.toHaveBeenCalled();
+    expect(ctx.created[0].artifactType).toBe('exploration_summary');
+  });
+
+  it('sends the server-resolved design and condition labels to R', async () => {
+    let body;
+    await runRBridgeOperation({
+      operation: 'r.explore.summarize.v1',
+      job: { id: 'job_wb', ownerUserId: 7, jobType: 'explore.summarize.v1' },
+      objectContext: { objectId: 'ao_abc', stateKey: 'private-state' },
+      exploration: { params: { recipe: 'study_de', contrastId: 'contrast_a1b2' }, design },
+      callR: async (request) => { body = request.body; return { status: 200, body: { figureBundle: null, panels: [] } }; },
+      logger: { info() {}, warn() {}, error() {} },
+    }).catch(() => {});
+    expect(body.design.model_formula).toBe('~ condition');
+    expect(body.design.samples[0]).toMatchObject({ sample_id: 'sample_1', unit_id: 'D1', condition: 'numerator' });
+    expect(body.contrast_labels).toEqual({ numerator: 'disease', denominator: 'control' });
+    await expect(runRBridgeOperation({
+      operation: 'r.explore.summarize.v1',
+      job: { id: 'job_wb', ownerUserId: 7, jobType: 'explore.summarize.v1' },
+      objectContext: { objectId: 'ao_abc', stateKey: 'private-state' },
+      exploration: { params: { recipe: 'study_de', contrastId: 'contrast_a1b2' } },
+      callR: async () => ({ status: 200, body: {} }),
+      logger: { info() {}, warn() {}, error() {} },
+    })).rejects.toMatchObject({ code: 'R_CONDITION_COMPARISON_REQUIRED' });
+  });
+});

@@ -197,7 +197,7 @@ function createRunInspection({ db, admission }) {
     );
     const row = rows[0];
     const figure =
-      row?.artifact_type === 'exploration_summary' &&
+      ['exploration_summary', 'study_inference_summary'].includes(row?.artifact_type) &&
       row.mime_type === 'application/vnd.traceomics.figure+json' &&
       parseMetadata(row.metadata_json).kind === 'standard_figure';
     if (!row || (!TABLES.has(row.artifact_type) && !figure))

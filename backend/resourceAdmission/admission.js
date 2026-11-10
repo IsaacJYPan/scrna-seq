@@ -233,7 +233,12 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     }
     for (const [key, allowed] of Object.entries(variations)) {
       const value = Object.prototype.hasOwnProperty.call(choices, key) ? choices[key] : allowed[0];
-      const freeText=allowed.includes('*')&&['geneList','groupMap','populationLabel'].includes(schema[key]?.type);
+      // Defense in depth: a design parameter is never varied, even if a study
+      // row says otherwise. Only display gene panels accept free text.
+      if (schema[key]?.role === 'design') {
+        throw codedError('PROTECTED_PARAMETER', `'${key.slice(0, 64)}' is a study design choice and must be fixed.`, 409);
+      }
+      const freeText = allowed.includes('*') && schema[key]?.type === 'geneList';
       if (freeText) {
         try {
           require('../scientificChoices').scientificText(schema[key].type, value);
@@ -322,7 +327,9 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         },
         choices,
         parameters,
-        ...(release.jobType === 'condition.pseudobulk_de.v1'
+        // Any plan that names a contrast pins its sample snapshot by digest;
+        // the claim-time recheck refuses the run if the design changed.
+        ...(typeof parameters.contrastId === 'string'
           ? {
               design: await require('../workflowTrust/design').pinDesign(
                 client,

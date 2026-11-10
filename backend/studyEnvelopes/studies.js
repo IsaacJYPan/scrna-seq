@@ -134,7 +134,9 @@ function createStudyService({ db, withTransaction, approvals }) {
       for (const [key, value] of Object.entries(fixed)) validateScalar(schema, key, value);
       for (const [key, values] of Object.entries(variations)) {
         for (const value of values) {
-          if(value==='*'&&['geneList','groupMap','populationLabel'].includes(schema[key].type))continue;
+          // '*' lets an agent choose a display gene panel. Groupings, population
+          // labels and contrasts are design choices a person fixes (Q1).
+          if (value === '*' && schema[key].type === 'geneList') continue;
           validateScalar(schema, key, value);
         }
       }
@@ -274,9 +276,7 @@ function createStudyService({ db, withTransaction, approvals }) {
     const source = rows[0];
     if (!source) throw codedError('NOT_FOUND', 'Source study not found.', 404);
     const { rows: rel } = await db.query('SELECT release_key FROM workflow_releases WHERE id = $1', [source.release_id]);
-    const allowedSources =
-      inputSpec.fromReleases ||
-      (Array.isArray(inputSpec.fromRelease) ? inputSpec.fromRelease : [inputSpec.fromRelease]);
+    const allowedSources = inputSpec.fromReleases;
     if (!allowedSources.includes(rel[0]?.release_key)) {
       const wanted = allowedSources.map((key) => releases.find((r) => r.key === key)?.definition.title || key);
       throw codedError('INPUT_NOT_APPLICABLE', `The source study must run one of: ${wanted.join('; ')}.`.slice(0, 600), 400);

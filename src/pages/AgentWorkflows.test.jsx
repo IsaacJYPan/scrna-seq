@@ -59,7 +59,7 @@ describe('AgentWorkflows', () => {
 
   it('creates a follow-on study on the accepted result of a clustering study', async () => {
     const markers = { ...release, id: 'rel_2', key: 'seurat-markers', title: 'Markers', jobType: 'deg.find_markers.v1',
-      inputs: [{ name: 'clustering', kind: 'analysis_object', fromRelease: 'seurat-qc-cluster' }],
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster'] }],
       parameterSchema: { logfcThreshold: { type: 'number', min: 0, max: 10, default: 0.25 } }, approval: { id: 'wfa_2' } };
     window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, markers] }));
     window.electronAPI.listStudies = vi.fn(async () => ({ studies: [
@@ -78,6 +78,29 @@ describe('AgentWorkflows', () => {
     await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
       name: 'Markers', releaseId: 'rel_2', sourceStudyId: 'study_1' })));
     expect(window.electronAPI.createStudy.mock.calls[0][1].datasetIds).toBeUndefined();
+  });
+
+  it('offers accepted studies of every source release of a multi-source follow-on release', async () => {
+    const multi = { ...release, id: 'rel_m', key: 'seurat-multisample', title: 'Multi-sample', approval: { id: 'wfa_m' } };
+    const workbench = { ...release, id: 'rel_w', key: 'study-workbench', title: 'Workbench', jobType: 'explore.summarize.v1',
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample'] }],
+      parameterSchema: { featureNames: { type: 'geneList' } }, approval: { id: 'wfa_w' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({
+      canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, multi, workbench],
+    }));
+    window.electronAPI.listStudies = vi.fn(async () => ({ studies: [
+      { id: 'study_1', name: 'Single sweep', releaseId: 'rel_1', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: 'run_1' },
+      { id: 'study_2', name: 'Donor sweep', releaseId: 'rel_m', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: 'run_2' },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Investigate' } });
+    fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_w' } });
+    const source = screen.getByLabelText(/Builds on the accepted result of/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a study…', 'Single sweep', 'Donor sweep']);
+    fireEvent.change(source, { target: { value: 'study_2' } });
+    fireEvent.click(screen.getByRole('button', { name: /create study/i }));
+    await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
+      releaseId: 'rel_w', sourceStudyId: 'study_2' })));
   });
 
   it('opens a candidate result in the workspace', async () => {
