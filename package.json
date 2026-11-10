@@ -145,7 +145,7 @@
     "dagre": "^0.8.5",
     "express": "^5.2.1",
     "httpxy": "^0.5.5",
-    "lucide-react": "^1.0.1",
+    "lucide-react": "^1.70.0",
     "multer": "^2.4.0",
     "pg": "^8.23.1",
     "plotly.js": "3.7.0",
