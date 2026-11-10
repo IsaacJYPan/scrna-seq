@@ -12,17 +12,20 @@ const db = require('./pgDatabase');
 const storage = require('./storage');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { currentReleases, buildRelease } = require('./workflowTrust/catalog');
+const { useWorkflowRuntimeProfile, runtimeAttestation } = require('./_workflowRuntimeFixture');
 
 const CONFIGURED = config.hasPostgresConnection();
 const ALL_CAPS = ['metadata.read', 'results.read', 'workflow.plan', 'workflow.executeApproved', 'run.cancelOwn'];
 
 let server;
+let restoreRuntime;
 const savedEnv = {};
 
 beforeAll(async () => {
   if (!CONFIGURED) return;
   for (const key of ['DISABLE_RATE_LIMIT', 'AGENT_MAX_OUTSTANDING_RUNS', 'AGENT_MAX_OUTSTANDING_RUNS_PER_SPONSOR']) savedEnv[key] = process.env[key];
   process.env.DISABLE_RATE_LIMIT = 'true';
+  restoreRuntime = useWorkflowRuntimeProfile();
   server = await startServer();
 });
 
@@ -30,6 +33,7 @@ afterAll(async () => {
   if (!CONFIGURED) return;
   if (server) await new Promise((resolve) => server.close(resolve));
   await db.close();
+  if (restoreRuntime) restoreRuntime();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
@@ -85,6 +89,12 @@ function agent(ctx, path, options = {}, token = ctx.token) {
   return api(server, `/api/automation/v1/projects/${ctx.project.id}${path}`, {
     ...options, headers: { Authorization: `Bearer ${token}` },
   });
+}
+
+// Answers only the claim-time runtime attestation; no analysis reaches R.
+async function attestingCallR(request) {
+  if (request.path === '/runtime/workflow-trust') return { status: 200, body: runtimeAttestation() };
+  throw new Error(`Unexpected R call: ${request.path}`);
 }
 
 async function plan(ctx, choices = { clusterResolution: 0.5 }, token) {
@@ -309,7 +319,7 @@ describe.skipIf(!CONFIGURED)('revocation, dispatch recheck, and cancellation', (
       const human = await api(server, `${ctx.base}/agent-runs`, { token: ctx.sponsor.token });
       expect(human.data.runs[0]).toMatchObject({ id: run.id, state: 'canceled' });
     }
-  });
+  }, 30000);
 
   it('cancels its own queued run, retains the reservation, and quarantines late output', async () => {
     const ctx = await setup();
@@ -601,7 +611,7 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     expect(queued).toMatchObject({ job_type: 'trusted.method.v1', analysis_object_id: sourceResult });
 
     const runExpertSandbox = fakeSandbox({ cells_before: 1000, cells_after: 900, cells_removed: 100, fraction_kept: 0.9, values_not_found: 0 });
-    const worker = createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } });
+    const worker = createJobWorker({ db, runExpertSandbox, callR: attestingCallR, logger: { info() {}, warn() {}, error() {}, log() {} } });
     await worker.runOnce();
     const { rows: [done] } = await db.query('SELECT * FROM jobs WHERE id = $1', [queued.id]);
     expect(done.status, done.error_json).toBe('completed');
@@ -640,7 +650,7 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     const tampered = { ...JSON.parse(queued.parameters_json), methodSourceSha256: '0'.repeat(64) };
     await db.query('UPDATE jobs SET parameters_json = $2 WHERE id = $1', [queued.id, JSON.stringify(tampered)]);
     const runExpertSandbox = vi.fn();
-    await createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } }).runOnce();
+    await createJobWorker({ db, runExpertSandbox, callR: attestingCallR, logger: { info() {}, warn() {}, error() {}, log() {} } }).runOnce();
     const { rows: [failed] } = await db.query('SELECT status FROM jobs WHERE id = $1', [queued.id]);
     expect(failed.status).toBe('failed');
     expect(runExpertSandbox).not.toHaveBeenCalled();

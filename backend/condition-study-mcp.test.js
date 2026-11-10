@@ -36,6 +36,7 @@ describe('bounded multi-condition scientific configuration',()=>{
 describe.skipIf(!process.env.DATABASE_URL)('thirteen-donor MCP admission',()=>{
  it('pins every donor and refuses a nonprimary anchor or changed secondary input',async()=>{
    const db=require('./pgDatabase'),{startServer,createUserWithToken,api}=require('./_http-test-utils'),storage=require('./storage');
+   const restoreRuntime=require('./_workflowRuntimeFixture').useWorkflowRuntimeProfile();
    process.env.DISABLE_RATE_LIMIT='true';await db.resetSchemaForTests();const server=await startServer();
    try{
     const owner=await createUserWithToken({email:'multi-admission@example.invalid'}),org=await db.createOrganization('Test',owner.user.id),project=await db.createProject(org.id,'Thirteen donors',owner.user.id),base=`/api/projects/${project.id}`,samples=[];
@@ -45,11 +46,11 @@ describe.skipIf(!process.env.DATABASE_URL)('thirteen-donor MCP admission',()=>{
     const study=await human('/studies',{name:'Thirteen-donor input pin',releaseId:release.id,datasetIds:samples.map(s=>s.datasetId),fixedParameters:{samples},variations:{stopAfter:['qc','pca']}});
     const delegation=await human('/agent-delegations',{agentName:'Test',capabilities:['workflow.plan','workflow.executeApproved'],limits:{maxReservedCpuSeconds:100000}});
     const agent=async(route,body)=>api(server,`/api/automation/v1/projects/${project.id}${route}`,{method:'POST',headers:{Authorization:`Bearer ${delegation.credential.token}`},body});
-    const wrong=await agent('/plans',{studyId:study.id,datasetId:samples[1].datasetId,choices:{stopAfter:'qc'}});expect(wrong.status).toBe(400);
+    const wrong=await agent('/plans',{studyId:study.id,datasetId:samples[1].datasetId,choices:{stopAfter:'qc'}});expect(wrong.status,JSON.stringify(wrong.data)).toBe(409);expect(wrong.data.code).toBe('STUDY_AMENDMENT_REQUIRED');
     const plan=await agent('/plans',{studyId:study.id,datasetId:samples[0].datasetId,choices:{stopAfter:'qc'}});expect(plan.status,JSON.stringify(plan.data)).toBe(201);expect(plan.data.plan.inputs.samples).toHaveLength(13);expect(plan.data.plan.parameters.samples).toHaveLength(13);
     await db.query('UPDATE datasets SET sha256=$1 WHERE id=$2',['b'.repeat(64),samples[12].datasetId]);
     const rejected=await agent('/runs',{planId:plan.data.id,planDigest:plan.data.digest,requestId:'changed-last-donor'});expect(rejected.status).toBe(409);expect(rejected.data.code).toBe('INPUT_CHANGED');
     expect((await db.query('SELECT id FROM jobs')).rows).toHaveLength(0);
-   }finally{await new Promise(r=>server.close(r));await db.close();}
+   }finally{await new Promise(r=>server.close(r));await db.close();restoreRuntime();}
  },120000);
 });
