@@ -6,13 +6,10 @@
 // image-based platforms remain separate future contracts.
 const { validateSeuratPipelineParams } = require('./seuratPipeline');
 const { isProjectStorageKey, projectStorageFileKey } = require('./storage');
+const { codedError } = require('./errors');
 
 const SPATIAL_SEURAT_JOB_TYPE = 'spatial.seurat.v1';
 const SPATIAL_SEURAT_DATASET_TYPE = 'visium_zip';
-
-function codedError(code, message) {
-  const error = new Error(message); error.code = code; return error;
-}
 
 function validateSpatialSeuratParams(input) {
   return validateSeuratPipelineParams(input);

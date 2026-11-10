@@ -28,10 +28,10 @@ const CONFIGURED = config.hasPostgresConnection();
 
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { createJobWorker } = require('./jobWorker');
+const { silentLogger } = require('./_test-helpers');
 
 const T0 = '2030-01-01 00:00:00';
 
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 async function drainOnce(now = T0) {
   const w = createJobWorker({ db: dbmod, now: () => now, logger: silentLogger() });
   return w.runOnce();

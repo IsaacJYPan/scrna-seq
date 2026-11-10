@@ -16,9 +16,9 @@ const storage = require('./storage');
 const { installFakeSlurm } = require('./_fakeSlurm');
 const { createJobWorker, createLanedJobWorker, slurmLaneCount } = require('./jobWorker');
 const { createSlurmExecutor, slurmConfig, wallTime } = require('./executors/slurm');
+const { silentLogger } = require('./_test-helpers');
 
 const CONFIGURED = config.hasPostgresConnection();
-const silentLogger = () => ({ info() {}, warn() {}, error() {} });
 
 let fake;
 let storageRoot;

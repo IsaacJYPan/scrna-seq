@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { projectStorageFileKey } = require('./storage');
 const { validateEnvironmentReference } = require('./rEnvironment');
+const { codedError } = require('./errors');
 
 const PROFILE = Object.freeze({
   id: 'scrna-r-4.5-bioconductor-3.22-v1',
@@ -33,10 +34,6 @@ const MAX_EXPERT_R_INPUT_BYTES = MAX_EXPERT_R_RDS_INPUT_BYTES;
 const MAX_EXPERT_R_INPUTS_PER_RUN = 5;
 const MAX_EXPERT_R_PRIVATE_INPUTS = 20;
 const MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES = 250 * 1024 * 1024;
-
-function codedError(code, message) {
-  const error = new Error(message); error.code = code; return error;
-}
 
 function validateExpertRParams(input, { allowStoredHash = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {

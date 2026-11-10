@@ -44,13 +44,12 @@ const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 // The canonical, server-only R state-key deriver. Injected into the worker exactly as
 // server.js wires it in production, so tests exercise the REAL derivation (no drift).
 const serverModule = require('../server.js');
+const { silentLogger, seedProject } = require('./_test-helpers');
 const { deriveRObjectStateKey, deriveRStateKey } = serverModule;
 
 // Deterministic UTC instants in SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format.
 const T0 = '2030-01-01 00:00:00';
 const LATER = '2030-01-01 01:00:00'; // well past any 30s lease taken at T0
-
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 // A healthy R `/object/inspect` body (the only thing the bridge reads — sanitized).
 function inspectBody(overrides = {}) {
@@ -81,11 +80,6 @@ async function drainInspect(callR, now = T0, opts = {}) {
     callR, deriveRObjectStateKey, ...opts,
   });
   return w.runOnce();
-}
-
-async function seedProject(ownerUserId, name = 'P') {
-  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
-  return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
 // ════════════════════════════════════════════════════════════════════════════

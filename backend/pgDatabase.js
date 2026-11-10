@@ -68,6 +68,7 @@ const {
   getDefaultPipelineManifest,
   isBuiltInPipelineId,
 } = require('./pipelineManifests');
+const { codedError } = require('./errors');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
 const SCHEMA_CONTRACT_VERSION = 20261036;
@@ -286,12 +287,6 @@ function inheritedAnalysisSummary(metadata) {
 function validateJobTransition(fromStatus, toStatus) {
   if (!JOB_STATUSES.has(fromStatus) || !JOB_STATUSES.has(toStatus)) return false;
   return JOB_TRANSITIONS[fromStatus].has(toStatus);
-}
-
-function codedError(code, message) {
-  const e = new Error(message);
-  e.code = code;
-  return e;
 }
 
 function assertPlainObject(value, code, message) {
@@ -4252,9 +4247,9 @@ async function insertLineageEdgeRow(client, {
   return id;
 }
 
-async function getLineageEdgesByParent(parentObjectId, projectScope) {
-  const params = [String(parentObjectId)];
-  let where = 'parent_analysis_object_id = $1';
+async function getLineageEdges(column, objectId, projectScope) {
+  const params = [String(objectId)];
+  let where = `${column} = $1`;
   if (projectScope && projectScope.projectId !== undefined) {
     if (projectScope.projectId === null) {
       where += ' AND project_id IS NULL';
@@ -4270,22 +4265,12 @@ async function getLineageEdgesByParent(parentObjectId, projectScope) {
   return rows;
 }
 
-async function getLineageEdgesByChild(childObjectId, projectScope) {
-  const params = [String(childObjectId)];
-  let where = 'child_analysis_object_id = $1';
-  if (projectScope && projectScope.projectId !== undefined) {
-    if (projectScope.projectId === null) {
-      where += ' AND project_id IS NULL';
-    } else {
-      params.push(String(projectScope.projectId));
-      where += ` AND project_id = $${params.length}`;
-    }
-  }
-  const { rows } = await query(
-    `SELECT * FROM analysis_object_edges WHERE ${where} ORDER BY created_at ASC, id ASC`,
-    params
-  );
-  return rows;
+function getLineageEdgesByParent(parentObjectId, projectScope) {
+  return getLineageEdges('parent_analysis_object_id', parentObjectId, projectScope);
+}
+
+function getLineageEdgesByChild(childObjectId, projectScope) {
+  return getLineageEdges('child_analysis_object_id', childObjectId, projectScope);
 }
 
 async function lineageEdgeWouldCreateCycle(parentObjectId, childObjectId, projectScope) {

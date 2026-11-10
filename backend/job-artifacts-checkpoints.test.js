@@ -19,11 +19,10 @@ const CONFIGURED = config.hasPostgresConnection();
 
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { createJobWorker } = require('./jobWorker');
+const { silentLogger } = require('./_test-helpers');
 
 // Fixed UTC time for job leases and artifact timestamps.
 const T0 = '2030-01-01 00:00:00';
-
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 // Run the worker once over whatever is queued, with a deterministic clock.
 async function drainOnce(now = T0) {

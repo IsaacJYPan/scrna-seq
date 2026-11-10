@@ -12,6 +12,7 @@ const { allocateCheckpointStorageKey } = require('./pbmcPipeline');
 const { deriveRObjectStateKey } = require('./rStateKeys');
 const rBridge = require('./rWorkerBridge');
 const storage = require('./storage');
+const { silentLogger } = require('./_test-helpers');
 
 const CONFIGURED = config.hasPostgresConnection();
 const T0 = '2030-01-01 00:00:00';
@@ -21,7 +22,6 @@ const MUCH_LATER = '2030-01-01 02:00:00';
 const RECEIPT_SECRET = 'focused-receipt-test-secret';
 const tempStorageRoots = [];
 
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 function verifiedStorage() {
   return {
     inspect: () => ({ ok: true }),

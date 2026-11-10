@@ -1,6 +1,7 @@
 'use strict';
 
 const CONTRACT = require('../shared/pipelineRegistryContract.json');
+const { codedError } = require('./errors');
 
 const DEFAULT_PIPELINE_ID = CONTRACT.defaultPipelineId;
 const MODULES = Object.freeze(CONTRACT.modules);
@@ -23,12 +24,6 @@ const PARAMETER_FIELDS = Object.freeze({
   text: new Set([...COMMON_PARAMETER_FIELDS, 'default', 'placeholder', 'maxLength']),
 });
 const RESULT_VIEW_FIELDS = new Set(['type', 'title', 'artifactType']);
-
-function codedError(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  return err;
-}
 
 function invalid(message) {
   throw codedError('INVALID_PIPELINE_MANIFEST', message);

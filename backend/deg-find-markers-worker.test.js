@@ -35,7 +35,7 @@ const dbmod = require('./pgDatabase');
 const CONFIGURED = config.hasPostgresConnection();
 const {
   createUser,
-  createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
+  addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getProjectJob,
   claimNextJob, reapExpiredJobs, cancelProjectJob,
@@ -65,13 +65,12 @@ const { createJobWorker, DEFAULT_HANDLERS, degFindMarkersHandler } = worker;
 
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const serverModule = require('../server.js');
+const { silentLogger, seedProject } = require('./_test-helpers');
 const { deriveRObjectStateKey, isInternalOnlyRProxyPath, R_PROXY_INTERNAL_ONLY_PATHS } = serverModule;
 
 // Deterministic UTC instants in SQLite's 'YYYY-MM-DD HH:MM:SS' format.
 const T0 = '2030-01-01 00:00:00';
 const LATER = '2030-01-01 01:00:00';
-
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 // A healthy R `/object/deg-find-markers` body (the only thing the bridge reads, sanitized).
 function degBody(overrides = {}) {
@@ -139,11 +138,6 @@ async function drain(callR, now = T0, opts = {}) {
     callR, deriveRObjectStateKey, ...opts,
   });
   return w.runOnce();
-}
-
-async function seedProject(ownerUserId, name = 'P') {
-  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
-  return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
 // Seed an immutable result object with a durable checkpoint. DEG must hydrate this

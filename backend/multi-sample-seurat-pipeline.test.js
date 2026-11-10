@@ -16,10 +16,10 @@ const {
   seuratPipelineHandler,
 } = require('./jobWorker');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+const { silentLogger } = require('./_test-helpers');
 
 const CONFIGURED = config.hasPostgresConnection();
 const T0 = '2030-01-01 00:00:00';
-const silentLogger = () => ({ info() {}, warn() {}, error() {} });
 
 let server;
 beforeAll(async () => { if (CONFIGURED) server = await startServer(); });

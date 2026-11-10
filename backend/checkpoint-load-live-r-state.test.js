@@ -33,7 +33,7 @@ const dbmod = require('./pgDatabase');
 const CONFIGURED = config.hasPostgresConnection();
 const {
   createUser,
-  createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
+  addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getProjectJob,
   claimNextJob, cancelProjectJob,
@@ -57,12 +57,11 @@ const { createJobWorker, DEFAULT_HANDLERS, checkpointLoadHandler } = worker;
 
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const serverModule = require('../server.js');
+const { silentLogger, seedProject } = require('./_test-helpers');
 const { deriveRObjectStateKey, isInternalOnlyRProxyPath, R_PROXY_INTERNAL_ONLY_PATHS } = serverModule;
 
 // Deterministic UTC instants in SQLite's 'YYYY-MM-DD HH:MM:SS' format.
 const T0 = '2030-01-01 00:00:00';
-
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 // A healthy R `/object/pbmc-pipeline` body (used to seed a real checkpoint artifact).
 function pipelineBody() {
@@ -117,11 +116,6 @@ async function drain(callR, now = T0, opts = {}) {
     callR, deriveRObjectStateKey, ...opts,
   });
   return w.runOnce();
-}
-
-async function seedProject(ownerUserId, name = 'P') {
-  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
-  return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
 // Seed alice + project + parent object, run a REAL pbmc.pipeline.v1 job (fake R) to

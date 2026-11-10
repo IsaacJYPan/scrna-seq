@@ -20,6 +20,7 @@ const worker = require('./jobWorker');
 const { parseJobWorkerConfig, parsePositiveIntOrNull, JOB_WORKER_DEFAULTS } = worker;
 
 import serverModule from '../server.js';
+const { silentLogger } = require('./_test-helpers');
 const server = serverModule.default || serverModule;
 const {
   startJobWorkerIfEnabled,
@@ -29,9 +30,6 @@ const {
   shutdownJobWorkerAndServer,
 } = server;
 
-function silentLogger() {
-  return { info: () => {}, warn: () => {}, error: () => {} };
-}
 // A logger that records warn/error messages so tests can assert (and check they
 // never echo the raw invalid value — i.e. no secret/operator content leaks).
 function recordingLogger() {

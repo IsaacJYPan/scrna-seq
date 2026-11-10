@@ -14,13 +14,10 @@ const {
   DEFAULT_HANDLERS,
 } = require('./jobWorker');
 const { deriveRObjectStateKey } = require('./rStateKeys');
+const { silentLogger } = require('./_test-helpers');
 
 const CONFIGURED = config.hasPostgresConnection();
 const T0 = '2030-01-01 00:00:00';
-
-function silentLogger() {
-  return { info() {}, warn() {}, error() {} };
-}
 
 function hydrationBody() {
   return {

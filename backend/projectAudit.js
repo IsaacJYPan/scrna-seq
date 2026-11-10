@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('./pgDatabase');
+const { codedError } = require('./errors');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ACTIONS = new Set([
@@ -15,12 +16,6 @@ const DETAIL_KEYS = new Set([
   'fromAnalysisObjectId', 'toAnalysisObjectId', 'manifestVersion',
   'snapshotSha256', 'policyVersion', 'resultCount', 'documentCount',
 ]);
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function safeToken(value, maxLength = 160) {
   const text = String(value ?? '');

@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { codedError } = require('../errors');
 
 const ROOT = path.join(__dirname, '..', '..');
 const RUNNER_FILES = [
@@ -25,12 +26,6 @@ const SAFE_TOKEN = /^[A-Za-z0-9_.,:=@%+/-]+$/;
 const SAFE_PATH = /^\/[A-Za-z0-9_./-]+$/;
 const JOB_ID = /^job_[0-9a-f]+$/;
 const ACTIVE_STATES = new Set(['PENDING', 'CONFIGURING', 'RUNNING', 'COMPLETING', 'SUSPENDED', 'REQUEUED', 'RESIZING', 'STAGE_OUT']);
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;

@@ -6,14 +6,9 @@
 // workers to reject unsafe input before any scientific computation starts.
 
 const { projectStorageFileKey } = require('./storage');
+const { codedError } = require('./errors');
 
 const ENRICHMENT_GSEA_JOB_TYPE = 'enrichment.gsea.v1';
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function enumSpec(values, defaultValue) {
   return Object.freeze({

@@ -6,6 +6,7 @@ const {
   assertSupportedSeuratPipelineDataset,
   allocateSeuratCheckpointStorageKey,
 } = require('./seuratPipeline');
+const { codedError } = require('./errors');
 
 const MULTI_SAMPLE_JOB_TYPE = 'seurat.multisample.v1';
 const MIN_MULTI_SAMPLE_INPUTS = 2;
@@ -13,12 +14,6 @@ const MAX_MULTI_SAMPLE_INPUTS = 48;
 const MULTI_SAMPLE_PARAM_NAMES = Object.freeze(['samples', ...SEURAT_PIPELINE_PARAM_NAMES]);
 const DATASET_ID_PATTERN = /^ds_[0-9a-f]+$/;
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

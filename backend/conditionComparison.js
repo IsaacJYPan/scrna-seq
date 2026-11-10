@@ -1,12 +1,7 @@
 'use strict';
 
 const { projectStorageFileKey } = require('./storage');
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
+const { codedError } = require('./errors');
 
 function validateConditionComparisonParams(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {

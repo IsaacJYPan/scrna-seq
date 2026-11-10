@@ -11,6 +11,7 @@ const {
 const CONFIGURED = config.hasPostgresConnection();
 
 const worker = require('./jobWorker');
+const { silentLogger } = require('./_test-helpers');
 const { createJobWorker, generateWorkerId, DEFAULT_HANDLERS, UNSUPPORTED_JOB_TYPE } = worker;
 
 // Deterministic UTC instants in canonical 'YYYY-MM-DD HH:MM:SS' format (accepted
@@ -676,6 +677,3 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
   });
 });
 
-function silentLogger() {
-  return { info: () => {}, warn: () => {}, error: () => {} };
-}

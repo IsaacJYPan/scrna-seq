@@ -2,17 +2,12 @@
 
 const db = require('./pgDatabase');
 const projectAudit = require('./projectAudit');
+const { codedError } = require('./errors');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const PROMOTE_ROLES = ['owner', 'admin'];
 const REVIEW_STATUSES = new Set(['open', 'approved', 'changes_requested', 'closed']);
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function safeText(value, field, maxLength, required = false) {
   const text = typeof value === 'string' ? value.trim() : '';

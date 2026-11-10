@@ -14,6 +14,7 @@ const {
 } = require('./workerRuntime');
 const { STORAGE_PROBE_PREFIX, STORAGE_PROBE_CONTENT } = require('./rRuntime');
 const workerEntry = require('../worker.js');
+const { silentLogger } = require('./_test-helpers');
 
 const tempRoots = [];
 
@@ -27,10 +28,6 @@ afterEach(() => {
   vi.useRealTimers();
   for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-
-function silentLogger() {
-  return { info() {}, warn() {}, error() {} };
-}
 
 function runtimeConfig(overrides = {}) {
   return {

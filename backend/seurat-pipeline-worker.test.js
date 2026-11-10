@@ -19,10 +19,9 @@ const {
 const worker = require('./jobWorker');
 const { createJobWorker, DEFAULT_HANDLERS, seuratPipelineHandler } = worker;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+const { silentLogger } = require('./_test-helpers');
 
 const T0 = '2030-01-01 00:00:00';
-
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 let server;
 beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });

@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const db = require('./pgDatabase');
 const analysisBranches = require('./analysisBranches');
+const { codedError } = require('./errors');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const MANIFEST_VERSION = 1;
@@ -17,12 +18,6 @@ const SAFE_MIME_TYPES = new Map([
   ['condition_de_results', 'text/csv'],
   ['expert_r_bundle', 'application/gzip'],
 ]);
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function safeFilename(artifact) {
   const extension = artifact.artifactType === 'expert_r_bundle' ? 'tar.gz' : 'csv';

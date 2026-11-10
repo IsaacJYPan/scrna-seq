@@ -1,5 +1,7 @@
 'use strict';
 
+const { codedError } = require('./errors');
+
 const EXPLORATORY_ANALYSIS_RECIPES = Object.freeze([
   'overview',
   'feature_by_group',
@@ -13,12 +15,6 @@ const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
   'maxGroups',
   'histogramBins',
 ]);
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function requirePlainObject(value) {
   if (value === undefined || value === null) return {};

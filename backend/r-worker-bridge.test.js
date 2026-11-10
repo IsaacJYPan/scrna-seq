@@ -30,12 +30,11 @@ const worker = require('./jobWorker');
 const { createJobWorker, DEFAULT_HANDLERS, rRuntimeCheckHandler } = worker;
 
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+const { silentLogger } = require('./_test-helpers');
 
 // Deterministic UTC instants in SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format.
 const T0 = '2030-01-01 00:00:00';
 const LATER = '2030-01-01 01:00:00'; // well past any 30s lease taken at T0
-
-function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 // A healthy R `/health` response (the only thing the bridge reads).
 function healthyBody() { return { status: 'ok', timestamp: '2030-01-01T00:00:00+0000', mode: 'scRNA-seq Seurat Real' }; }

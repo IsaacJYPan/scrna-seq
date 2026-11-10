@@ -5,12 +5,7 @@
 // the worker; clients never provide paths or storage keys.
 
 const { isProjectStorageKey, projectStorageFileKey } = require('./storage');
-
-function codedError(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  return err;
-}
+const { codedError } = require('./errors');
 
 const SEURAT_PIPELINE_PARAM_SPEC = Object.freeze({
   minCells:          { type: 'int', min: 0, max: 10000, default: 3 },

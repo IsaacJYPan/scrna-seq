@@ -1,18 +1,13 @@
 'use strict';
 
 const db = require('./pgDatabase');
+const { codedError } = require('./errors');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const MODALITIES = new Set(['scrna', 'spatial']);
 const REPLICATION_UNITS = new Set(['sample', 'donor']);
 const CONDITION_MODEL_UNSUPPORTED_MESSAGE = 'Batch, blocking-factor, and covariate-adjusted condition models are not supported yet. Use the fixed unadjusted model or a paired-donor design.';
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function safeText(value, field, maxLength, { required = false } = {}) {
   const text = typeof value === 'string' ? value.trim() : '';

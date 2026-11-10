@@ -3,13 +3,10 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { codedError } = require('./errors');
 
 const HEALTH_PROBE_PREFIX = '.traceomics-web-health-';
 const HEALTH_PROBE_CONTENT = 'traceomics-web-storage-v1\n';
-
-function codedError(code, message) {
-  return Object.assign(new Error(message), { code });
-}
 
 function safeComponentStatus(settled) {
   return settled.status === 'fulfilled' ? 'ready' : 'unavailable';

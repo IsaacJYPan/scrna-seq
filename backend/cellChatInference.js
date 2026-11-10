@@ -6,18 +6,13 @@
 // unsafe or scientifically ambiguous requests before any CellChat computation.
 
 const { projectStorageFileKey } = require('./storage');
+const { codedError } = require('./errors');
 
 const CELLCHAT_INFERENCE_JOB_TYPE = 'cellchat.infer.v1';
 // The R-side bounded extractor and every durable publication boundary use the
 // same maximum. Keep this in the pure contract module so storage, worker, and
 // response validation cannot silently drift apart.
 const MAX_CELLCHAT_RESULT_ROWS = 50000;
-
-function codedError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
 
 function enumSpec(values, { required = false, defaultValue } = {}) {
   return Object.freeze({

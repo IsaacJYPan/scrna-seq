@@ -3,12 +3,7 @@
 // storage paths are derived from server-generated identifiers.
 
 const { projectStorageFileKey } = require('./storage');
-
-function codedError(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  return err;
-}
+const { codedError } = require('./errors');
 
 // The validator records defaults so every durable run retains its resolved inputs.
 const PBMC_PIPELINE_PARAM_SPEC = Object.freeze({

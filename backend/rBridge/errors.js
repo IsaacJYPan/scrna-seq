@@ -1,10 +1,6 @@
 // Public error messages and dispatch ambiguity for worker-to-R calls.
 
-function codedError(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  return err;
-}
+const { codedError } = require('../errors');
 
 // A failed response may follow committed R work. Keep this recovery signal off public errors.
 function markRSideEffectsPossible(error) {
