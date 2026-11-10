@@ -583,6 +583,24 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     };
   }
 
+  it('marks claimed agent jobs so the trust recheck cannot be skipped', async () => {
+    const ctx = await setup();
+    const run = (await submit(ctx, (await plan(ctx)).data, 'run-req-agent-flag')).data.run;
+    const claimed = await db.claimNextJob('worker_agent_flag', { leaseSeconds: 30 });
+    expect(claimed).toMatchObject({ agentRun: true });
+    const { rows } = await db.query('SELECT job_id FROM agent_runs WHERE id = $1', [run.id]);
+    expect(claimed.id).toBe(rows[0].job_id);
+    await db.query("UPDATE jobs SET status = 'canceled', claim_token = NULL, worker_id = NULL WHERE id = $1", [claimed.id]);
+    const input = await db.createProjectAnalysisObject(ctx.sponsor.user.id, ctx.project.id, {
+      datasetId: ctx.datasetId, objectType: 'matrix', displayName: 'Human input',
+    });
+    const human = await db.createProjectJob(ctx.sponsor.user.id, ctx.project.id, {
+      jobType: 'seurat.pipeline.v1', analysisObjectId: input.id, datasetId: ctx.datasetId, parameters: {},
+    });
+    const humanClaim = await db.claimNextJob('worker_agent_flag_2', { leaseSeconds: 30 });
+    expect(humanClaim).toMatchObject({ id: human.id, agentRun: false });
+  });
+
   it('accepts selection rules only on declared, non-inferential metrics', async () => {
     const ctx = await setup();
     await acceptedClusteringWithCheckpoint(ctx);

@@ -4470,7 +4470,10 @@ function rowToWorkerJob(row) {
     attempts: Number(row.attempts || 0),
     maxAttempts: Number(row.max_attempts || 1),
     priority: Number(row.priority || 0),
-    lastWorkerError: row.last_worker_error ? parseJson(row.last_worker_error, null) : null
+    lastWorkerError: row.last_worker_error ? parseJson(row.last_worker_error, null) : null,
+    // Set by the claim: whether an agent run owns this job. Agent jobs must
+    // pass the workflow trust recheck; it is never skipped for them.
+    ...(typeof row.is_agent_job === 'boolean' ? { agentRun: row.is_agent_job } : {})
   };
 }
 
@@ -5059,7 +5062,7 @@ async function claimNextJob(workerId, opts = {}) {
          started_at = COALESCE(started_at, $3),
          updated_at = $3
        WHERE id = $5 AND status = 'queued' AND attempts < max_attempts
-       RETURNING *`,
+       RETURNING *, EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.job_id = jobs.id) AS is_agent_job`,
       [wid, claimToken, now, addSeconds(now, leaseSeconds), id]
     );
     await client.query('COMMIT');

@@ -107,10 +107,31 @@ function assertRuntime(expected, actual) {
       code: 'WORKFLOW_RUNTIME_MISMATCH'
     });
 }
+function trustError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+// Whether an agent run owns the job. The claim records it on the job; when a
+// job arrives without that fact the database is asked, and if neither can
+// answer the check fails closed rather than assuming a human job.
+async function isAgentJob(db, job) {
+  if (typeof job.agentRun === 'boolean') return job.agentRun;
+  if (typeof db.query !== 'function') {
+    throw trustError('WORKFLOW_TRUST_UNAVAILABLE', 'Cannot determine whether this job belongs to an agent run.');
+  }
+  const { rows } = await db.query('SELECT 1 FROM agent_runs WHERE job_id = $1', [job.id]);
+  return rows.length > 0;
+}
+
 async function verifyJobTrust(db, job, callR, slurm) {
-  if (typeof db.getAgentRunTrustForJob !== 'function') return;
+  // Human jobs carry no approved plan. Agent jobs always must, and a missing
+  // accessor or trust record is an error, never a reason to skip the check.
+  if (!(await isAgentJob(db, job))) return;
+  if (typeof db.getAgentRunTrustForJob !== 'function') {
+    throw trustError('WORKFLOW_TRUST_UNAVAILABLE', 'The approved plan of this agent run cannot be read.');
+  }
   const plan = await db.getAgentRunTrustForJob(job.id);
-  if (!plan) return;
+  if (!plan) throw trustError('WORKFLOW_TRUST_MISSING', 'This agent run has no approved plan.');
   const release = require('./catalog')
     .currentReleases()
     .find(r => r.id === plan.release.id);
@@ -165,4 +186,4 @@ async function verifyJobTrust(db, job, callR, slurm) {
       code: 'WORKFLOW_SOURCE_CHANGED'
     });
 }
-module.exports = { trustManifest, configuredRuntime, runtimeIdentity, assertRuntime, verifyJobTrust };
+module.exports = { trustManifest, configuredRuntime, runtimeIdentity, assertRuntime, verifyJobTrust, isAgentJob };
