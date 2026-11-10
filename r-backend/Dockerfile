@@ -87,6 +87,22 @@ RUN install-r-packages cellchat-v2.1.2 \
 # build unless every runtime dependency is actually loadable.
 RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'BiocNeighbors', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db', 'edgeR', 'limma', 'NMF', 'presto', 'CellChat'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', ')); if (!identical(as.character(utils::packageVersion('CellChat')), '2.1.2')) stop('Unexpected CellChat version: ', as.character(utils::packageVersion('CellChat')))"
 
+# Trusted method library (trusted-methods/catalog.json, "packages" fields).
+# Off by default until each addition is image-tested; methods whose package is
+# missing fail with a clear message. Build with
+# --build-arg INSTALL_TRUSTED_METHOD_PACKAGES=true to include them.
+ARG INSTALL_TRUSTED_METHOD_PACKAGES=false
+RUN if [ "$INSTALL_TRUSTED_METHOD_PACKAGES" = "true" ]; then \
+      install-r-packages trusted-method-cran -e "install.packages(c('harmony'), repos='https://cloud.r-project.org/')" \
+      && install-r-packages trusted-method-bioconductor -e "BiocManager::install(c('SingleCellExperiment', 'scDblFinder', 'celda', 'speckle', 'slingshot', 'SingleR', 'celldex', 'Banksy'), ask=FALSE, update=FALSE)" \
+      && install-r-packages trusted-method-seurat-wrappers -e "remotes::install_github('satijalab/seurat-wrappers', upgrade='never')" \
+      && install-r-packages trusted-method-references -e "dir.create('/opt/traceomics/references', recursive=TRUE); for (name in c('HumanPrimaryCellAtlasData', 'BlueprintEncodeData', 'MonacoImmuneData', 'DatabaseImmuneCellExpressionData', 'MouseRNAseqData', 'ImmGenData')) saveRDS(getExportedValue('celldex', name)(), file.path('/opt/traceomics/references', paste0(name, '.rds')))" \
+      && chmod -R a+rX /opt/traceomics/references \
+      && Rscript -e "required <- c('harmony', 'SingleCellExperiment', 'scDblFinder', 'celda', 'speckle', 'slingshot', 'SingleR', 'celldex', 'Banksy', 'SeuratWrappers'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing trusted-method packages: ', paste(missing, collapse=', '))"; \
+    else \
+      echo "Skipping trusted-method packages. Set INSTALL_TRUSTED_METHOD_PACKAGES=true to include them."; \
+    fi
+
 # Optional legacy/prototype dependency. SeuratDisk-backed H5AD/H5Seurat import remains
 # outside the supported durable input contract, so a trusted local build must opt in.
 ARG INSTALL_OPTIONAL_R_PACKAGES=false

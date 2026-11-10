@@ -5,7 +5,7 @@
  * the queued job, the worker's claim-time recheck, and simulate completion
  * by writing the job's terminal state the way a worker would.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 
 const config = require('./config');
 const db = require('./pgDatabase');
@@ -519,5 +519,172 @@ describe.skipIf(!CONFIGURED)('study selection rules', () => {
     const view = await agent(ctx, `/studies/${ctx.study.id}`, {}, limited.data.credential.token);
     expect(view.data.study.selection).toEqual({ rule: { metric: 'nClusters', goal: 'max' } });
     expect(view.data.study.trials.every((t) => t.summary === null)).toBe(true);
+  });
+});
+
+describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
+  const crypto = require('crypto');
+  const fs = require('fs');
+  const { createJobWorker } = require('./jobWorker');
+  const byKey = (key) => currentReleases().find((r) => r.key === key);
+  const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
+
+  async function acceptedClusteringWithCheckpoint(ctx) {
+    const planned = await plan(ctx, { clusterResolution: 0.8 });
+    const run = await submit(ctx, planned.data, 'run-req-0001');
+    const { rows: [job] } = await db.query('SELECT id FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    const resultId = await completeJob(job.id, ctx.project.id, ctx.sponsor.user.id);
+    await db.query(
+      `INSERT INTO job_artifacts (id, project_id, job_id, result_analysis_object_id, created_by_user_id, artifact_type,
+         storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+       VALUES ('art_ckpt1', $1, $2, $3, $4, 'checkpoint', 'local_internal', $5, $6, 10, 'available', '{}')`,
+      [ctx.project.id, job.id, resultId, ctx.sponsor.user.id,
+        storage.projectStorageFileKey(ctx.project.id, 'checkpoints', job.id, 'checkpoint.rds'), 'e'.repeat(64)]
+    );
+    const accepted = await api(server, `${ctx.base}/agent-runs/${run.data.run.id}/accept`, {
+      method: 'POST', token: ctx.sponsor.token, body: { expectedAcceptedRunId: null } });
+    expect(accepted.status).toBe(200);
+    return resultId;
+  }
+
+  async function approve(ctx, rel) {
+    const ok = await api(server, `${ctx.base}/workflow-releases/${rel.id}/approve`, {
+      method: 'POST', token: ctx.sponsor.token, body: { digest: rel.digest } });
+    expect(ok.status).toBe(201);
+  }
+
+  // Stands in for the sandbox broker: writes each declared output where the
+  // broker would and reports the descriptors the real broker returns.
+  function fakeSandbox(metrics) {
+    const provider = storage.createLocalStorageProvider();
+    return async (input) => {
+      const workflowFiles = Object.entries(input.workflowOutputs).map(([port, output]) => {
+        const body = output.type === 'metrics' ? JSON.stringify(metrics)
+          : output.type === 'table' ? JSON.stringify([{ value: 'singlet', cells: 900 }]) : `rds:${port}`;
+        const storageKey = `${input.outputStorageKey}-${output.name}`;
+        fs.writeFileSync(provider.prepareWrite(storageKey), body);
+        return { name: output.name, storageKey, sizeBytes: Buffer.byteLength(body), checksumSha256: sha(body) };
+      });
+      return { ok: true, saved: true, workflowFiles, scriptSha256: sha(input.script), profileId: input.profileId,
+        checkpointChecksumSha256: input.checkpointChecksumSha256, sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
+        resourcePolicyVersion: 'expert-r-sandbox-policy.v3' };
+    };
+  }
+
+  it('fixes design choices, runs the pinned method, records a loadable result, and chains', async () => {
+    const ctx = await setup();
+    const sourceResult = await acceptedClusteringWithCheckpoint(ctx);
+    const subset = byKey('subset-cells');
+    await approve(ctx, subset);
+    const create = (body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+
+    const protectedVariation = await create({ name: 'Subset', releaseId: subset.id, sourceStudyId: ctx.study.id,
+      variations: { column: ['seurat_clusters', 'cell_type'] } });
+    expect(protectedVariation.data.code).toBe('PROTECTED_PARAMETER');
+    const badText = await create({ name: 'Subset', releaseId: subset.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { values: 'singlet"); q("' } });
+    expect(badText.data.code).toBe('INVALID_PARAMETER');
+
+    const created = await create({ name: 'Remove doublets', releaseId: subset.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { column: 'scDblFinder.class', values: 'singlet', mode: 'keep', 'min-cells': 10 },
+      maxTrials: 2, selectionRule: { metric: 'cells_after', goal: 'max' } });
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    const followOn = { ...ctx, study: created.data };
+    const planned = await plan(followOn, {});
+    expect(planned.status, JSON.stringify(planned.data)).toBe(201);
+    expect(planned.data.plan.parameters).toMatchObject({ method: 'subset-cells', values: { 'min-cells': 10, values: 'singlet' } });
+    const run = await submit(followOn, planned.data, 'run-req-0201');
+    expect(run.status, JSON.stringify(run.data)).toBe(201);
+    const { rows: [queued] } = await db.query('SELECT * FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    expect(queued).toMatchObject({ job_type: 'trusted.method.v1', analysis_object_id: sourceResult });
+
+    const runExpertSandbox = fakeSandbox({ cells_before: 1000, cells_after: 900, cells_removed: 100, fraction_kept: 0.9, values_not_found: 0 });
+    const worker = createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } });
+    await worker.runOnce();
+    const { rows: [done] } = await db.query('SELECT * FROM jobs WHERE id = $1', [queued.id]);
+    expect(done.status, done.error_json).toBe('completed');
+    const { rows: artifacts } = await db.query('SELECT artifact_type, result_analysis_object_id FROM job_artifacts WHERE job_id = $1 ORDER BY artifact_type', [queued.id]);
+    expect(artifacts.map((a) => a.artifact_type)).toEqual(['checkpoint', 'trusted_method_output', 'trusted_method_output', 'trusted_method_summary']);
+    expect(artifacts[0].result_analysis_object_id).toBe(done.result_analysis_object_id);
+
+    const results = await agent(ctx, `/runs/${run.data.run.id}/results`);
+    expect(results.data.run.state).toBe('candidate_ready');
+    expect(results.data.result.summary).toEqual({ cells_after: 900, cells_removed: 100 });
+    const study = await api(server, `${ctx.base}/studies/${created.data.id}`, { token: ctx.sponsor.token });
+    expect(study.data.selection).toMatchObject({ runId: run.data.run.id, value: 900 });
+
+    // Accepting the subset lets a second method build on it.
+    const accepted = await api(server, `${ctx.base}/agent-runs/${run.data.run.id}/accept`, {
+      method: 'POST', token: ctx.sponsor.token, body: { expectedAcceptedRunId: null } });
+    expect(accepted.status, JSON.stringify(accepted.data)).toBe(200);
+    const recluster = byKey('recluster-integrate');
+    await approve(ctx, recluster);
+    const next = await create({ name: 'Re-cluster', releaseId: recluster.id, sourceStudyId: created.data.id,
+      variations: { resolution: [0.4, 0.8] } });
+    expect(next.status, JSON.stringify(next.data)).toBe(201);
+    expect(next.data.inputs[0].analysisObjectId).toBe(done.result_analysis_object_id);
+  });
+
+  it('will not run a job whose method bytes no longer match', async () => {
+    const ctx = await setup();
+    await acceptedClusteringWithCheckpoint(ctx);
+    const subset = byKey('subset-cells');
+    await approve(ctx, subset);
+    const created = await api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token,
+      body: { name: 'Subset', releaseId: subset.id, sourceStudyId: ctx.study.id } });
+    const planned = await plan({ ...ctx, study: created.data }, {});
+    const run = await submit({ ...ctx, study: created.data }, planned.data, 'run-req-0301');
+    const { rows: [queued] } = await db.query('SELECT * FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    const tampered = { ...JSON.parse(queued.parameters_json), methodSourceSha256: '0'.repeat(64) };
+    await db.query('UPDATE jobs SET parameters_json = $2 WHERE id = $1', [queued.id, JSON.stringify(tampered)]);
+    const runExpertSandbox = vi.fn();
+    await createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } }).runOnce();
+    const { rows: [failed] } = await db.query('SELECT status FROM jobs WHERE id = $1', [queued.id]);
+    expect(failed.status).toBe('failed');
+    expect(runExpertSandbox).not.toHaveBeenCalled();
+  });
+});
+
+describe.skipIf(!CONFIGURED)('multi-sample studies', () => {
+  it('pins every sample, fixes the sheet, and plans only on the primary sample', async () => {
+    const ctx = await setup();
+    const second = 'ds_fedcba9876543210';
+    await db.query(
+      `INSERT INTO datasets (id, project_id, owner_user_id, created_by_user_id, original_filename, internal_storage_key,
+         file_type, file_size_bytes, sha256, upload_status, validation_status)
+       VALUES ($1, $2, $3, $3, 'case.h5', $4, 'tenx_h5', 100, $5, 'uploaded', 'valid')`,
+      [second, ctx.project.id, ctx.sponsor.user.id, storage.projectStorageFileKey(ctx.project.id, 'datasets', second, 'case.h5'), 'c'.repeat(64)]
+    );
+    const rel = currentReleases().find((r) => r.key === 'seurat-multisample');
+    await api(server, `${ctx.base}/workflow-releases/${rel.id}/approve`, { method: 'POST', token: ctx.sponsor.token, body: { digest: rel.digest } });
+    const samples = [
+      { datasetId: ctx.datasetId, sampleName: 'ctrl1', conditionName: 'control', donorCode: 'D1' },
+      { datasetId: second, sampleName: 'case1', conditionName: 'disease', donorCode: 'D2' },
+    ];
+    const create = (body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+    expect((await create({ name: 'Multi', releaseId: rel.id, datasetIds: [ctx.datasetId, second] })).status).toBe(400);
+    expect((await create({ name: 'Multi', releaseId: rel.id, datasetIds: [ctx.datasetId], fixedParameters: { samples } })).status).toBe(400);
+    expect((await create({ name: 'Multi', releaseId: rel.id, datasetIds: [ctx.datasetId, second],
+      variations: { samples: [samples] } })).data.code).toBe('PROTECTED_PARAMETER');
+    const created = await create({ name: 'Multi', releaseId: rel.id, datasetIds: [ctx.datasetId, second],
+      fixedParameters: { samples }, variations: { clusterResolution: [0.5, 1] } });
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    const study = { ...ctx, study: created.data };
+    const wrong = await agent(study, '/plans', { method: 'POST', body: { studyId: created.data.id, datasetId: second, choices: {} } });
+    expect(wrong.data.code).toBe('STUDY_AMENDMENT_REQUIRED');
+    const planned = await plan(study, { clusterResolution: 1 });
+    expect(planned.status, JSON.stringify(planned.data)).toBe(201);
+    expect(planned.data.plan.parameters.samples.map((s) => s.sampleName)).toEqual(['ctrl1', 'case1']);
+    const run = await submit(study, planned.data, 'run-req-0401');
+    expect(run.status, JSON.stringify(run.data)).toBe(201);
+    const { rows: [job] } = await db.query('SELECT * FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    expect(job).toMatchObject({ job_type: 'seurat.multisample.v1', dataset_id: ctx.datasetId });
+
+    // A changed second sample blocks planning and admission of further trials.
+    const pending = await plan(study, { clusterResolution: 0.5 });
+    expect(pending.status).toBe(201);
+    await db.query("UPDATE datasets SET sha256 = $2 WHERE id = $1", [second, 'f'.repeat(64)]);
+    expect((await plan(study, { clusterResolution: 0.5 })).data.code).toBe('INPUT_CHANGED');
+    expect((await submit(study, pending.data, 'run-req-0402')).data.code).toBe('INPUT_CHANGED');
   });
 });

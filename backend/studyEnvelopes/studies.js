@@ -14,6 +14,7 @@ const { slurmConfig } = require('../executors/slurm');
 
 const MAX_INPUTS = 10;
 const SLURM_JOB_TYPES = ['seurat.pipeline.v1', 'seurat.multisample.v1'];
+const MULTI_SAMPLE_JOB_TYPE = 'seurat.multisample.v1';
 const MAX_VALUES_PER_VARIATION = 10;
 const MAX_VARIED_PARAMETERS = 6;
 const DATASET_ID = /^ds_[A-Za-z0-9]+$/;
@@ -105,6 +106,14 @@ function createStudyService({ db, withTransaction, approvals }) {
         }
       }
     }
+    // Design parameters (batch/sample/condition columns, gene lists, label
+    // maps) define the scientific question. A person fixes them; an agent may
+    // only search tuning and display parameters (docs/spec.md 8.2).
+    for (const key of Object.keys(variations)) {
+      if (schema[key]?.role === 'design') {
+        throw codedError('PROTECTED_PARAMETER', `'${key.slice(0, 64)}' is a study design choice and must be fixed, not varied.`, 400);
+      }
+    }
     if (Object.keys(variations).length > MAX_VARIED_PARAMETERS) {
       throw codedError('INVALID_INPUT', `At most ${MAX_VARIED_PARAMETERS} parameters may vary.`, 400);
     }
@@ -143,6 +152,17 @@ function createStudyService({ db, withTransaction, approvals }) {
         || !datasetIds.every((id) => typeof id === 'string' && DATASET_ID.test(id))
         || new Set(datasetIds).size !== datasetIds.length)) {
       throw codedError('INVALID_INPUT', `datasetIds must list 1-${MAX_INPUTS} distinct datasets.`, 400);
+    }
+    // A sample sheet must name exactly the pinned datasets, primary first.
+    if (release.jobType === MULTI_SAMPLE_JOB_TYPE) {
+      const sheet = fixed.samples;
+      if (!Array.isArray(sheet)) {
+        throw codedError('INVALID_INPUT', 'Fix a sample sheet (fixedParameters.samples) for a multi-sample study.', 400);
+      }
+      const sheetIds = sheet.map((sample) => sample && sample.datasetId);
+      if (sheetIds.length !== datasetIds.length || sheetIds.some((id) => !datasetIds.includes(id))) {
+        throw codedError('INVALID_INPUT', 'The sample sheet must list exactly the study datasets.', 400);
+      }
     }
     const executionTarget = body.executionTarget === undefined ? 'local' : body.executionTarget;
     if (!['local', 'slurm'].includes(executionTarget)) throw codedError('INVALID_INPUT', 'executionTarget must be local or slurm.', 400);
@@ -243,9 +263,10 @@ function createStudyService({ db, withTransaction, approvals }) {
     const source = rows[0];
     if (!source) throw codedError('NOT_FOUND', 'Source study not found.', 404);
     const { rows: rel } = await db.query('SELECT release_key FROM workflow_releases WHERE id = $1', [source.release_id]);
-    if (rel[0]?.release_key !== inputSpec.fromRelease) {
-      const wanted = releases.find((r) => r.key === inputSpec.fromRelease);
-      throw codedError('INPUT_NOT_APPLICABLE', `The source study must run ${wanted ? wanted.definition.title : inputSpec.fromRelease}.`, 400);
+    const allowedSources = inputSpec.fromReleases || [inputSpec.fromRelease];
+    if (!allowedSources.includes(rel[0]?.release_key)) {
+      const wanted = allowedSources.map((key) => releases.find((r) => r.key === key)?.definition.title || key);
+      throw codedError('INPUT_NOT_APPLICABLE', `The source study must run one of: ${wanted.join('; ')}.`.slice(0, 600), 400);
     }
     if (!source.accepted_run_id || !source.result_analysis_object_id) {
       throw codedError('SOURCE_NOT_ACCEPTED', 'Accept a result in the source study first.', 409);

@@ -8,7 +8,7 @@ describes that is not listed here as implemented is not available.
 | --- | --- |
 | 0. Authority inventory and contracts | Implemented for the routes below |
 | 1. Read-only agents and inert proposals | Implemented |
-| 2. Approved local workflow execution | Implemented for two releases (Seurat QC/clustering; cluster markers) |
+| 2. Approved local workflow execution | Implemented: Seurat QC/clustering (10x HDF5, Visium), cluster markers, and the [trusted method library](../trusted-methods/README.md) |
 | 3. Qualified HPC target | Slurm target implemented (SSH login node), with a qualification run for sandbox use |
 | 4. Isolated development | Implemented: agent R scripts in sandboxes, locally or on a qualified Slurm target |
 | 5. Bounded protocol automation / MCP | MCP server, two-step composition, and reviewed agent reports implemented; standing acceptance not started |
@@ -89,6 +89,51 @@ The second release, `seurat-markers` v1, runs the existing
 `deg.find_markers.v1` job (cluster marker genes). It does not take datasets:
 it runs on a clustering a person accepted (see *Follow-on studies* below). Its
 result is the marker summary artifact; the marker table itself stays internal.
+
+The `spatial-seurat` release runs the existing `spatial.seurat.v1` job on a
+validated classic Visium Space Ranger bundle with the same parameter contract.
+`seurat-multisample` runs `seurat.multisample.v1` on several 10x HDF5 captures:
+the study pins every dataset and fixes a sample sheet (`fixedParameters.samples`,
+with sample, condition, optional donor and batch) that must list exactly those
+datasets; plans name the sheet's first dataset, and admission refuses the run if
+any sample's bytes changed. `pathway-gsea` (`enrichment.gsea.v1`) and
+`cellchat-single-context` (`cellchat.infer.v1`) run on any accepted Seurat
+analysis; their group, species, database and threshold choices are design
+parameters a person fixes.
+
+### Trusted method library
+
+Each method in [`trusted-methods/catalog.json`](../trusted-methods/README.md) is
+also a release, with job type `trusted.method.v1`. Its digest covers the
+method's R file, its catalog entry (parameters, outputs, metrics, resources,
+upstream provenance and declared deviations), and the shared executor files.
+Approval shows the upstream tutorial, citation and deviations.
+
+- **Inputs.** A method runs on the accepted result of a study whose release it
+  lists in `accepts` (for example `doublets-scdblfinder` → `subset-cells` →
+  `recluster-integrate` → `label-clusters`). Every link is a person's
+  acceptance. `seurat-markers` also accepts any method that produces an
+  analysis.
+- **Design parameters.** Parameters with role `design` (metadata columns, gene
+  lists, label maps, which cells to keep) must be fixed when the study is
+  created; varying one is `PROTECTED_PARAMETER`. Text parameters must match a
+  fixed grammar and are always design parameters. Agents may vary `tuning`
+  and `display` parameters.
+- **Execution.** The job stores only `{ method, methodVersion,
+  methodSourceSha256, values }`. The worker loads the method from its own
+  library, refuses `TRUSTED_METHOD_CHANGED` if the bytes differ, revalidates
+  values, compiles the script with the workflow-package wrapper, and runs it in
+  the isolated no-network sandbox. Outputs are checked with the workflow output
+  validator.
+- **Results.** One transaction records a new analysis object, a lineage edge,
+  every output (the `analysis` RDS becomes the new object's checkpoint, so it can
+  be opened in the workspace or feed a follow-on), and a
+  `trusted_method_summary` artifact. Only the metric keys the catalog declares
+  reach the trial summary and selection rules.
+- **Requirements.** The isolated R runtime must be configured. The
+  `expert_r.execute` grant is not required, since no caller code runs. Packages
+  outside the base image are installed with
+  `--build-arg INSTALL_TRUSTED_METHOD_PACKAGES=true` on the R image.
 
 **Approval.** Project owners and admins approve one exact release digest per
 project under *Agent access → Approved workflows*. Agents cannot approve.

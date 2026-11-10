@@ -124,7 +124,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
 
   it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'trusted.method.v1']);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
     expect(DEFAULT_HANDLERS['checkpoint.noop']).toBe(worker.checkpointNoopHandler);

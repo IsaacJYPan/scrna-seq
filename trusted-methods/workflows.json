@@ -1,0 +1,131 @@
+{
+  "format": "traceomics-trusted-workflows",
+  "schemaVersion": 1,
+  "workflows": [
+    {
+      "id": "atlas-cleanup",
+      "name": "Atlas cleanup and annotation",
+      "version": "1.0.0",
+      "description": "Doublet calling, doublet removal, re-clustering with optional batch integration, and manual cluster naming. Start from a QC'd, clustered analysis.",
+      "steps": [
+        {
+          "id": "doublets",
+          "method": "doublets-scdblfinder",
+          "label": "Doublets"
+        },
+        {
+          "id": "singlets",
+          "method": "subset-cells",
+          "label": "Remove doublets"
+        },
+        {
+          "id": "recluster",
+          "method": "recluster-integrate",
+          "label": "Integrate and re-cluster"
+        },
+        {
+          "id": "annotate",
+          "method": "label-clusters",
+          "label": "Name clusters"
+        }
+      ]
+    },
+    {
+      "id": "disease-atlas",
+      "name": "Disease vs control atlas",
+      "version": "1.0.0",
+      "description": "Ambient RNA and doublet cleanup, sample-aware integration, reference annotation, then per-cell-type pseudobulk DE and composition testing. Start from a multi-sample analysis.",
+      "steps": [
+        {
+          "id": "ambient",
+          "method": "ambient-decontx",
+          "label": "Ambient RNA"
+        },
+        {
+          "id": "doublets",
+          "method": "doublets-scdblfinder",
+          "label": "Doublets"
+        },
+        {
+          "id": "singlets",
+          "method": "subset-cells",
+          "label": "Remove doublets"
+        },
+        {
+          "id": "integrate",
+          "method": "recluster-integrate",
+          "label": "Integrate and cluster"
+        },
+        {
+          "id": "annotate",
+          "method": "annotate-singler",
+          "label": "Annotate cell types"
+        },
+        {
+          "id": "markers",
+          "method": "gene-figures",
+          "label": "Marker figures"
+        },
+        {
+          "id": "de",
+          "method": "pseudobulk-de",
+          "label": "Pseudobulk DE",
+          "from": "annotate"
+        },
+        {
+          "id": "abundance",
+          "method": "abundance-propeller",
+          "label": "Composition",
+          "from": "annotate"
+        }
+      ]
+    },
+    {
+      "id": "visium-domains",
+      "name": "Visium spatial domains",
+      "version": "1.0.0",
+      "description": "Spatially variable genes, BANKSY tissue domains, and expression figures for a clustered Visium analysis.",
+      "steps": [
+        {
+          "id": "svg",
+          "method": "spatial-svg",
+          "label": "Spatial genes"
+        },
+        {
+          "id": "domains",
+          "method": "spatial-banksy",
+          "label": "Tissue domains"
+        },
+        {
+          "id": "figures",
+          "method": "gene-figures",
+          "label": "Figures"
+        }
+      ]
+    },
+    {
+      "id": "imaging-niches",
+      "name": "Imaging spatial niches",
+      "version": "1.0.0",
+      "description": "Reference annotation, cellular niches, and spatially variable genes for an image-based (Xenium, CosMx, MERFISH) analysis.",
+      "steps": [
+        {
+          "id": "annotate",
+          "method": "annotate-singler",
+          "label": "Annotate cell types"
+        },
+        {
+          "id": "niches",
+          "method": "spatial-niches",
+          "label": "Niches"
+        },
+        {
+          "id": "svg",
+          "method": "spatial-svg",
+          "label": "Spatial genes",
+          "from": "annotate"
+        }
+      ]
+    }
+  ]
+}

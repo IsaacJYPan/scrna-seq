@@ -92,7 +92,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   const [datasets, setDatasets] = useState([]);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
-  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], sourceStudyId: '', param: '', values: '', maxTrials: 4, executionTarget: 'local', ruleMetric: '', ruleGoal: 'max' });
+  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], sourceStudyId: '', param: '', values: '', fixed: {}, sheet: {}, maxTrials: 4, executionTarget: 'local', ruleMetric: '', ruleGoal: 'max' });
   const [slurm, setSlurm] = useState(null);
   const [steps, setSteps] = useState({});
   const toggleSteps = async (releaseId) => {
@@ -111,7 +111,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
     try {
       const [rel, st, rn, ds] = await Promise.all([
         api.listWorkflowReleases(projectId), api.listStudies(projectId), api.listAgentRuns(projectId),
-        api.listDatasets ? api.listDatasets(projectId, { fileType: 'tenx_h5' }) : Promise.resolve([]),
+        api.listDatasets ? api.listDatasets(projectId) : Promise.resolve([]),
       ]);
       if (!mounted.current) return;
       setReleases(rel?.releases || []);
@@ -147,11 +147,20 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   const approved = releases.filter((r) => r.approval);
   const selected = releases.find((r) => r.id === (form.releaseId || approved[0]?.id));
   // A follow-on release runs on the accepted result of a study of another release.
-  const composedFrom = selected?.inputs?.[0]?.kind === 'analysis_object' ? selected.inputs[0].fromRelease : null;
+  const composedInput = selected?.inputs?.[0]?.kind === 'analysis_object' ? selected.inputs[0] : null;
+  const composedFrom = composedInput ? (composedInput.fromReleases || [composedInput.fromRelease]) : null;
   const releaseKey = (id) => releases.find((r) => r.id === id)?.key;
-  const sourceStudies = composedFrom ? studies.filter((s) => s.acceptedRunId && releaseKey(s.releaseId) === composedFrom) : [];
+  const sourceStudies = composedFrom ? studies.filter((s) => s.acceptedRunId && composedFrom.includes(releaseKey(s.releaseId))) : [];
   const studyName = (id) => studies.find((s) => s.id === id)?.name || id;
   const slurmAllowed = slurm && selected?.jobType === 'seurat.pipeline.v1';
+  const inputFileTypes = selected?.inputs?.[0]?.fileTypes || ['tenx_h5'];
+  const inputDatasets = datasets.filter((d) => !d.fileType || inputFileTypes.includes(d.fileType));
+  const schemaEntries = Object.entries(selected?.parameterSchema || {});
+  // Design choices (columns, gene lists, label maps) are fixed by a person.
+  const designParams = schemaEntries.filter(([, spec]) => spec.role === 'design');
+  const variableParams = schemaEntries.filter(([, spec]) => spec.role !== 'design').map(([name]) => name);
+  const ruleMetrics = RULE_METRICS[selected?.jobType]
+    || (selected?.method?.metrics || []).map((m) => [m.key, m.label]);
   const createStudy = (event) => {
     event.preventDefault();
     const body = {
@@ -163,9 +172,29 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
     if (form.param && form.values.trim()) {
       body.variations = { [form.param]: parseValues(form.values, selected?.parameterSchema?.[form.param]) };
     }
+    const fixed = {};
+    for (const [name, spec] of designParams) {
+      if (spec.type === 'sampleSheet') {
+        fixed[name] = form.datasetIds.map((id) => {
+          const row = form.sheet[id] || {};
+          const entry = { datasetId: id, sampleName: row.sampleName || '', conditionName: row.conditionName || '' };
+          if (row.donorCode) entry.donorCode = row.donorCode;
+          if (row.batch) entry.batch = row.batch;
+          return entry;
+        });
+        continue;
+      }
+      const raw = form.fixed[name];
+      if (raw === undefined || raw === '') continue;
+      if (spec.type === 'enum') fixed[name] = spec.values.find((v) => String(v) === raw) ?? raw;
+      else if (['int', 'intOrNull', 'number'].includes(spec.type)) fixed[name] = Number(raw);
+      else if (spec.type === 'bool') fixed[name] = raw === 'true';
+      else fixed[name] = raw;
+    }
+    if (Object.keys(fixed).length) body.fixedParameters = fixed;
     act('study', async () => {
       await api.createStudy(projectId, body);
-      setForm((f) => ({ ...f, name: '', values: '', datasetIds: [], sourceStudyId: '' }));
+      setForm((f) => ({ ...f, name: '', values: '', fixed: {}, sheet: {}, datasetIds: [], sourceStudyId: '' }));
     });
   };
 
@@ -222,24 +251,32 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
               <input required maxLength={200} value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
             <label className="space-y-1 text-xs font-bold text-textMuted">Approved release
-              <select value={selected?.id || ''} onChange={(e) => setForm((f) => ({ ...f, releaseId: e.target.value, param: '' }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
+              <select value={selected?.id || ''} onChange={(e) => setForm((f) => ({ ...f, releaseId: e.target.value, param: '', fixed: {}, ruleMetric: '' }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
                 {approved.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
               </select>
             </label>
           </div>
+          {selected?.method?.provenance && (
+            <div className="rounded border border-border bg-background px-3 py-2 text-xs text-textMuted">
+              <p>Follows <a className="underline" href={selected.method.provenance.url} target="_blank" rel="noreferrer">{selected.method.provenance.title}</a> ({selected.method.provenance.reviewedAgainst}). {selected.method.provenance.citation}</p>
+              {selected.method.deviations?.length > 0 && (
+                <ul className="mt-1 list-disc pl-4">{selected.method.deviations.map((d) => <li key={d}>{d}</li>)}</ul>
+              )}
+            </div>
+          )}
           {composedFrom ? (
             <label className="block space-y-1 text-xs font-bold text-textMuted">Builds on the accepted result of
               <select value={form.sourceStudyId} onChange={(e) => setForm((f) => ({ ...f, sourceStudyId: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
                 <option value="">Choose a study…</option>
                 {sourceStudies.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
-              {sourceStudies.length === 0 && <span className="block font-normal">No study of {releases.find((r) => r.key === composedFrom)?.title || composedFrom} has an accepted result yet.</span>}
+              {sourceStudies.length === 0 && <span className="block font-normal">No study of {composedFrom.map((key) => releases.find((r) => r.key === key)?.title || key).join(', ')} has an accepted result yet.</span>}
             </label>
           ) : (
           <fieldset className="space-y-1">
             <legend className="text-xs font-bold text-textMuted">Input datasets (exact versions are pinned)</legend>
-            {datasets.length === 0 && <p className="text-xs text-textMuted">No uploaded 10x HDF5 files in this project.</p>}
-            {datasets.map((d) => (
+            {inputDatasets.length === 0 && <p className="text-xs text-textMuted">No uploaded {inputFileTypes.includes('visium_zip') ? 'Visium bundles' : '10x HDF5 files'} in this project.</p>}
+            {inputDatasets.map((d) => (
               <label key={d.id} className="flex items-center gap-2 text-sm text-text">
                 <input type="checkbox" checked={form.datasetIds.includes(d.id)} onChange={() => setForm((f) => ({
                   ...f, datasetIds: f.datasetIds.includes(d.id) ? f.datasetIds.filter((x) => x !== d.id) : [...f.datasetIds, d.id],
@@ -249,11 +286,47 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
             ))}
           </fieldset>
           )}
+          {designParams.length > 0 && (
+            <fieldset className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <legend className="text-xs font-bold text-textMuted">Study design (fixed for every trial)</legend>
+              {designParams.filter(([, spec]) => spec.type === 'sampleSheet').map(([name]) => (
+                <div key={name} className="space-y-1 md:col-span-2">
+                  <p className="text-xs text-textMuted">Sample sheet: one row per selected dataset, in order. The first is the primary sample.</p>
+                  {form.datasetIds.map((id) => {
+                    const row = form.sheet[id] || {};
+                    const set = (field) => (e) => setForm((f) => ({ ...f, sheet: { ...f.sheet, [id]: { ...(f.sheet[id] || {}), [field]: e.target.value } } }));
+                    const label = datasets.find((d) => d.id === id)?.originalFilename || id;
+                    return (
+                      <div key={id} className="grid grid-cols-1 gap-2 md:grid-cols-5">
+                        <span className="self-center text-xs text-text">{label}</span>
+                        <input aria-label={`Sample name for ${label}`} placeholder="Sample" value={row.sampleName || ''} onChange={set('sampleName')} className="rounded border border-border bg-background px-2 py-1 text-sm" />
+                        <input aria-label={`Condition for ${label}`} placeholder="Condition" value={row.conditionName || ''} onChange={set('conditionName')} className="rounded border border-border bg-background px-2 py-1 text-sm" />
+                        <input aria-label={`Donor for ${label}`} placeholder="Donor (optional)" value={row.donorCode || ''} onChange={set('donorCode')} className="rounded border border-border bg-background px-2 py-1 text-sm" />
+                        <input aria-label={`Batch for ${label}`} placeholder="Batch (optional)" value={row.batch || ''} onChange={set('batch')} className="rounded border border-border bg-background px-2 py-1 text-sm" />
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+              {designParams.filter(([, spec]) => spec.type !== 'sampleSheet').map(([name, spec]) => (
+                <label key={name} className="space-y-1 text-xs font-bold text-textMuted">{spec.label || name}
+                  {spec.type === 'enum' ? (
+                    <select value={form.fixed[name] ?? (spec.default === undefined ? '' : String(spec.default))} onChange={(e) => setForm((f) => ({ ...f, fixed: { ...f.fixed, [name]: e.target.value } }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
+                      {spec.default === undefined && <option value="">Choose…</option>}
+                      {spec.values.map((v) => <option key={String(v)} value={String(v)}>{String(v)}</option>)}
+                    </select>
+                  ) : (
+                    <input value={form.fixed[name] ?? ''} maxLength={spec.maxLength || 200} placeholder={String(spec.default ?? '')} onChange={(e) => setForm((f) => ({ ...f, fixed: { ...f.fixed, [name]: e.target.value } }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
+                  )}
+                </label>
+              ))}
+            </fieldset>
+          )}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <label className="space-y-1 text-xs font-bold text-textMuted">Parameter the agent may vary
               <select value={form.param} onChange={(e) => setForm((f) => ({ ...f, param: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
                 <option value="">None (all fixed at defaults)</option>
-                {Object.keys(selected?.parameterSchema || {}).map((name) => <option key={name} value={name}>{name}</option>)}
+                {variableParams.map((name) => <option key={name} value={name}>{name}</option>)}
               </select>
             </label>
             <label className="space-y-1 text-xs font-bold text-textMuted">Allowed values (comma-separated)
@@ -275,7 +348,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
                 </select>
                 <select aria-label="Selection metric" value={form.ruleMetric} onChange={(e) => setForm((f) => ({ ...f, ruleMetric: e.target.value }))} className="w-full rounded border border-border bg-background px-2 py-2 text-sm font-normal text-text">
                   <option value="">No rule</option>
-                  {(RULE_METRICS[selected?.jobType] || []).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                  {ruleMetrics.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
                 </select>
               </span>
             </label>

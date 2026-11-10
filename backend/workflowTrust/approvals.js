@@ -27,6 +27,8 @@ function publicRelease(release, approval = null) {
     inputs: release.definition.inputs,
     outputs: release.definition.outputs,
     readableSource: release.readableSource || null,
+    // Library methods: upstream source, citation, declared deviations, metrics.
+    method: release.definition.method || null,
     approval: approval ? {
       id: approval.id,
       approvedByUserId: Number(approval.approved_by_user_id),

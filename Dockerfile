@@ -72,6 +72,7 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/backend ./backend
 COPY --from=build /app/shared ./shared
+COPY --from=build /app/trusted-methods ./trusted-methods
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server.js /app/worker.js ./
 COPY --from=build /app/scripts/enable-job-worker.cjs ./scripts/enable-job-worker.cjs

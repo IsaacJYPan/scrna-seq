@@ -12,6 +12,17 @@ const fs = require('fs');
 const path = require('path');
 const { SEURAT_PIPELINE_PARAM_SPEC, validateSeuratPipelineParams } = require('../seuratPipeline');
 const { DEG_FIND_MARKERS_PARAM_SPEC, validateDegFindMarkersParams } = require('../degFindMarkers');
+const { validateSpatialSeuratParams } = require('../spatialPipeline');
+const { validateMultiSampleSeuratParams } = require('../multiSampleSeuratPipeline');
+const trustedMethods = require('./trustedMethods');
+const { ENRICHMENT_GSEA_PARAM_SPEC, validateEnrichmentGseaParams } = require('../enrichmentGsea');
+const { CELLCHAT_INFERENCE_PARAM_SPEC, validateCellChatInferenceParams } = require('../cellChatInference');
+
+// Marks the named parameters of an existing job's spec as study design
+// choices, which a person must fix (studies.js refuses to vary them).
+function withDesignRoles(spec, names) {
+  return Object.fromEntries(Object.entries(spec).map(([key, entry]) => [key, names.includes(key) ? { ...entry, role: 'design' } : entry]));
+}
 
 const ROOT = path.join(__dirname, '..', '..');
 
@@ -23,6 +34,12 @@ function canonicalJson(value) {
 
 function sha256(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
+}
+
+// Library methods whose output is a new Seurat analysis (for example an
+// integrated or annotated object) can feed any release that reads one.
+function analysisProducingMethodKeys() {
+  return trustedMethods.loadLibrary().methods.filter((m) => m.outputs.analysis).map((m) => m.key);
 }
 
 const DEFINITIONS = [
@@ -54,18 +71,127 @@ const DEFINITIONS = [
     title: 'Cluster marker genes (on an accepted clustering)',
     jobType: 'deg.find_markers.v1',
     handlerFiles: ['backend/degFindMarkers.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R'],
-    inputs: [{ name: 'clustering', kind: 'analysis_object', fromRelease: 'seurat-qc-cluster' }],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample', 'spatial-seurat', ...analysisProducingMethodKeys()] }],
     outputs: [{ name: 'markers', kind: 'artifact', artifactType: 'deg_summary' }],
     parameterSchema: DEG_FIND_MARKERS_PARAM_SPEC,
     resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 1800 },
     validation: ['job.completed', 'result.artifact.present'],
     validateParameters: (params) => validateDegFindMarkersParams(params).params,
   },
+  {
+    // Ranked GO Biological Process enrichment for one group versus the rest.
+    // The group and species are study design choices.
+    key: 'pathway-gsea',
+    version: '1',
+    title: 'Ranked GO pathway enrichment for one group (fgsea)',
+    jobType: 'enrichment.gsea.v1',
+    handlerFiles: ['backend/enrichmentGsea.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R', 'r-backend/lib/enrichmentGsea.R'],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample', 'spatial-seurat', ...analysisProducingMethodKeys()] }],
+    outputs: [{ name: 'pathways', kind: 'artifact', artifactType: 'enrichment_summary' }],
+    parameterSchema: withDesignRoles(ENRICHMENT_GSEA_PARAM_SPEC, ['groupBy', 'targetGroup', 'species', 'geneSetCollection', 'adjustedPValueCutoff']),
+    resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 1800 },
+    validation: ['job.completed', 'result.artifact.present'],
+    validateParameters: (params) => validateEnrichmentGseaParams(params).params,
+  },
+  {
+    // Single-context CellChat ligand-receptor candidates. The intent is fixed
+    // to one context: it is not a cross-condition comparison.
+    key: 'cellchat-single-context',
+    version: '1',
+    title: 'Cell-cell communication candidates in one context (CellChat)',
+    jobType: 'cellchat.infer.v1',
+    handlerFiles: ['backend/cellChatInference.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R', 'r-backend/lib/cellChatInference.R'],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample', 'spatial-seurat', ...analysisProducingMethodKeys()] }],
+    outputs: [{ name: 'interactions', kind: 'artifact', artifactType: 'cellchat_summary' }],
+    parameterSchema: withDesignRoles(CELLCHAT_INFERENCE_PARAM_SPEC, ['groupBy', 'species', 'databaseCategory', 'analysisIntent', 'pValueCutoff', 'minCellsPerGroup', 'maxCellsPerGroup', 'maxTotalCells']),
+    resources: { cpus: 1, memoryMiB: 16384, maxWallSeconds: 3600 },
+    validation: ['job.completed', 'result.artifact.present'],
+    validateParameters: (params) => validateCellChatInferenceParams(params).params,
+  },
+  {
+    // Several 10x HDF5 captures merged with a sample sheet (sample, condition,
+    // donor, batch). The sheet is a design choice: a person fixes it in the
+    // study; it names exactly the study's pinned datasets.
+    key: 'seurat-multisample',
+    version: '1',
+    title: 'Seurat multi-sample QC, normalization and clustering (10x HDF5 + sample sheet)',
+    jobType: 'seurat.multisample.v1',
+    handlerFiles: ['backend/multiSampleSeuratPipeline.js', 'backend/seuratPipeline.js', 'backend/jobs/pipelineHandlers.js', 'r-backend/plumber.R'],
+    inputs: [{ name: 'datasets', fileTypes: ['tenx_h5'], multiple: true }],
+    outputs: [{ name: 'result', kind: 'analysis_object', objectType: 'seurat' }],
+    parameterSchema: { samples: { type: 'sampleSheet', role: 'design', label: 'Sample sheet' }, ...SEURAT_PIPELINE_PARAM_SPEC },
+    resources: { cpus: 1, memoryMiB: 16384, maxWallSeconds: 7200 },
+    validation: ['job.completed', 'result.analysis_object.present'],
+    validateParameters: (params) => {
+      const { params: resolved, samples } = validateMultiSampleSeuratParams(params);
+      return { samples, ...resolved };
+    },
+  },
+  {
+    // Classic 10x Visium (Space Ranger bundle). Same parameter contract and
+    // analysis core as the single-cell pipeline, loaded with Load10X_Spatial.
+    key: 'spatial-seurat',
+    version: '1',
+    title: 'Seurat spatial QC, normalization and clustering (10x Visium)',
+    jobType: 'spatial.seurat.v1',
+    handlerFiles: ['backend/spatialPipeline.js', 'backend/seuratPipeline.js', 'backend/jobs/pipelineHandlers.js', 'r-backend/plumber.R'],
+    inputs: [{ name: 'dataset', fileTypes: ['visium_zip'] }],
+    outputs: [{ name: 'result', kind: 'analysis_object', objectType: 'seurat' }],
+    parameterSchema: SEURAT_PIPELINE_PARAM_SPEC,
+    resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
+    validation: ['job.completed', 'result.analysis_object.present'],
+    validateParameters: (params) => validateSpatialSeuratParams(params).params,
+  },
 ];
+
+// Files every trusted-method release runs through, in addition to its own R file.
+const TRUSTED_METHOD_HANDLER_FILES = [
+  'backend/workflowTrust/trustedMethods.js',
+  'backend/jobs/trustedMethodHandler.js',
+  'backend/workflowRuntime.js',
+  'backend/workflowOutputs.js',
+];
+
+function sourceReleaseKey(source) {
+  return source.startsWith('trusted:') ? source.slice('trusted:'.length) : source;
+}
+
+// One release per library method (trusted-methods/catalog.json). Its digest
+// covers the method's R bytes, catalog entry, provenance, and the shared
+// executor files, so editing any of them requires a fresh approval.
+function trustedMethodDefinitions() {
+  return trustedMethods.loadLibrary().methods.map((method) => ({
+    key: method.key,
+    version: method.version,
+    title: method.title,
+    jobType: trustedMethods.JOB_TYPE,
+    handlerFiles: [...TRUSTED_METHOD_HANDLER_FILES, `trusted-methods/${method.entry}`],
+    inputs: [{ name: 'analysis', kind: 'analysis_object', fromReleases: method.accepts.map(sourceReleaseKey) }],
+    outputs: [{ name: 'result', kind: 'analysis_object', objectType: method.outputs.analysis ? 'seurat' : 'generic' }],
+    parameterSchema: trustedMethods.releaseParameterSchema(method),
+    resources: method.resources,
+    validation: ['job.completed', 'result.analysis_object.present', 'outputs.typed', `summary.${method.summaryOutput}`],
+    method: {
+      category: method.category,
+      modalities: method.modalities,
+      packages: method.packages,
+      provenance: method.provenance,
+      deviations: method.deviations,
+      outputs: method.outputs,
+      metrics: method.metrics,
+      runtimeProfileId: trustedMethods.loadLibrary().runtimeProfileId,
+    },
+    validateParameters: (params) => trustedMethods.resolveMethodParameters(method, params),
+  }));
+}
+
+function allDefinitions() {
+  return [...DEFINITIONS, ...trustedMethodDefinitions()];
+}
 
 // Artifact types that count as a release's declared result (spec 13.1).
 const RESULT_ARTIFACT_TYPES = Object.freeze(
-  [...new Set(DEFINITIONS.flatMap((d) => d.outputs.filter((o) => o.kind === 'artifact').map((o) => o.artifactType)))]
+  [...new Set(allDefinitions().flatMap((d) => d.outputs.filter((o) => o.kind === 'artifact').map((o) => o.artifactType)))]
 );
 
 // Type/range check for one parameter value against a release schema entry,
@@ -76,6 +202,18 @@ function validateScalar(schema, name, value) {
   const fail = (why) => { throw new Error(`Parameter '${name}' ${why}.`); };
   if (spec.type === 'enum') { if (!spec.values.includes(value)) fail(`must be one of: ${spec.values.join(', ')}`); return; }
   if (spec.type === 'bool') { if (typeof value !== 'boolean') fail('must be a boolean'); return; }
+  if (spec.type === 'safeLabel') {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9 ._+()-]{1,80}$/.test(value.trim())) fail('must be a group label');
+    return;
+  }
+  if (spec.type === 'sampleSheet') {
+    validateMultiSampleSeuratParams({ samples: value });
+    return;
+  }
+  if (spec.type === 'text') {
+    trustedMethods.checkValue({ key: name, type: 'text', pattern: spec.pattern, maxLength: spec.maxLength }, value);
+    return;
+  }
   if (spec.type === 'intOrNull' && value === null) return;
   if (typeof value !== 'number' || !Number.isFinite(value)) fail('must be a finite number');
   if ((spec.type === 'int' || spec.type === 'intOrNull') && !Number.isInteger(value)) fail('must be an integer');
@@ -99,6 +237,7 @@ function buildRelease(definition) {
     outputs: definition.outputs,
     resources: definition.resources,
     validation: definition.validation,
+    ...(definition.method ? { method: definition.method } : {}),
   };
   const digest = sha256(canonicalJson(identity));
   return {
@@ -115,7 +254,7 @@ function buildRelease(definition) {
 }
 
 function currentReleases() {
-  return DEFINITIONS.map(buildRelease);
+  return allDefinitions().map(buildRelease);
 }
 
 // Registers the current releases and supersedes older digests of the same key.

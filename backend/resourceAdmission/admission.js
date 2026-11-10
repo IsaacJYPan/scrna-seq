@@ -13,6 +13,7 @@ const { WRITE_ROLES, READ_ROLES, codedError } = require('../policy/agentCapabili
 const { recordAutomationEvent } = require('../automation/automationAudit');
 const { canonicalJson, sha256, RESULT_ARTIFACT_TYPES } = require('../workflowTrust/catalog');
 const { assertSupportedSeuratPipelineDataset } = require('../seuratPipeline');
+const { assertSupportedSpatialSeuratDataset } = require('../spatialPipeline');
 const { slurmConfig } = require('../executors/slurm');
 const { boundedSummary, parseMetadata } = require('./summaries');
 
@@ -178,8 +179,26 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         'SELECT 1 FROM analysis_objects WHERE id = $1 AND project_id = $2', [input.analysisObjectId, study.project_id]);
       if (!objects[0]) throw codedError('INPUT_CHANGED', 'The pinned source result is no longer available.', 409);
     }
-    if (release.jobType === 'seurat.pipeline.v1') {
-      try { assertSupportedSeuratPipelineDataset(datasetForHandler(rows[0])); } catch (error) {
+    if (release.jobType === 'seurat.multisample.v1') {
+      // The job reads every dataset in the sample sheet: all must be unchanged,
+      // and the plan's dataset must be the sheet's primary (first) sample.
+      const sheet = study.protected_json.samples || [];
+      if (sheet[0]?.datasetId !== datasetId) {
+        throw codedError('STUDY_AMENDMENT_REQUIRED', 'Plan multi-sample runs on the first dataset of the sample sheet.', 409);
+      }
+      for (const entry of study.inputs_json) {
+        const { rows: pinned } = await client.query('SELECT * FROM datasets WHERE id = $1 AND project_id = $2', [entry.datasetId, study.project_id]);
+        if (!pinned[0] || pinned[0].sha256 !== entry.datasetSha256) {
+          throw codedError('INPUT_CHANGED', 'A pinned sample is no longer available in its exact version.', 409);
+        }
+        try { assertSupportedSeuratPipelineDataset(datasetForHandler(pinned[0])); } catch (error) {
+          throw codedError('INPUT_NOT_APPLICABLE', error.message, 409);
+        }
+      }
+    }
+    if (release.jobType === 'seurat.pipeline.v1' || release.jobType === 'spatial.seurat.v1') {
+      const check = release.jobType === 'seurat.pipeline.v1' ? assertSupportedSeuratPipelineDataset : assertSupportedSpatialSeuratDataset;
+      try { check(datasetForHandler(rows[0])); } catch (error) {
         throw codedError('INPUT_NOT_APPLICABLE', error.message, 409);
       }
     }

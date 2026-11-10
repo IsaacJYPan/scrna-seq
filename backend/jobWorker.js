@@ -31,6 +31,7 @@ const {
   conditionComparisonHandler,
 } = require('./jobs/analysisHandlers');
 const { expertRHandler } = require('./jobs/expertRHandler');
+const { trustedMethodHandler } = require('./jobs/trustedMethodHandler');
 const {
   safeDiagnosticCode,
   codedHandlerError,
@@ -128,6 +129,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'explore.summarize.v1': exploratoryAnalysisHandler,
   'condition.pseudobulk_de.v1': conditionComparisonHandler,
   'expert.r.v1': expertRHandler,
+  'trusted.method.v1': trustedMethodHandler,
 });
 
 // Dependencies and the clock are injectable for tests. Constructing a worker does
@@ -562,6 +564,15 @@ function createJobWorker(options = {}) {
             input,
             withNow({}, resolveNowTs())
           ),
+        completeTrustedMethodResult: (input) =>
+          db.completeTrustedMethodResultByWorker(
+            jobId,
+            workerId,
+            claimToken,
+            input,
+            withNow({}, resolveNowTs())
+          ),
+        storageProvider,
         completeCheckpointFork: (input) =>
           db.completeCheckpointForkByWorker(
             jobId,
@@ -996,6 +1007,16 @@ function createJobWorker(options = {}) {
           // Atomic DEG completion: the local_internal marker-table artifact + the metadata-only
           // summary artifact in ONE claim-guarded transaction (used only by the deg.find_markers.v1
           // handler) so one artifact can't commit without the other. Creates NO result object/edge.
+          // Trusted library method: result object + checkpoint + typed outputs + summary.
+          completeTrustedMethodResult: (input) =>
+            db.completeTrustedMethodResultByWorker(
+              jobId,
+              workerId,
+              claimToken,
+              input,
+              withNow({}, resolveNowTs())
+            ),
+          storageProvider,
           completeDegFindMarkersResult: (input) =>
             db.completeDegFindMarkersResultByWorker(
               jobId,

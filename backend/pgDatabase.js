@@ -164,7 +164,8 @@ const ALLOWED_JOB_TYPES = new Set([
   'cellchat.infer.v1',
   'explore.summarize.v1',
   'condition.pseudobulk_de.v1',
-  'expert.r.v1'
+  'expert.r.v1',
+  'trusted.method.v1'
 ]);
 const RETRYABLE_DURABLE_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
@@ -3029,6 +3030,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     'cellchat.infer.v1',
     'condition.pseudobulk_de.v1',
     'expert.r.v1',
+    'trusted.method.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -3040,6 +3042,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     'cellchat.infer.v1',
     'condition.pseudobulk_de.v1',
     'expert.r.v1',
+    'trusted.method.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -3054,6 +3057,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     'cellchat.infer.v1',
     'condition.pseudobulk_de.v1',
     'expert.r.v1',
+    'trusted.method.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -3182,6 +3186,23 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
       throw codedError('INVALID_PARAMETERS', 'Condition contrast does not have sufficient biological replication.');
     }
   }
+  if (jobType === 'trusted.method.v1') {
+    // People choose a library method by key; the server pins its exact
+    // version and source digest. No R source is accepted here.
+    const { methodByKey, resolveMethodParameters } = require('./workflowTrust/trustedMethods');
+    const p = parameters && typeof parameters === 'object' && !Array.isArray(parameters) ? parameters : {};
+    if (Object.keys(p).some((key) => !['method', 'values'].includes(key))) {
+      throw codedError('INVALID_PARAMETERS', 'trusted.method.v1 accepts only method and values.');
+    }
+    const method = typeof p.method === 'string' ? methodByKey(p.method) : null;
+    if (!method) throw codedError('INVALID_PARAMETERS', 'Unknown trusted method.');
+    try { storedParameters = resolveMethodParameters(method, p.values); } catch (error) {
+      throw codedError('INVALID_PARAMETERS', error.message);
+    }
+    if (!expertRSandboxEnabled() || config.demoMode()) {
+      throw codedError('EXPERT_R_UNAVAILABLE', 'Trusted methods need the isolated R runtime, which is not enabled here.');
+    }
+  }
   if (jobType === 'expert.r.v1') {
     storedParameters = storedExpertRParams(parameters);
     if (!expertRSandboxEnabled() || config.demoMode()) {
@@ -3197,6 +3218,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
   // member's live state. Reject before queue insertion so an invalid request
   // cannot consume the deployment's single worker slot only to fail later.
   const privateLiveInputJobTypes = new Set([
+    'trusted.method.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
@@ -4498,6 +4520,7 @@ function workerHoldsClaim(row, workerId, claimToken, now) {
 }
 
 const CLAIMED_OWNED_OBJECT_JOB_TYPES = new Set([
+  'trusted.method.v1',
   'r.object.inspect',
   'pbmc.pipeline.v1',
   'checkpoint.save.v1',
@@ -4625,6 +4648,7 @@ async function getLoadableCheckpointForJobByWorker(jobId, workerId, claimToken, 
 }
 
 const CHECKPOINT_HYDRATED_JOB_TYPES = new Set([
+  'trusted.method.v1',
   'r.object.inspect',
   'pbmc.pipeline.v1',
   'deg.find_markers.v1',
@@ -6581,6 +6605,106 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
 }
 
 /**
+ * Atomically publish a `trusted.method.v1` result: a new analysis object
+ * derived from the input, a lineage edge, every declared output (the rds
+ * `analysis` output becomes the new object's checkpoint, so follow-on studies
+ * and the workbench can load it), and a metadata-only summary carrying the
+ * bounded metrics used for trial comparison. Output keys must be the
+ * job-scoped keys the handler allocated; the handler already verified bytes.
+ */
+const TRUSTED_METHOD_OUTPUT_TYPES = new Set(['rds', 'table', 'metrics', 'figure']);
+async function completeTrustedMethodResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId); const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts); const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  if (row.job_type !== 'trusted.method.v1') throw codedError('INVALID_JOB_TYPE', 'A claimed trusted.method.v1 job is required.');
+  if (row.result_analysis_object_id) throw codedError('TRUSTED_METHOD_RESULT_EXISTS', 'Job already has a result.');
+  if (!row.project_id || !row.analysis_object_id) throw codedError('INVALID_PROJECT_SCOPE', 'A project-scoped analysis object is required.');
+  const owner = Number(row.owner_user_id); const pid = row.project_id; const sourceId = row.analysis_object_id;
+  const sourceObject = await getProjectAnalysisObjectRow(sourceId, pid);
+  if (!sourceObject || sourceObject.ownerUserId !== owner) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const jobParameters = parseJson(row.parameters_json, {});
+  if (input.method !== jobParameters.method) throw codedError('INVALID_TRUSTED_METHOD_RESULT', 'Result method does not match the job.');
+  const objectType = input.objectType === 'seurat' ? 'seurat' : 'generic';
+  const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : null;
+  if (!metadata || Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 128 * 1024) {
+    throw codedError('INVALID_TRUSTED_METHOD_RESULT', 'Result metadata is missing or too large.');
+  }
+  const outputs = Array.isArray(input.outputs) ? input.outputs : [];
+  const prefix = storage.projectStorageFileKey(pid, 'artifacts', row.id, 'trusted-method');
+  if (outputs.length < 1 || outputs.length > 8 || outputs.some((o) => !o || !TRUSTED_METHOD_OUTPUT_TYPES.has(o.type)
+      || typeof o.port !== 'string' || !/^[a-z][a-z0-9-]{1,39}$/.test(o.port)
+      || typeof o.storageKey !== 'string' || !o.storageKey.startsWith(`${prefix}-`)
+      || !/^[a-f0-9]{64}$/.test(o.sha256 || '') || !Number.isSafeInteger(o.sizeBytes) || o.sizeBytes < 0)
+      || new Set(outputs.map((o) => o.port)).size !== outputs.length
+      || (objectType === 'seurat') !== outputs.some((o) => o.port === 'analysis' && o.type === 'rds')) {
+    throw codedError('INVALID_TRUSTED_METHOD_RESULT', 'Trusted method outputs are invalid.');
+  }
+  for (const output of outputs) assertProjectArtifactStorageKey(row, output.storageKey, 'artifacts');
+  const resultId = generateAnalysisObjectId();
+  const summaryId = generateJobArtifactId();
+  const outputIds = outputs.map(() => generateJobArtifactId());
+  const refs = { datasetId: sourceObject.datasetId || null, analysisObjectId: sourceId, resultAnalysisObjectId: resultId };
+  const mime = { rds: 'application/octet-stream', table: 'application/json', metrics: 'application/json', figure: 'image/png' };
+  const p = await connect(); const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const claim = await client.query(
+      "SELECT 1 FROM jobs WHERE id=$1 AND worker_id=$2 AND claim_token=$3 AND status='running' AND lease_expires_at>$4 FOR UPDATE",
+      [row.id, wid, token, now]
+    );
+    if (!claim.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id,
+          object_type, display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL)`,
+      [resultId, owner, pid, sourceObject.datasetId || null, sourceId, sourceObject.lineageRootId || sourceId,
+        objectType, String(input.displayName || 'Trusted method result').slice(0, MAX_NAME_LENGTH), JSON.stringify(metadata)]
+    );
+    const linked = await client.query(
+      `UPDATE jobs SET result_analysis_object_id = $1, updated_at = $2
+        WHERE id = $3 AND worker_id = $4 AND claim_token = $5 AND status = 'running'
+          AND lease_expires_at > $2 AND result_analysis_object_id IS NULL`,
+      [resultId, now, row.id, wid, token]
+    );
+    if (linked.rowCount !== 1) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    await insertLineageEdgeRow(client, {
+      projectId: pid, parentObjectId: sourceId, childObjectId: resultId, jobId: row.id,
+      edgeType: 'derived_from', parentRole: 'primary',
+      metadata: { analysisKind: 'trusted_method', method: metadata.method || null, scriptSha256: metadata.scriptSha256 || null },
+      createdByUserId: owner,
+    });
+    for (const [index, output] of outputs.entries()) {
+      const checkpoint = output.port === 'analysis' && output.type === 'rds';
+      await insertJobArtifactRow(client, {
+        id: outputIds[index], jobRow: row, refs,
+        artifactType: checkpoint ? 'checkpoint' : 'trusted_method_output',
+        name: String(output.label || output.port).slice(0, MAX_NAME_LENGTH),
+        description: checkpoint ? 'Seurat analysis produced by a trusted method.' : `Trusted method ${output.type} output.`,
+        mimeType: mime[output.type], storageKind: 'local_internal', storageUri: output.storageKey,
+        checksumSha256: output.sha256, sizeBytes: output.sizeBytes, status: 'available',
+        metadata: { port: output.port, outputType: output.type, method: metadata.method || null, downloadable: false },
+      });
+    }
+    await insertJobArtifactRow(client, {
+      id: summaryId, jobRow: row, refs, artifactType: 'trusted_method_summary',
+      name: `${String(input.displayName || 'Trusted method').slice(0, 200)} summary`,
+      description: 'Bounded metrics and exact provenance of a trusted method run.',
+      storageKind: 'metadata_only', status: 'available',
+      metadata: { ...metadata, outputs: outputs.map((o, i) => ({ id: outputIds[i], port: o.port, type: o.type, sha256: o.sha256, sizeBytes: o.sizeBytes })) },
+    });
+    const result = await client.query('SELECT * FROM analysis_objects WHERE id = $1 AND project_id = $2', [resultId, pid]);
+    await client.query('COMMIT');
+    return { sourceObject, resultObject: rowToAnalysisObject(result.rows[0]), summaryArtifact: await getJobArtifactRowById(summaryId) };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
+    throw error;
+  } finally { client.release(); }
+}
+
+/**
  * Atomically publish the two outputs of `cellchat.infer.v1`. The complete
  * ligand-receptor candidate table remains in private project storage; the
  * metadata-only companion is already strictly sanitized by rWorkerBridge and
@@ -7189,6 +7313,7 @@ module.exports = {
   completeEnrichmentGseaResultByWorker,
   completeConditionComparisonResultByWorker,
   completeExpertRResultByWorker,
+  completeTrustedMethodResultByWorker,
   completeCellChatInferenceResultByWorker,
   getLoadableCheckpointForAnalysisObject,
   getForkableCheckpointForAnalysisObject,

@@ -1,0 +1,1870 @@
+{
+  "format": "traceomics-trusted-methods",
+  "schemaVersion": 1,
+  "runtimeProfileId": "scrna-r-4.5-bioconductor-3.22-v1",
+  "methods": [
+    {
+      "key": "doublets-scdblfinder",
+      "version": "1.0.0",
+      "title": "Doublet detection (scDblFinder)",
+      "summary": "Scores each cell with scDblFinder and records scDblFinder.class and scDblFinder.score. Cells are annotated, not removed; remove doublets with Subset cells.",
+      "category": "qc",
+      "modalities": [
+        "scrna",
+        "snrna"
+      ],
+      "entry": "methods/doublets-scdblfinder.R",
+      "packages": [
+        "scDblFinder",
+        "SingleCellExperiment"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "scDblFinder vignette (Usage)",
+        "url": "https://bioconductor.org/packages/release/bioc/vignettes/scDblFinder/inst/doc/scDblFinder.html",
+        "upstream": "plger/scDblFinder vignettes/scDblFinder.Rmd",
+        "citation": "Germain P-L et al. Doublet identification in single-cell sequencing data using scDblFinder. F1000Research 2021.",
+        "doi": "10.12688/f1000research.73600.2",
+        "reviewedAgainst": "Bioconductor 3.22 release"
+      },
+      "deviations": [
+        "Seurat v5 count layers are joined on a copy before scoring so every cell is scored once.",
+        "Doublets are only annotated; removal is a separate Subset cells step."
+      ],
+      "parameters": [
+        {
+          "key": "sample-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "",
+          "role": "design",
+          "label": "Sample column (blank for one sample)",
+          "help": "Doublets form within a capture; give the column naming each 10x capture/sample."
+        },
+        {
+          "key": "expected-doublet-rate",
+          "type": "number",
+          "min": 0,
+          "max": 0.5,
+          "default": 0,
+          "role": "tuning",
+          "label": "Expected doublet rate (0 = automatic)"
+        },
+        {
+          "key": "artificial-doublets",
+          "type": "choice",
+          "options": [
+            "random",
+            "cluster-based"
+          ],
+          "default": "random",
+          "role": "tuning",
+          "label": "Artificial doublets"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Annotated analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Doublet summary"
+        },
+        "per-sample": {
+          "type": "table",
+          "label": "Doublets per sample"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Doublet calls"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_doublets",
+          "label": "doublets called"
+        },
+        {
+          "key": "doublet_rate",
+          "label": "doublet rate"
+        },
+        {
+          "key": "n_singlets",
+          "label": "singlets"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 8192,
+        "maxWallSeconds": 3600
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "trusted:ambient-decontx"
+      ]
+    },
+    {
+      "key": "subset-cells",
+      "version": "1.0.0",
+      "title": "Subset cells by metadata",
+      "summary": "Keeps or removes cells whose value in one metadata column is in a list, for example removing doublets, dropping a low-quality cluster, or selecting one lineage before re-clustering.",
+      "category": "qc",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/subset-cells.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Seurat Guided Clustering Tutorial (subset)",
+        "url": "https://satijalab.org/seurat/articles/pbmc3k_tutorial",
+        "upstream": "satijalab/seurat vignettes/pbmc3k_tutorial.Rmd",
+        "citation": "Hao Y et al. Dictionary learning for integrative, multimodal and scalable single-cell analysis. Nat Biotechnol 2024.",
+        "doi": "10.1038/s41587-023-01767-y",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Selection is by listed values of one column instead of a free-form subset expression."
+      ],
+      "parameters": [
+        {
+          "key": "column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "scDblFinder.class",
+          "role": "design",
+          "label": "Metadata column"
+        },
+        {
+          "key": "values",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 2000,
+          "default": "singlet",
+          "role": "design",
+          "label": "Values (comma-separated)"
+        },
+        {
+          "key": "mode",
+          "type": "choice",
+          "options": [
+            "keep",
+            "remove"
+          ],
+          "default": "keep",
+          "role": "design",
+          "label": "Keep or remove the listed values"
+        },
+        {
+          "key": "min-cells",
+          "type": "integer",
+          "min": 3,
+          "max": 1000000,
+          "default": 50,
+          "role": "design",
+          "label": "Stop if fewer cells would remain"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Subset analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Subset summary"
+        },
+        "kept": {
+          "type": "table",
+          "label": "Cells kept per value"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "cells_after",
+          "label": "cells kept"
+        },
+        {
+          "key": "cells_removed",
+          "label": "cells removed"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 8192,
+        "maxWallSeconds": 1800
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:doublets-scdblfinder",
+        "trusted:label-clusters",
+        "trusted:recluster-integrate",
+        "trusted:cell-cycle",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:ambient-decontx",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "recluster-integrate",
+      "version": "1.0.0",
+      "title": "Re-cluster with optional batch integration (Seurat v5)",
+      "summary": "Normalizes, finds variable features, runs PCA, optionally integrates batches (CCA, RPCA or Harmony via IntegrateLayers), then clusters and computes a UMAP.",
+      "category": "integration",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/recluster-integrate.R",
+      "packages": [
+        "Seurat",
+        "harmony"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Integrative analysis in Seurat v5",
+        "url": "https://satijalab.org/seurat/articles/seurat5_integration",
+        "upstream": "satijalab/seurat vignettes/seurat5_integration.Rmd",
+        "citation": "Hao Y et al. Nat Biotechnol 2024; Korsunsky I et al. Fast, sensitive and accurate integration of single-cell data with Harmony. Nat Methods 2019.",
+        "doi": "10.1038/s41587-023-01767-y",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Log-normalization only; the vignette's SCTransform variant is not included.",
+        "The first count assay among RNA, Spatial and Xenium is used.",
+        "Harmony is optional and fails clearly if the harmony package is absent."
+      ],
+      "parameters": [
+        {
+          "key": "integration",
+          "type": "choice",
+          "options": [
+            "none",
+            "CCA",
+            "RPCA",
+            "Harmony"
+          ],
+          "default": "none",
+          "role": "tuning",
+          "label": "Integration method"
+        },
+        {
+          "key": "batch-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "sample_id",
+          "role": "design",
+          "label": "Batch column"
+        },
+        {
+          "key": "variable-features",
+          "type": "integer",
+          "min": 500,
+          "max": 10000,
+          "default": 2000,
+          "role": "tuning",
+          "label": "Variable features"
+        },
+        {
+          "key": "dims",
+          "type": "integer",
+          "min": 5,
+          "max": 100,
+          "default": 30,
+          "role": "tuning",
+          "label": "Dimensions"
+        },
+        {
+          "key": "resolution",
+          "type": "number",
+          "min": 0.05,
+          "max": 5,
+          "default": 0.8,
+          "role": "tuning",
+          "label": "Clustering resolution"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Clustered analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Clustering summary"
+        },
+        "clusters": {
+          "type": "table",
+          "label": "Cluster sizes"
+        },
+        "umap": {
+          "type": "figure",
+          "label": "UMAP"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_clusters",
+          "label": "clusters"
+        },
+        {
+          "key": "smallest_cluster",
+          "label": "cells in the smallest cluster"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 7200
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:subset-cells",
+        "trusted:doublets-scdblfinder",
+        "trusted:cell-cycle",
+        "trusted:ambient-decontx"
+      ]
+    },
+    {
+      "key": "label-clusters",
+      "version": "1.0.0",
+      "title": "Name clusters (manual annotation)",
+      "summary": "Writes cell-type names from a cluster=label mapping you provide into a metadata column and the active identities.",
+      "category": "annotation",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/label-clusters.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Seurat Guided Clustering Tutorial (assigning cell type identity)",
+        "url": "https://satijalab.org/seurat/articles/pbmc3k_tutorial",
+        "upstream": "satijalab/seurat vignettes/pbmc3k_tutorial.Rmd",
+        "citation": "Hao Y et al. Nat Biotechnol 2024.",
+        "doi": "10.1038/s41587-023-01767-y",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Labels are also stored in a named metadata column; unmapped clusters become Unassigned or keep their cluster id."
+      ],
+      "parameters": [
+        {
+          "key": "mapping",
+          "type": "text",
+          "pattern": "labelMap",
+          "maxLength": 2000,
+          "default": "0=Cluster 0",
+          "role": "design",
+          "label": "Mapping (0=T cell;1=B cell)"
+        },
+        {
+          "key": "cluster-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Cluster column"
+        },
+        {
+          "key": "label-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "cell_type",
+          "role": "design",
+          "label": "New label column"
+        },
+        {
+          "key": "unmapped",
+          "type": "choice",
+          "options": [
+            "unassigned",
+            "keep-cluster"
+          ],
+          "default": "unassigned",
+          "role": "design",
+          "label": "Clusters not in the mapping"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Labeled analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Labeling summary"
+        },
+        "assignments": {
+          "type": "table",
+          "label": "Cells per cluster and label"
+        },
+        "umap": {
+          "type": "figure",
+          "label": "Labeled UMAP"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_labels",
+          "label": "labels"
+        },
+        {
+          "key": "cells_unmapped",
+          "label": "unmapped cells"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 4096,
+        "maxWallSeconds": 900
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:recluster-integrate",
+        "trusted:subset-cells",
+        "trusted:cell-cycle",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "cell-cycle",
+      "version": "1.0.0",
+      "title": "Cell-cycle scoring and regression (Seurat)",
+      "summary": "Scores S and G2M phase with Seurat's cc.genes.updated.2019 lists (CellCycleScoring) and optionally regresses the scores out before re-clustering.",
+      "category": "scoring",
+      "modalities": [
+        "scrna",
+        "snrna"
+      ],
+      "entry": "methods/cell-cycle.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Cell-Cycle Scoring and Regression",
+        "url": "https://satijalab.org/seurat/articles/cell_cycle_vignette",
+        "upstream": "satijalab/seurat vignettes/cell_cycle_vignette.Rmd",
+        "citation": "Tirosh I et al. Dissecting the multicellular ecosystem of metastatic melanoma by single-cell RNA-seq. Science 2016; Hao Y et al. Nat Biotechnol 2024.",
+        "doi": "10.1126/science.aad0501",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Regression scales variable features (all genes when none are set) rather than every gene, to bound memory.",
+        "Mouse gene lists are the human lists converted to title case.",
+        "After regression the method re-runs PCA, neighbors, clustering and UMAP so the result is ready to use."
+      ],
+      "parameters": [
+        {
+          "key": "species",
+          "type": "choice",
+          "options": [
+            "human",
+            "mouse"
+          ],
+          "default": "human",
+          "role": "design",
+          "label": "Species"
+        },
+        {
+          "key": "regress",
+          "type": "choice",
+          "options": [
+            "none",
+            "all-phases",
+            "difference"
+          ],
+          "default": "none",
+          "role": "tuning",
+          "label": "Regress cell cycle",
+          "help": "difference keeps the separation between cycling and non-cycling cells, as in the vignette's alternative workflow."
+        },
+        {
+          "key": "dims",
+          "type": "integer",
+          "min": 5,
+          "max": 100,
+          "default": 30,
+          "role": "tuning",
+          "label": "Dimensions (after regression)"
+        },
+        {
+          "key": "resolution",
+          "type": "number",
+          "min": 0.05,
+          "max": 5,
+          "default": 0.8,
+          "role": "tuning",
+          "label": "Clustering resolution (after regression)"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Scored analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Phase summary"
+        },
+        "phases": {
+          "type": "table",
+          "label": "Phase per cluster"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Cell-cycle phase"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "fraction_s",
+          "label": "fraction in S"
+        },
+        {
+          "key": "fraction_g2m",
+          "label": "fraction in G2/M"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 3600
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters"
+      ]
+    },
+    {
+      "key": "module-score",
+      "version": "1.0.0",
+      "title": "Gene signature scores (AddModuleScore)",
+      "summary": "Scores each cell for one or more gene signatures with Seurat's AddModuleScore (Tirosh et al. 2016) and summarizes mean scores per group.",
+      "category": "scoring",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/module-score.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Seurat AddModuleScore reference",
+        "url": "https://satijalab.org/seurat/reference/addmodulescore",
+        "upstream": "satijalab/seurat R/utilities.R AddModuleScore",
+        "citation": "Tirosh I et al. Science 2016; Hao Y et al. Nat Biotechnol 2024.",
+        "doi": "10.1126/science.aad0501",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Score columns are renamed from Name_score1 to Name_score.",
+        "Genes absent from the data are dropped and reported in the coverage table."
+      ],
+      "parameters": [
+        {
+          "key": "gene-sets",
+          "type": "text",
+          "pattern": "geneSets",
+          "maxLength": 2000,
+          "default": "Tcell:CD3E,CD3D,CD2",
+          "role": "design",
+          "label": "Gene sets (Name:GENE1,GENE2;Other:...)"
+        },
+        {
+          "key": "group-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Group column for summaries"
+        },
+        {
+          "key": "min-genes",
+          "type": "integer",
+          "min": 1,
+          "max": 200,
+          "default": 3,
+          "role": "design",
+          "label": "Minimum genes present per set"
+        },
+        {
+          "key": "control-genes",
+          "type": "integer",
+          "min": 10,
+          "max": 500,
+          "default": 100,
+          "role": "tuning",
+          "label": "Control genes per bin"
+        },
+        {
+          "key": "bins",
+          "type": "integer",
+          "min": 5,
+          "max": 50,
+          "default": 24,
+          "role": "tuning",
+          "label": "Expression bins"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Scored analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Score summary"
+        },
+        "scores-by-group": {
+          "type": "table",
+          "label": "Mean score per group"
+        },
+        "coverage": {
+          "type": "table",
+          "label": "Genes found per set"
+        },
+        "violin": {
+          "type": "figure",
+          "label": "Scores by group"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_gene_sets",
+          "label": "gene sets"
+        },
+        {
+          "key": "min_genes_found",
+          "label": "fewest genes found in a set"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 8192,
+        "maxWallSeconds": 1800
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:cell-cycle",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "gene-figures",
+      "version": "1.0.0",
+      "title": "Expression figures (dot, violin, feature, UMAP)",
+      "summary": "Draws the standard Seurat expression figures for a gene list: DotPlot with its data table, VlnPlot, FeaturePlot and a labeled UMAP. Display only.",
+      "category": "visualization",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/gene-figures.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Seurat data visualization methods",
+        "url": "https://satijalab.org/seurat/articles/visualization_vignette",
+        "upstream": "satijalab/seurat vignettes/visualization_vignette.Rmd",
+        "citation": "Hao Y et al. Nat Biotechnol 2024.",
+        "doi": "10.1038/s41587-023-01767-y",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Panels are limited to the first max-panels genes; the dot plot shows every listed gene that is present."
+      ],
+      "parameters": [
+        {
+          "key": "genes",
+          "type": "text",
+          "pattern": "genes",
+          "maxLength": 2000,
+          "default": "CD3E,MS4A1,CD14,NKG7",
+          "role": "design",
+          "label": "Genes (comma-separated)"
+        },
+        {
+          "key": "group-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Group column"
+        },
+        {
+          "key": "max-panels",
+          "type": "integer",
+          "min": 1,
+          "max": 16,
+          "default": 8,
+          "role": "display",
+          "label": "Genes in violin/feature panels"
+        },
+        {
+          "key": "point-size",
+          "type": "number",
+          "min": 0.01,
+          "max": 3,
+          "default": 0.3,
+          "role": "display",
+          "label": "Point size"
+        }
+      ],
+      "outputs": {
+        "summary": {
+          "type": "metrics",
+          "label": "Figure summary"
+        },
+        "dotplot-data": {
+          "type": "table",
+          "label": "Dot plot values"
+        },
+        "dotplot": {
+          "type": "figure",
+          "label": "Dot plot"
+        },
+        "violin": {
+          "type": "figure",
+          "label": "Violin plots"
+        },
+        "feature": {
+          "type": "figure",
+          "label": "Feature plots"
+        },
+        "groups": {
+          "type": "figure",
+          "label": "Groups on UMAP"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "genes_found",
+          "label": "genes found"
+        },
+        {
+          "key": "n_groups",
+          "label": "groups"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 8192,
+        "maxWallSeconds": 1200
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:doublets-scdblfinder",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:cell-cycle",
+        "trusted:module-score",
+        "trusted:subset-cells",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "abundance-propeller",
+      "version": "1.0.0",
+      "title": "Differential cell-type abundance (propeller)",
+      "summary": "Tests whether cell-type or cluster proportions differ between conditions with speckle's propeller, using biological samples as replicates.",
+      "category": "differential",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/abundance-propeller.R",
+      "packages": [
+        "speckle",
+        "limma"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "speckle vignette (propeller)",
+        "url": "https://bioconductor.org/packages/release/bioc/vignettes/speckle/inst/doc/speckle.html",
+        "upstream": "phipsonlab/speckle vignettes/speckle.Rmd",
+        "citation": "Phipson B et al. propeller: testing for differences in cell type proportions in single cell data. Bioinformatics 2022.",
+        "doi": "10.1093/bioinformatics/btac582",
+        "reviewedAgainst": "Bioconductor 3.22 release"
+      },
+      "deviations": [
+        "The method refuses samples assigned to more than one condition and conditions with fewer replicates than the minimum you set.",
+        "The proportions figure is drawn with ggplot2 instead of plotCellTypeProps so each sample is visible."
+      ],
+      "parameters": [
+        {
+          "key": "cluster-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "cell_type",
+          "role": "design",
+          "label": "Cell type or cluster column"
+        },
+        {
+          "key": "sample-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "sample_id",
+          "role": "design",
+          "label": "Sample column (replicate)"
+        },
+        {
+          "key": "condition-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "condition",
+          "role": "design",
+          "label": "Condition column"
+        },
+        {
+          "key": "min-replicates",
+          "type": "integer",
+          "min": 2,
+          "max": 100,
+          "default": 2,
+          "role": "design",
+          "label": "Minimum samples per condition"
+        },
+        {
+          "key": "transform",
+          "type": "choice",
+          "options": [
+            "logit",
+            "asin"
+          ],
+          "default": "logit",
+          "role": "design",
+          "label": "Proportion transform"
+        },
+        {
+          "key": "fdr",
+          "type": "number",
+          "min": 0.0001,
+          "max": 0.25,
+          "default": 0.05,
+          "role": "design",
+          "label": "FDR threshold for the summary count"
+        }
+      ],
+      "outputs": {
+        "summary": {
+          "type": "metrics",
+          "label": "Abundance summary"
+        },
+        "results": {
+          "type": "table",
+          "label": "propeller results"
+        },
+        "proportions": {
+          "type": "table",
+          "label": "Proportions per sample"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Proportions by condition"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_significant",
+          "label": "clusters with FDR below threshold"
+        },
+        {
+          "key": "min_replicates",
+          "label": "fewest samples in a condition"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 4096,
+        "maxWallSeconds": 900
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:doublets-scdblfinder",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:cell-cycle",
+        "trusted:module-score",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "trajectory-slingshot",
+      "version": "1.0.0",
+      "title": "Trajectory and pseudotime (slingshot)",
+      "summary": "Fits lineages through clusters on a PCA or integrated embedding with slingshot and stores per-lineage pseudotime and curve weights.",
+      "category": "trajectory",
+      "modalities": [
+        "scrna",
+        "snrna"
+      ],
+      "entry": "methods/trajectory-slingshot.R",
+      "packages": [
+        "slingshot"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Slingshot: Trajectory Inference for Single-Cell Data",
+        "url": "https://bioconductor.org/packages/release/bioc/vignettes/slingshot/inst/doc/vignette.html",
+        "upstream": "kstreet13/slingshot vignettes/vignette.Rmd",
+        "citation": "Street K et al. Slingshot: cell lineage and pseudotime inference for single-cell transcriptomics. BMC Genomics 2018.",
+        "doi": "10.1186/s12864-018-4772-0",
+        "reviewedAgainst": "Bioconductor 3.22 release"
+      },
+      "deviations": [
+        "slingshot is run on the embedding matrix and cluster labels rather than a SingleCellExperiment; the algorithm and arguments are the same.",
+        "A weighted mean pseudotime across lineages is added for display."
+      ],
+      "parameters": [
+        {
+          "key": "cluster-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Cluster column"
+        },
+        {
+          "key": "start-cluster",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 64,
+          "default": "",
+          "role": "design",
+          "label": "Start cluster (blank = inferred)",
+          "help": "The root of the trajectory is a biological claim; name it when known."
+        },
+        {
+          "key": "end-clusters",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 500,
+          "default": "",
+          "role": "design",
+          "label": "Known end clusters (optional)"
+        },
+        {
+          "key": "reduction",
+          "type": "choice",
+          "options": [
+            "pca",
+            "integrated.cca",
+            "integrated.rpca",
+            "integrated.harmony"
+          ],
+          "default": "pca",
+          "role": "tuning",
+          "label": "Embedding"
+        },
+        {
+          "key": "dims",
+          "type": "integer",
+          "min": 2,
+          "max": 50,
+          "default": 10,
+          "role": "tuning",
+          "label": "Dimensions used"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis with pseudotime"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Trajectory summary"
+        },
+        "lineages": {
+          "type": "table",
+          "label": "Lineages"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Pseudotime"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_lineages",
+          "label": "lineages"
+        },
+        {
+          "key": "max_pseudotime",
+          "label": "maximum pseudotime"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 8192,
+        "maxWallSeconds": 3600
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:cell-cycle",
+        "trusted:module-score",
+        "trusted:annotate-singler"
+      ]
+    },
+    {
+      "key": "spatial-svg",
+      "version": "1.0.0",
+      "title": "Spatially variable genes (Moran's I)",
+      "summary": "Ranks variable genes by spatial autocorrelation (Moran's I) with Seurat's FindSpatiallyVariableFeatures and plots the top genes on the tissue.",
+      "category": "spatial",
+      "modalities": [
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/spatial-svg.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Seurat spatial vignette (spatially variable features)",
+        "url": "https://satijalab.org/seurat/articles/spatial_vignette",
+        "upstream": "satijalab/seurat vignettes/spatial_vignette.Rmd",
+        "citation": "Hao Y et al. Nat Biotechnol 2024.",
+        "doi": "10.1038/s41587-023-01767-y",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Benjamini-Hochberg FDR is added to the reported Moran's I p-values.",
+        "The first image or field of view is used."
+      ],
+      "parameters": [
+        {
+          "key": "features",
+          "type": "integer",
+          "min": 50,
+          "max": 3000,
+          "default": 1000,
+          "role": "tuning",
+          "label": "Variable genes tested"
+        },
+        {
+          "key": "top",
+          "type": "integer",
+          "min": 1,
+          "max": 50,
+          "default": 6,
+          "role": "display",
+          "label": "Genes plotted"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis with spatial statistics"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Spatial summary"
+        },
+        "results": {
+          "type": "table",
+          "label": "Moran's I per gene"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Top spatial genes"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_fdr_below_0_05",
+          "label": "genes with FDR below 0.05"
+        },
+        {
+          "key": "top_morans_i",
+          "label": "highest Moran's I"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 5400
+      },
+      "accepts": [
+        "spatial-seurat",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:module-score",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "spatial-niches",
+      "version": "1.0.0",
+      "title": "Cellular niches (Seurat BuildNicheAssay)",
+      "summary": "Groups cells into niches by k-means on the cell-type composition of their spatial neighbors, as in Seurat's image-based (Xenium) vignette.",
+      "category": "spatial",
+      "modalities": [
+        "imaging"
+      ],
+      "entry": "methods/spatial-niches.R",
+      "packages": [
+        "Seurat"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Analysis of Image-based Spatial Data in Seurat (niche analysis)",
+        "url": "https://satijalab.org/seurat/articles/seurat5_spatial_vignette_2",
+        "upstream": "satijalab/seurat vignettes/seurat5_spatial_vignette_2.Rmd",
+        "citation": "Hao Y et al. Nat Biotechnol 2024.",
+        "doi": "10.1038/s41587-023-01767-y",
+        "reviewedAgainst": "Seurat 5.x"
+      },
+      "deviations": [
+        "Niche labels are stored as character values; the vignette leaves them as factors."
+      ],
+      "parameters": [
+        {
+          "key": "cell-type-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "cell_type",
+          "role": "design",
+          "label": "Cell type column"
+        },
+        {
+          "key": "fov",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "",
+          "role": "design",
+          "label": "Field of view (blank = first)"
+        },
+        {
+          "key": "niches",
+          "type": "integer",
+          "min": 2,
+          "max": 30,
+          "default": 5,
+          "role": "tuning",
+          "label": "Number of niches (k)"
+        },
+        {
+          "key": "neighbors",
+          "type": "integer",
+          "min": 5,
+          "max": 200,
+          "default": 30,
+          "role": "tuning",
+          "label": "Spatial neighbors"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis with niches"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Niche summary"
+        },
+        "composition": {
+          "type": "table",
+          "label": "Cell types per niche"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Niches in tissue"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_niches",
+          "label": "niches"
+        },
+        {
+          "key": "smallest_niche",
+          "label": "cells in the smallest niche"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 3600
+      },
+      "accepts": [
+        "trusted:label-clusters",
+        "trusted:recluster-integrate",
+        "trusted:subset-cells",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "ambient-decontx",
+      "version": "1.0.0",
+      "title": "Ambient RNA correction (decontX)",
+      "summary": "Estimates per-cell ambient RNA contamination with celda's decontX and stores decontaminated counts as a new assay or in place of the original counts.",
+      "category": "qc",
+      "modalities": [
+        "scrna",
+        "snrna"
+      ],
+      "entry": "methods/ambient-decontx.R",
+      "packages": [
+        "celda"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Decontamination of ambient RNA with DecontX",
+        "url": "https://bioconductor.org/packages/release/bioc/vignettes/celda/inst/doc/decontX.html",
+        "upstream": "campbio/celda vignettes/decontX.Rmd",
+        "citation": "Yang S et al. Decontamination of ambient RNA in single-cell RNA-seq with DecontX. Genome Biol 2020.",
+        "doi": "10.1186/s13059-020-1950-6",
+        "reviewedAgainst": "Bioconductor 3.22 release"
+      },
+      "deviations": [
+        "No empty-droplet background is available after upload, so the ambient profile is estimated from the cells (the vignette's default).",
+        "With replace-counts, original counts are kept in an <assay>_original assay."
+      ],
+      "parameters": [
+        {
+          "key": "cluster-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Cluster column (blank = decontX clusters)"
+        },
+        {
+          "key": "batch-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "",
+          "role": "design",
+          "label": "Batch column (blank = one batch)"
+        },
+        {
+          "key": "apply",
+          "type": "choice",
+          "options": [
+            "new-assay",
+            "replace-counts"
+          ],
+          "default": "new-assay",
+          "role": "design",
+          "label": "Use corrected counts as"
+        },
+        {
+          "key": "max-iterations",
+          "type": "integer",
+          "min": 50,
+          "max": 2000,
+          "default": 500,
+          "role": "tuning",
+          "label": "Maximum iterations"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Decontaminated analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Contamination summary"
+        },
+        "by-group": {
+          "type": "table",
+          "label": "Contamination per cluster"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Contamination"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "median_contamination",
+          "label": "median contamination"
+        },
+        {
+          "key": "cells_over_0_5",
+          "label": "cells over 50% contamination"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 5400
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample"
+      ]
+    },
+    {
+      "key": "pseudobulk-de",
+      "version": "1.0.0",
+      "title": "Pseudobulk differential expression per cell type (edgeR)",
+      "summary": "Sums counts per sample within each cell type and tests a test condition against a reference with edgeR quasi-likelihood, optionally paired by donor.",
+      "category": "differential",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/pseudobulk-de.R",
+      "packages": [
+        "edgeR"
+      ],
+      "provenance": {
+        "kind": "book",
+        "title": "OSCA Multi-sample comparisons: DE between conditions",
+        "url": "https://bioconductor.org/books/release/OSCA.multisample/multi-sample-comparisons.html",
+        "upstream": "OSCA.multisample multi-sample-comparisons.Rmd (scran::pseudoBulkDGE) and the edgeR User's Guide",
+        "citation": "Amezquita RA et al. Orchestrating single-cell analysis with Bioconductor. Nat Methods 2020; Chen Y et al. edgeR 4.0. Nucleic Acids Res 2025.",
+        "doi": "10.1038/s41592-019-0654-x",
+        "reviewedAgainst": "Bioconductor 3.22 release"
+      },
+      "deviations": [
+        "Counts are summed with a sparse indicator matrix instead of scuttle::aggregateAcrossCells; the edgeR steps match pseudoBulkDGE.",
+        "Only two conditions are compared per run; run again for other contrasts.",
+        "The table output keeps the top rows per cell type; the full result is in the full-results RDS."
+      ],
+      "parameters": [
+        {
+          "key": "cell-type-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "cell_type",
+          "role": "design",
+          "label": "Cell type column"
+        },
+        {
+          "key": "sample-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "sample_id",
+          "role": "design",
+          "label": "Sample column (replicate)"
+        },
+        {
+          "key": "condition-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "condition",
+          "role": "design",
+          "label": "Condition column"
+        },
+        {
+          "key": "reference",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 60,
+          "default": "control",
+          "role": "design",
+          "label": "Reference condition"
+        },
+        {
+          "key": "test",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 60,
+          "default": "disease",
+          "role": "design",
+          "label": "Test condition"
+        },
+        {
+          "key": "donor-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "",
+          "role": "design",
+          "label": "Donor column for a paired design (optional)"
+        },
+        {
+          "key": "min-cells",
+          "type": "integer",
+          "min": 1,
+          "max": 1000,
+          "default": 10,
+          "role": "design",
+          "label": "Minimum cells per pseudobulk sample"
+        },
+        {
+          "key": "min-samples",
+          "type": "integer",
+          "min": 2,
+          "max": 100,
+          "default": 2,
+          "role": "design",
+          "label": "Minimum samples per condition"
+        },
+        {
+          "key": "fdr",
+          "type": "number",
+          "min": 0.0001,
+          "max": 0.25,
+          "default": 0.05,
+          "role": "design",
+          "label": "FDR threshold for counts"
+        },
+        {
+          "key": "rows-per-type",
+          "type": "integer",
+          "min": 10,
+          "max": 2000,
+          "default": 500,
+          "role": "display",
+          "label": "Top genes per cell type in the table"
+        }
+      ],
+      "outputs": {
+        "summary": {
+          "type": "metrics",
+          "label": "DE summary"
+        },
+        "overview": {
+          "type": "table",
+          "label": "Cell types tested"
+        },
+        "top-genes": {
+          "type": "table",
+          "label": "Top genes per cell type"
+        },
+        "full-results": {
+          "type": "rds",
+          "label": "Full results (data frame)"
+        },
+        "volcano": {
+          "type": "figure",
+          "label": "Volcano plots"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "total_significant",
+          "label": "significant genes across cell types"
+        },
+        {
+          "key": "cell_types_tested",
+          "label": "cell types tested"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 5400
+      },
+      "accepts": [
+        "seurat-multisample",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:cell-cycle",
+        "trusted:module-score",
+        "trusted:trajectory-slingshot",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
+    },
+    {
+      "key": "annotate-singler",
+      "version": "1.0.0",
+      "title": "Reference cell-type annotation (SingleR)",
+      "summary": "Labels cells or clusters by correlation to a celldex reference (Human Primary Cell Atlas, Blueprint/ENCODE, Monaco, DICE, mouse RNA-seq, ImmGen) with SingleR.",
+      "category": "annotation",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/annotate-singler.R",
+      "packages": [
+        "SingleR",
+        "celldex"
+      ],
+      "provenance": {
+        "kind": "book",
+        "title": "Assigning cell types with SingleR",
+        "url": "https://bioconductor.org/books/release/SingleRBook/",
+        "upstream": "LTLA/SingleRBook introduction.Rmd and diagnostics.Rmd",
+        "citation": "Aran D et al. Reference-based analysis of lung single-cell sequencing reveals a transitional profibrotic macrophage. Nat Immunol 2019.",
+        "doi": "10.1038/s41590-018-0276-y",
+        "reviewedAgainst": "Bioconductor 3.22 release"
+      },
+      "deviations": [
+        "celldex references are read from copies saved in the R image at build time because the sandbox has no network.",
+        "Pruned (low-confidence) labels are stored as Unassigned."
+      ],
+      "parameters": [
+        {
+          "key": "reference",
+          "type": "choice",
+          "options": [
+            "hpca",
+            "blueprint_encode",
+            "monaco_immune",
+            "dice",
+            "mouse_rnaseq",
+            "immgen"
+          ],
+          "default": "hpca",
+          "role": "design",
+          "label": "Reference"
+        },
+        {
+          "key": "label-level",
+          "type": "choice",
+          "options": [
+            "main",
+            "fine"
+          ],
+          "default": "main",
+          "role": "design",
+          "label": "Label granularity"
+        },
+        {
+          "key": "mode",
+          "type": "choice",
+          "options": [
+            "cell",
+            "cluster"
+          ],
+          "default": "cell",
+          "role": "tuning",
+          "label": "Annotate cells or clusters"
+        },
+        {
+          "key": "cluster-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Cluster column"
+        },
+        {
+          "key": "label-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "singler_label",
+          "role": "design",
+          "label": "New label column"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Annotated analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Annotation summary"
+        },
+        "assignments": {
+          "type": "table",
+          "label": "Labels per cluster"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Labels on UMAP"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_labels",
+          "label": "labels"
+        },
+        {
+          "key": "fraction_unassigned",
+          "label": "fraction unassigned"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 5400
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:recluster-integrate",
+        "trusted:subset-cells",
+        "trusted:cell-cycle"
+      ]
+    },
+    {
+      "key": "spatial-banksy",
+      "version": "1.0.0",
+      "title": "Spatial domains (BANKSY)",
+      "summary": "Clusters spots or cells using their own expression and their spatial neighborhood with BANKSY (SeuratWrappers::RunBanksy), giving tissue domains or spatially informed cell types.",
+      "category": "spatial",
+      "modalities": [
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/spatial-banksy.R",
+      "packages": [
+        "Banksy",
+        "SeuratWrappers"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "Running BANKSY with Seurat",
+        "url": "https://github.com/satijalab/seurat-wrappers/blob/master/docs/banksy.md",
+        "upstream": "satijalab/seurat-wrappers docs/banksy.Rmd",
+        "citation": "Singhal V et al. BANKSY unifies cell typing and tissue domain segmentation for scalable spatial omics data analysis. Nat Genet 2024.",
+        "doi": "10.1038/s41588-024-01664-3",
+        "reviewedAgainst": "Banksy (Bioconductor 3.22) with SeuratWrappers"
+      },
+      "deviations": [
+        "BANKSY clusters are written to banksy_cluster; seurat_clusters is left unchanged.",
+        "The first image or field of view is used for plotting."
+      ],
+      "parameters": [
+        {
+          "key": "lambda",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "default": 0.8,
+          "role": "tuning",
+          "label": "Spatial weight (lambda)",
+          "help": "0.2 for cell typing, 0.8 for tissue domains."
+        },
+        {
+          "key": "k-geom",
+          "type": "integer",
+          "min": 4,
+          "max": 200,
+          "default": 50,
+          "role": "tuning",
+          "label": "Spatial neighbors (k_geom)"
+        },
+        {
+          "key": "dims",
+          "type": "integer",
+          "min": 5,
+          "max": 100,
+          "default": 30,
+          "role": "tuning",
+          "label": "Dimensions"
+        },
+        {
+          "key": "resolution",
+          "type": "number",
+          "min": 0.05,
+          "max": 5,
+          "default": 0.5,
+          "role": "tuning",
+          "label": "Clustering resolution"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis with domains"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Domain summary"
+        },
+        "domains": {
+          "type": "table",
+          "label": "Domain sizes"
+        },
+        "figure": {
+          "type": "figure",
+          "label": "Domains in tissue"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_domains",
+          "label": "domains"
+        },
+        {
+          "key": "smallest_domain",
+          "label": "cells in the smallest domain"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 5400
+      },
+      "accepts": [
+        "spatial-seurat",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:spatial-svg"
+      ]
+    }
+  ]
+}

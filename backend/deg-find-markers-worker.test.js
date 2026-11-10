@@ -210,7 +210,7 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — inventory & scope', () => 
 
   it('registers deg.find_markers.v1 alongside the existing handlers (existing handlers unchanged)', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'trusted.method.v1']);
     expect(DEFAULT_HANDLERS['deg.find_markers.v1']).toBe(degFindMarkersHandler);
     // Existing handlers still point at their existing functions.
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(worker.checkpointLoadHandler);
