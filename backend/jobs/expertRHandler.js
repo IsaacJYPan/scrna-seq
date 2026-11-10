@@ -6,6 +6,7 @@ const {
   MAX_EXPERT_R_OUTPUT_BYTES,
   MAX_EXPERT_R_BUNDLE_BYTES,
   EXPERT_R_RESOURCE_POLICY_VERSION,
+  SLURM_SANDBOX_POLICY_VERSION,
 } = require('../expertR');
 const { assertEnvironmentMatches, MAX_ENVIRONMENT_BYTES } = require('../rEnvironment');
 const { codedHandlerError } = require('./jobErrors');
@@ -47,24 +48,35 @@ async function expertRHandler(ctx) {
     checksumSha256: input.checksumSha256,
   }));
   const outputStorageKey = allocateExpertRBundleStorageKey(job.projectId, job.id);
-  const sandbox = await ctx.runExpertSandbox({
-    jobId: job.id,
-    projectId: job.projectId,
-    profileId: params.profileId,
-    ...(params.environment ? { environment: params.environment } : {}),
-    script: params.script,
-    checkpointStorageKey: checkpoint.internalStorageKey,
-    checkpointChecksumSha256: checkpoint.checksumSha256,
-    checkpointSizeBytes: checkpoint.sizeBytes,
-    privateInputs: privateInputs.map((input) => ({
-      id: input.id,
-      originalFilename: input.originalFilename,
-      internalStorageKey: input.internalStorageKey,
-      sizeBytes: input.sizeBytes,
-      checksumSha256: input.checksumSha256,
-    })),
-    outputStorageKey,
-  });
+  const logConsole = async (text, level) => {
+    if (typeof text !== 'string' || !text.trim() || typeof ctx.log !== 'function') return;
+    await ctx.log({ level, message: `R console (last lines):\n${text.slice(-4000)}` });
+  };
+  let sandbox;
+  try {
+    sandbox = await ctx.runExpertSandbox({
+      jobId: job.id,
+      projectId: job.projectId,
+      profileId: params.profileId,
+      ...(params.environment ? { environment: params.environment } : {}),
+      script: params.script,
+      checkpointStorageKey: checkpoint.internalStorageKey,
+      checkpointChecksumSha256: checkpoint.checksumSha256,
+      checkpointSizeBytes: checkpoint.sizeBytes,
+      privateInputs: privateInputs.map((input) => ({
+        id: input.id,
+        originalFilename: input.originalFilename,
+        internalStorageKey: input.internalStorageKey,
+        sizeBytes: input.sizeBytes,
+        checksumSha256: input.checksumSha256,
+      })),
+      outputStorageKey,
+    });
+  } catch (error) {
+    await logConsole(error?.consoleTail, 'error');
+    throw error;
+  }
+  await logConsole(sandbox?.consoleTail, 'info');
   const outputFiles = Array.isArray(sandbox?.files) ? sandbox.files : [];
   const environmentStorageKey = `${outputStorageKey}.environment.json`;
   let validEnvironment = !params.environment;
@@ -115,7 +127,7 @@ async function expertRHandler(ctx) {
     sandbox.checkpointChecksumSha256 === checkpoint.checksumSha256 &&
     JSON.stringify(sandbox.privateInputs || []) === JSON.stringify(privateInputProvenance) &&
     /^sha256:[0-9a-f]{64}$/.test(String(sandbox.sandboxImageDigest || '')) &&
-    sandbox.resourcePolicyVersion === EXPERT_R_RESOURCE_POLICY_VERSION;
+    sandbox.resourcePolicyVersion === (job.executionTarget === 'slurm' ? SLURM_SANDBOX_POLICY_VERSION : EXPERT_R_RESOURCE_POLICY_VERSION);
   if (!validSandbox || !validEnvironment) {
     if (typeof ctx.removeDurableObject === 'function') {
       try {

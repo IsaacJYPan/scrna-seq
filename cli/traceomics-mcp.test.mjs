@@ -62,6 +62,40 @@ describe('traceomics MCP server', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('runs an R script in a sandbox with a stable request id and returns figures as images', async () => {
+    const { calls, fetchImpl } = recordingFetch(201, { schema: 'x', run: { id: 'sbr_1' } });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)' };
+    await server.callTool('run_r_script', args);
+    await server.callTool('run_r_script', args);
+    expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/sbx_${'a'.repeat(24)}/runs`);
+    const [a, b] = calls.map((c) => JSON.parse(c.init.body));
+    expect(a).toEqual({ title: 'Markers', script: 'print(1)', requestId: expect.any(String) });
+    expect(a.requestId).toBe(b.requestId);
+    expect(TOOLS.find((t) => t.name === 'run_r_script').annotations.readOnlyHint).toBe(false);
+
+    const image = createMcpServer({ env: ENV, fetchImpl: recordingFetch(200, {
+      kind: 'image', mimeType: 'image/png', name: 'umap.png', sizeBytes: 3, base64: 'AAAA' }).fetchImpl });
+    const shown = await image.callTool('read_sandbox_file', { projectId: 'proj_1', runId: `sbr_${'b'.repeat(24)}`, file: 'umap.png' });
+    expect(shown.result.content[0]).toEqual({ type: 'image', data: 'AAAA', mimeType: 'image/png' });
+    const text = createMcpServer({ env: ENV, fetchImpl: recordingFetch(200, { kind: 'text', text: 'gene,p\n' }).fetchImpl });
+    expect((await text.callTool('read_sandbox_file', { projectId: 'proj_1', runId: `sbr_${'b'.repeat(24)}`, file: 'm.csv' }))
+      .result.content).toEqual([{ type: 'text', text: 'gene,p\n' }]);
+    expect((await server.callTool('read_sandbox_file', { projectId: 'proj_1', runId: `sbr_${'b'.repeat(24)}`, file: '../x' }))
+      .result.isError).toBe(true);
+  });
+
+  it('writes report sections with figures', async () => {
+    const { calls, fetchImpl } = recordingFetch(201);
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    await server.callTool('write_report_section', {
+      projectId: 'proj_1', reportId: `rep_${'c'.repeat(24)}`, key: 'results', heading: 'Results', body: 'Two clusters.',
+      figures: [{ sandboxRunId: `sbr_${'d'.repeat(24)}`, file: 'umap.png', caption: 'UMAP' }],
+    });
+    expect(calls[0].url).toMatch(/\/reports\/rep_c{24}\/sections$/);
+    expect(JSON.parse(calls[0].init.body)).toMatchObject({ key: 'results', figures: [{ file: 'umap.png' }], requestId: expect.any(String) });
+  });
+
   it('reports server refusals as tool errors', async () => {
     const { fetchImpl } = recordingFetch(429, { error: 'Over budget', code: 'BUDGET_EXCEEDED' });
     const out = await createMcpServer({ env: ENV, fetchImpl }).callTool('list_studies', { projectId: 'proj_1' });

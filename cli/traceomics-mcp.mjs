@@ -23,6 +23,11 @@ const ID = {
   plan: /^plan_[0-9a-f]{24}$/,
   run: /^run_[0-9a-f]{24}$/,
   proposal: /^prop_[0-9a-f]{24}$/,
+  sandbox: /^sbx_[0-9a-f]{24}$/,
+  sandboxRun: /^sbr_[0-9a-f]{24}$/,
+  report: /^rep_[0-9a-f]{24}$/,
+  object: /^[A-Za-z0-9_-]{1,80}$/,
+  file: /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/,
   dataset: /^[A-Za-z0-9_-]{1,80}$/,
 };
 
@@ -45,9 +50,9 @@ const project = (args) => `/projects/${str(args, 'projectId', ID.project)}`;
 const projectProp = { projectId: { type: 'string', description: 'Project id.' } };
 const limitProp = { limit: { type: 'integer', minimum: 1, maximum: 999 } };
 
-function tool(name, description, properties, required, build, { readOnly = true } = {}) {
+function tool(name, description, properties, required, build, { readOnly = true, render } = {}) {
   return {
-    name, description, build,
+    name, description, build, render,
     inputSchema: { type: 'object', properties, required, additionalProperties: false },
     annotations: { readOnlyHint: readOnly, openWorldHint: false },
   };
@@ -121,6 +126,79 @@ export const TOOLS = [
     (a) => { const q = optionalLimit(a); return { method: 'GET', path: `${project(a)}/proposals${q ? `?${q}` : ''}` }; }),
   tool('get_proposal', 'One of this agent\'s proposals.', { ...projectProp, proposalId: { type: 'string' } }, ['projectId', 'proposalId'],
     (a) => ({ method: 'GET', path: `${project(a)}/proposals/${str(a, 'proposalId', ID.proposal)}` })),
+
+  // Isolated development: the agent's own R scripts in a sandbox a person defined.
+  tool('list_sandboxes', 'Sandboxes a person opened for this agent: the analyses you may read, run and compute budgets, and the R runtime (packages, helpers, limits).',
+    projectProp, ['projectId'], (a) => ({ method: 'GET', path: `${project(a)}/sandboxes` })),
+  tool('get_sandbox', 'One sandbox with this agent\'s runs in it.', { ...projectProp, sandboxId: { type: 'string' } }, ['projectId', 'sandboxId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}` })),
+  tool('run_r_script', 'Run your own R script once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
+    { ...projectProp, sandboxId: { type: 'string' }, title: { type: 'string', description: 'What this run does, in a few words.' },
+      script: { type: 'string', description: 'R source, at most 32 KiB.' },
+      inputAnalysisObjectId: { type: 'string', description: 'One of the sandbox inputs; defaults to the first.' },
+      requestId: { type: 'string' } },
+    ['projectId', 'sandboxId', 'title', 'script'],
+    (a) => {
+      const base = `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/runs`;
+      const body = { title: str(a, 'title'), script: str(a, 'script') };
+      if (a.inputAnalysisObjectId !== undefined) body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
+      body.requestId = a.requestId === undefined
+        ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? ''])
+        : str(a, 'requestId');
+      return { method: 'POST', path: base, body };
+    }, { readOnly: false }),
+  tool('get_sandbox_run', 'State of a sandbox run (queued, running, draft_ready, failed, ...), its output files, the last lines of the R console, and any error.',
+    { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}` })),
+  tool('read_sandbox_file', 'Read one output file of a finished sandbox run: tables and text as text (up to 256 KiB), PNG figures as images (up to 2 MiB).',
+    { ...projectProp, runId: { type: 'string' }, file: { type: 'string', description: 'Output file name, for example "markers.csv".' } },
+    ['projectId', 'runId', 'file'],
+    (a) => ({ method: 'GET', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/files/${str(a, 'file', ID.file).split('/').map(encodeURIComponent).join('/')}` }),
+    { render: (data) => {
+      if (data?.kind === 'image' && data.mimeType === 'image/png' && typeof data.base64 === 'string') {
+        return { content: [{ type: 'image', data: data.base64, mimeType: 'image/png' }, { type: 'text', text: `${data.name} (${data.sizeBytes} bytes)` }] };
+      }
+      if (data?.kind === 'text' && typeof data.text === 'string') return { content: [{ type: 'text', text: data.text }] };
+      return null;
+    } }),
+  tool('cancel_sandbox_run', 'Cancel one of this agent\'s sandbox runs. The reserved budget is not refunded.',
+    { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
+    (a) => ({ method: 'POST', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/cancel`, body: {} }), { readOnly: false }),
+
+  // Reports: draft sections for people to review.
+  tool('create_report', 'Start a report (for example a paper draft). Sections are added with write_report_section and reviewed by people.',
+    { ...projectProp, title: { type: 'string' }, requestId: { type: 'string' } }, ['projectId', 'title'],
+    (a) => {
+      const base = `${project(a)}/reports`;
+      const title = str(a, 'title');
+      return { method: 'POST', path: base, body: { title, requestId: a.requestId === undefined ? defaultRequestId([base, title]) : str(a, 'requestId') } };
+    }, { readOnly: false }),
+  tool('list_reports', 'This agent\'s reports and the review status of each section.', projectProp, ['projectId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/reports` })),
+  tool('get_report', 'A report with every section, its version history, and reviewers\' decisions and comments. Read this to see what to revise.',
+    { ...projectProp, reportId: { type: 'string' } }, ['projectId', 'reportId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/reports/${str(a, 'reportId', ID.report)}` })),
+  tool('write_report_section', 'Write or revise one section (Markdown). Writing the same key again creates a new version that needs a fresh review. Figures cite output files of your sandbox runs.',
+    { ...projectProp, reportId: { type: 'string' },
+      key: { type: 'string', description: 'Stable section id, for example "methods" or "results-clustering".' },
+      heading: { type: 'string' }, body: { type: 'string', description: 'Markdown, at most 64 KiB.' },
+      position: { type: 'integer', minimum: 0, maximum: 999, description: 'Order in the report; defaults to the end, or the previous position for a revision.' },
+      figures: { type: 'array', items: { type: 'object', properties: {
+        sandboxRunId: { type: 'string' }, file: { type: 'string' }, caption: { type: 'string' } },
+        required: ['sandboxRunId', 'file'], additionalProperties: false } },
+      requestId: { type: 'string' } },
+    ['projectId', 'reportId', 'key', 'heading', 'body'],
+    (a) => {
+      const base = `${project(a)}/reports/${str(a, 'reportId', ID.report)}/sections`;
+      const body = { key: str(a, 'key'), heading: str(a, 'heading'), body: typeof a.body === 'string' ? a.body : str(a, 'body') };
+      if (a.position !== undefined) body.position = a.position;
+      if (a.figures !== undefined) {
+        if (!Array.isArray(a.figures)) throw new ToolInputError('figures must be a list.');
+        body.figures = a.figures;
+      }
+      body.requestId = a.requestId === undefined ? defaultRequestId([base, JSON.stringify(body)]) : str(a, 'requestId');
+      return { method: 'POST', path: base, body };
+    }, { readOnly: false }),
 ];
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
@@ -149,6 +227,10 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
     }
     const reply = await sendRequest(request, { env, token, fetchImpl });
     if (reply.failure) return { result: textResult(reply.failure, true) };
+    if (reply.response.ok && definition.render) {
+      const rendered = definition.render(reply.data);
+      if (rendered) return { result: rendered };
+    }
     return { result: textResult(reply.data, !reply.response.ok) };
   }
 
@@ -166,7 +248,7 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
         protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
-        instructions: 'TraceOmics delegated-agent tools. Start with get_context, then list_studies. Plan a trial with create_plan, run it with submit_run, poll get_run, then read get_run_results. You can only run approved workflows inside a study a person defined; ask a person (or create_proposal) for anything outside it.',
+        instructions: 'TraceOmics delegated-agent tools. Start with get_context to see what you may do. Approved workflows: list_studies, create_plan, submit_run, get_run, get_run_results. Your own analysis code: list_sandboxes, run_r_script, get_sandbox_run, read_sandbox_file (inputs are read-only and outputs stay drafts until a person promotes them). Writing up: create_report, write_report_section, get_report to read reviewers\' comments and revise. Ask a person (or create_proposal) for anything outside what you were given.',
       } };
     } else if (method === 'ping') {
       outcome = { result: {} };

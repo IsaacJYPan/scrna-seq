@@ -931,12 +931,29 @@ export const electronAPI = {
   listComputeTargets: async (id) => req(`/api/projects/${encodeURIComponent(id)}/compute-targets`),
   listWorkflowReleases: async (id) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases`),
   approveWorkflowRelease: async (id, releaseId, digest) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases/${encodeURIComponent(releaseId)}/approve`, { method: 'POST', body: JSON.stringify({ digest }) }),
+  getWorkflowReleaseSteps: async (id, releaseId) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases/${encodeURIComponent(releaseId)}/steps`),
   revokeWorkflowApproval: async (id, approvalId) => req(`/api/projects/${encodeURIComponent(id)}/workflow-approvals/${encodeURIComponent(approvalId)}/revoke`, { method: 'POST', body: '{}' }),
   listStudies: async (id) => req(`/api/projects/${encodeURIComponent(id)}/studies`),
   createStudy: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/studies`, { method: 'POST', body: JSON.stringify(body) }),
   closeStudy: async (id, studyId) => req(`/api/projects/${encodeURIComponent(id)}/studies/${encodeURIComponent(studyId)}/close`, { method: 'POST', body: '{}' }),
   listAgentRuns: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs`),
   acceptAgentRun: async (id, runId, expectedAcceptedRunId) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/accept`, { method: 'POST', body: JSON.stringify({ expectedAcceptedRunId }) }),
+  listAgentSandboxes: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`),
+  createAgentSandbox: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`, { method: 'POST', body: JSON.stringify(body) }),
+  getAgentSandbox: async (id, sandboxId) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes/${encodeURIComponent(sandboxId)}`),
+  closeAgentSandbox: async (id, sandboxId) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes/${encodeURIComponent(sandboxId)}/close`, { method: 'POST', body: '{}' }),
+  reviewAgentSandboxRun: async (id, runId, decision, note) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandbox-runs/${encodeURIComponent(runId)}/review`, { method: 'POST', body: JSON.stringify(note ? { decision, note } : { decision }) }),
+  agentSandboxFileUrl: (id, runId, name, { download = false } = {}) => apiUrl(`/api/projects/${encodeURIComponent(id)}/agent-sandbox-runs/${encodeURIComponent(runId)}/files/${String(name).split('/').map(encodeURIComponent).join('/')}${download ? '?download=1' : ''}`),
+  readAgentSandboxText: async (id, runId, name) => {
+    const res = await fetch(apiUrl(`/api/projects/${encodeURIComponent(id)}/agent-sandbox-runs/${encodeURIComponent(runId)}/files/${String(name).split('/').map(encodeURIComponent).join('/')}`), { credentials: 'include' });
+    if (!res.ok) throw new Error('The file could not be read.');
+    return res.text();
+  },
+  listAgentReports: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports`),
+  getAgentReport: async (id, reportId) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}`),
+  reviewAgentReportSection: async (id, reportId, sectionId, decision, comment) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/reviews`, { method: 'POST', body: JSON.stringify({ sectionId, decision, ...(comment ? { comment } : {}) }) }),
+  finalizeAgentReport: async (id, reportId) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/finalize`, { method: 'POST', body: '{}' }),
+  agentReportExportUrl: (id, reportId) => apiUrl(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/export`),
 
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {

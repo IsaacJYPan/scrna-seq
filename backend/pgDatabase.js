@@ -751,6 +751,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
       hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
@@ -1556,6 +1557,9 @@ async function deleteExpiredDemoGuest(userId) {
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
+      for (const table of ['agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
+        await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
+      }
       for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {
         await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
       }
@@ -6366,6 +6370,9 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
   const jobParameters = parseJson(row.parameters_json, {});
   const expectedProfileId = jobParameters.profileId;
   const expectedScriptSha256 = jobParameters.scriptSha256;
+  // Sandbox runs routed to a qualified Slurm target record the cluster policy.
+  const expectedPolicyVersion = row.execution_target === 'slurm'
+    ? require('./expertR').SLURM_SANDBOX_POLICY_VERSION : EXPERT_R_RESOURCE_POLICY_VERSION;
   const expectedEnvironment = jobParameters.environment ? validateEnvironmentReference(jobParameters.environment) : null;
   const expectedPrivateInputs = (await resolveExpertRPrivateInputs(
     owner, pid, jobParameters.inputIds || []
@@ -6423,7 +6430,7 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
     }
     if (metadata.packageProfileId !== expectedProfileId
         || metadata.scriptSha256 !== expectedScriptSha256
-        || metadata.resourcePolicyVersion !== EXPERT_R_RESOURCE_POLICY_VERSION
+        || metadata.resourcePolicyVersion !== expectedPolicyVersion
         || !/^sha256:[0-9a-f]{64}$/.test(String(metadata.sandboxImageDigest || ''))
         || metadata.input?.analysisObjectId !== sourceId
         || metadata.input?.checkpointArtifactId !== expectedCheckpoint.checkpointArtifactId
@@ -7147,6 +7154,7 @@ module.exports = {
   getSpatialPipelineInputsForJobByWorker,
   getLoadableCheckpointForJobByWorker,
   getHydrationCheckpointForJobByWorker,
+  resolveCheckpointArtifact,
   getExpertRPrivateInputsForJobByWorker,
   getConditionComparisonInputsForJobByWorker,
   getForkableCheckpointForJobByWorker,

@@ -22,6 +22,8 @@ const MAX_SCRIPT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 200 * 1024 * 1024;
 const MAX_BUNDLE_BYTES = MAX_OUTPUT_BYTES + (4 * 1024 * 1024);
 const RESOURCE_POLICY_VERSION = 'expert-r-sandbox-policy.v3';
+// Agent sandbox runs on a qualified Slurm target (backend/executors/slurm.js).
+const SLURM_SANDBOX_POLICY_VERSION = 'slurm-sandbox-policy.v1';
 const EXPERT_R_ALLOWED_DEPLOYMENT_MODES = new Set(['private', 'byoc', 'shared-private']);
 const EXPERT_R_INPUT_EXTENSIONS = new Set(['.csv', '.tsv', '.txt', '.json', '.rds']);
 const MAX_EXPERT_R_TABULAR_INPUT_BYTES = 25 * 1024 * 1024;
@@ -150,6 +152,7 @@ module.exports = {
   MAX_EXPERT_R_OUTPUT_BYTES: MAX_OUTPUT_BYTES,
   MAX_EXPERT_R_BUNDLE_BYTES: MAX_BUNDLE_BYTES,
   EXPERT_R_RESOURCE_POLICY_VERSION: RESOURCE_POLICY_VERSION,
+  SLURM_SANDBOX_POLICY_VERSION,
   EXPERT_R_ALLOWED_DEPLOYMENT_MODES,
   EXPERT_R_INPUT_EXTENSIONS,
   MAX_EXPERT_R_INPUT_BYTES,

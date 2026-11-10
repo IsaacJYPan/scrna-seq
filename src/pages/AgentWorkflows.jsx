@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, FlaskConical, Loader2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import AgentRunNotebook from '../components/AgentRunNotebook';
 
 // Human side of approved agent execution (docs/spec.md phase 2): approve exact
 // workflow releases, define studies agents may work in, and accept results.
@@ -93,6 +94,16 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   const [error, setError] = useState(null);
   const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], sourceStudyId: '', param: '', values: '', maxTrials: 4, executionTarget: 'local', ruleMetric: '', ruleGoal: 'max' });
   const [slurm, setSlurm] = useState(null);
+  const [steps, setSteps] = useState({});
+  const toggleSteps = async (releaseId) => {
+    if (steps[releaseId]) { setSteps(({ [releaseId]: _gone, ...rest }) => rest); return; }
+    try {
+      const res = await api.getWorkflowReleaseSteps(projectId, releaseId);
+      if (mounted.current) setSteps((s) => ({ ...s, [releaseId]: res }));
+    } catch (err) {
+      if (mounted.current) setError(publicErrorMessage(err?.message, 'The analysis steps could not be loaded.'));
+    }
+  };
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
 
   const load = useCallback(async () => {
@@ -177,6 +188,11 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
                 <p className="font-bold text-text">{r.title} <span className="text-xs text-textMuted">v{r.version}</span></p>
                 <p className="mt-1 break-all text-xs text-textMuted">Digest {r.digest}</p>
                 <p className="text-xs text-textMuted">Pinned files: {r.handler.map((h) => h.path).join(', ')} · Reserves {r.resources.cpus} CPU, {Math.round(r.resources.memoryMiB / 1024)} GiB, {r.resources.maxWallSeconds / 60} min per run</p>
+                {r.readableSource && api.getWorkflowReleaseSteps && (
+                  <button type="button" onClick={() => toggleSteps(r.id)} aria-expanded={Boolean(steps[r.id])} className="mt-1 text-xs text-primary underline">
+                    {steps[r.id] ? 'Hide the analysis steps' : 'Read the analysis steps'}
+                  </button>
+                )}
               </div>
               {r.approval ? (
                 <div className="flex items-center gap-2">
@@ -187,6 +203,13 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
                 <button type="button" disabled={Boolean(busy)} onClick={() => act(`approve:${r.id}`, () => api.approveWorkflowRelease(projectId, r.id, r.digest))} className="btn btn-primary text-sm">Approve this exact release</button>
               ) : <span className="text-xs text-textMuted">Not approved. Owners and admins can approve.</span>}
             </div>
+            {steps[r.id] && (
+              <div className="mt-3">
+                <p className="mb-1 text-xs text-textMuted">{steps[r.id].source?.path} · SHA-256 {steps[r.id].source?.sha256?.slice(0, 12)}…</p>
+                <AgentRunNotebook run={{ id: r.id, runNumber: 0, title: r.title, steps: steps[r.id].steps, files: [], scriptSha256: steps[r.id].source?.sha256 }}
+                  projectId={projectId} label={`Analysis steps of ${r.title}`} />
+              </div>
+            )}
           </article>
         ))}
       </div>

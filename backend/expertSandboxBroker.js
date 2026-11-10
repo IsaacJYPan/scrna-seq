@@ -63,6 +63,14 @@ function safeFailureCode(error) {
   return 'SANDBOX_FAILED';
 }
 
+// Last lines of the R console, for the run owner. Terminal control codes are
+// removed and the text is bounded; logs are scrubbed again when projected.
+function consoleTail(text, maxChars = 4000) {
+  // eslint-disable-next-line no-control-regex -- deliberately strips terminal and control characters
+  const clean = String(text || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').replace(/[\u0000-\u0008\u000b-\u001f]/g, '');
+  return clean.trim().slice(-maxChars);
+}
+
 function ownerScriptFailureExplanation(error, phase) {
   if (phase !== 'execute' || error?.exitCode !== 1) return null;
   if (error?.code === 'SANDBOX_OUTPUT_QUOTA_EXCEEDED') {
@@ -862,6 +870,10 @@ function createExpertSandboxBroker(env = process.env) {
           exitCode: Number.isInteger(sandboxExitCode) ? sandboxExitCode : 1,
         });
       }
+      const successLogs = await runProcess('docker', ['logs', '--tail', '200', containerName], {
+        timeoutMs: 30000,
+      }).catch(() => ({ stdout: '', stderr: '' }));
+      const runConsole = consoleTail(`${successLogs.stdout || ''}\n${successLogs.stderr || ''}`);
       phase = 'extract';
       await assertFreeSpace(workRoot, (2 * MAX_ARCHIVE_BYTES) + minFreeBytes);
       await extractContainerOutputs(containerName, outputDirectory, abortController.signal);
@@ -924,6 +936,7 @@ function createExpertSandboxBroker(env = process.env) {
         sandboxImageDigest,
         resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION,
         environment, environmentArtifact,
+        ...(runConsole ? { consoleTail: runConsole } : {}),
       }));
     } catch (error) {
       const exitCode = Number.isInteger(error?.exitCode) ? error.exitCode : 'none';
@@ -934,7 +947,9 @@ function createExpertSandboxBroker(env = process.env) {
         const explanation = ownerScriptFailureExplanation(error, phase);
         if (explanation) {
           res.statusCode = 422;
-          res.end(JSON.stringify({ error: 'Expert R script failed.', code: 'EXPERT_R_SCRIPT_FAILED', explanation }));
+          const tail = consoleTail(error?.diagnostic);
+          res.end(JSON.stringify({ error: 'Expert R script failed.', code: 'EXPERT_R_SCRIPT_FAILED', explanation,
+            ...(tail ? { consoleTail: tail } : {}) }));
         } else if (['R_ENVIRONMENT_MISMATCH', 'R_ENVIRONMENT_INVALID', 'R_ENVIRONMENT_UNAVAILABLE'].includes(error?.code)) {
           res.statusCode = 409;
           res.end(JSON.stringify({ error: 'The exact R environment for this run is unavailable. Restore its pinned runtime image and package lock before retrying.', code: 'R_ENVIRONMENT_MISMATCH' }));

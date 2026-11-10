@@ -5,6 +5,8 @@ import {
 import PageHeader from '../components/PageHeader';
 import { publicErrorMessage } from '../publicError';
 import AgentWorkflows from './AgentWorkflows';
+import AgentSandboxes from './AgentSandboxes';
+import AgentReports from './AgentReports';
 
 // Human governance for delegated agents (docs/spec.md phases 0-1). This page
 // only displays and changes delegations; every rule is enforced server-side.
@@ -22,6 +24,8 @@ const CAPABILITY_LABELS = {
   'workflow.plan': 'Plan runs of approved workflows in your studies',
   'workflow.executeApproved': 'Run approved workflows within study budgets',
   'run.cancelOwn': 'Cancel its own runs',
+  'development.executeCandidate': 'Run its own R code in your sandboxes (no network, read-only inputs, draft outputs)',
+  'report.write': 'Draft report sections for review',
 };
 
 function errorText(error, fallback) {
@@ -46,7 +50,7 @@ export default function AgentAccess(props) {
   return <AgentAccessProject key={projectId || 'no-project'} {...props} projectId={projectId} />;
 }
 
-function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjects, onSelectAnalysisObject, setActiveTab }) {
+function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjects, onSelectAnalysisObject, setActiveTab, theme }) {
   const project = currentWs?.projects?.find(p => p.id === projectId) || null;
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
@@ -333,6 +337,15 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
             await onSelectAnalysisObject(projectId, objectId);
             setActiveTab?.('workspace');
           } : undefined} />
+
+        <AgentSandboxes projectId={projectId} role={role} userId={userId} theme={theme} onChanged={load}
+          onOpenResult={onSelectAnalysisObject ? async (objectId) => {
+            if (typeof refreshAnalysisObjects === 'function') await refreshAnalysisObjects(projectId);
+            await onSelectAnalysisObject(projectId, objectId);
+            setActiveTab?.('workspace');
+          } : undefined} />
+
+        <AgentReports projectId={projectId} role={role} />
 
         <section className="space-y-3" aria-label="Agent proposals">
           <div>

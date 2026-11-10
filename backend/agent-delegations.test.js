@@ -102,7 +102,6 @@ describe.skipIf(!CONFIGURED)('agent delegation lifecycle', () => {
     const { sponsor, project } = await setupProject();
     for (const [capabilities, code] of [
       [['artifact.export'], 'CAPABILITY_UNAVAILABLE'],
-      [['development.executeCandidate'], 'CAPABILITY_UNAVAILABLE'],
       [['workflow.approve'], 'CAPABILITY_NOT_DELEGABLE'],
       [['result.accept'], 'CAPABILITY_NOT_DELEGABLE'],
       [['security.manage'], 'CAPABILITY_NOT_DELEGABLE'],

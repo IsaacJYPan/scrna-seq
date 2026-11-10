@@ -31,7 +31,11 @@ const DEFINITIONS = [
     version: '1',
     title: 'Seurat QC, normalization and clustering (10x HDF5)',
     jobType: 'seurat.pipeline.v1',
-    handlerFiles: ['backend/seuratPipeline.js', 'backend/jobs/pipelineHandlers.js', 'r-backend/plumber.R'],
+    // seuratPipelineCore.R holds the analysis steps themselves; plumber.R only
+    // sources it, so it must be digested in its own right.
+    handlerFiles: ['backend/seuratPipeline.js', 'backend/jobs/pipelineHandlers.js', 'r-backend/plumber.R',
+      'r-backend/lib/seuratPipelineCore.R'],
+    readableSource: 'r-backend/lib/seuratPipelineCore.R',
     inputs: [{ name: 'dataset', fileTypes: ['tenx_h5'] }],
     outputs: [{ name: 'result', kind: 'analysis_object', objectType: 'seurat' }],
     parameterSchema: SEURAT_PIPELINE_PARAM_SPEC,
@@ -105,6 +109,7 @@ function buildRelease(definition) {
     jobType: definition.jobType,
     digest,
     definition: { ...identity, title: definition.title },
+    readableSource: definition.readableSource || null,
     validateParameters: definition.validateParameters,
   };
 }
