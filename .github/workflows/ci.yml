@@ -1,8 +1,12 @@
 name: CI Pipeline
 
 # Private-repo GitHub Actions minutes are limited, so the full CI suite runs
-# on pull requests plus manual dispatch.
+# on pull requests plus manual dispatch. Pushes to main run the fast preflight
+# so the head of main always has a recorded result.
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
@@ -72,6 +76,7 @@ jobs:
   browser-preflight:
     name: Browser release preflight
     needs: preflight
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -123,7 +128,7 @@ jobs:
 
   test:
     needs: browser-preflight
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 150
 
@@ -308,7 +313,7 @@ jobs:
   r-image-smoke:
     name: Build and boot production R image
     needs: browser-preflight
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
