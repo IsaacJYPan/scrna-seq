@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import config from './desktopConfig.cjs';
+import brand from '../shared/brand.json';
+
+const APP_NAME = brand.name;
+const escapeRe = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const nameRe = (before = '', after = '', flags = '') => new RegExp(`${before}${escapeRe(APP_NAME)}${after}`, flags);
 
 const { isAllowedNavigation, normalizeServerUrl, verifyServerConnection } = config;
 
@@ -21,7 +26,8 @@ describe('desktop server configuration', () => {
   it('exposes native product identity and an About surface', () => {
     const mainSource = fs.readFileSync(path.resolve(process.cwd(), 'desktop', 'main.cjs'), 'utf8');
     expect(mainSource).toContain("app.setAppUserModelId('org.traceomics.workbench')");
-    expect(mainSource).toContain("label: 'About TraceOmics'");
+    expect(mainSource).toContain("require('../shared/brand.json')");
+    expect(mainSource).toContain('label: `About ${APP_NAME}`');
     expect(mainSource).toContain('app.getVersion()');
   });
 
@@ -51,9 +57,9 @@ describe('desktop server configuration', () => {
       .resolves.toBe('https://analysis.example.org');
   });
 
-  it('rejects reachable non-TraceOmics sites with a stable explanation', async () => {
+  it('rejects reachable non-product sites with a stable explanation', async () => {
     const fetchImpl = async () => ({ ok: true, json: async () => ({ status: 'ok' }) });
     await expect(verifyServerConnection('https://example.org', { fetchImpl }))
-      .rejects.toThrow(/not a compatible TraceOmics server/i);
+      .rejects.toThrow(nameRe('not a compatible ', ' server', 'i'));
   });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import compatibility from './serviceCompatibility.cjs';
+import brand from '../shared/brand.json';
+
+const APP_NAME = brand.name;
+const escapeRe = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const nameRe = (before = '', after = '', flags = '') => new RegExp(`${before}${escapeRe(APP_NAME)}${after}`, flags);
 
 const { checkServiceCompatibility, validateServiceCompatibility } = compatibility;
 const descriptor = { product: 'TraceOmics', serviceApiVersion: 1, minimumClientApiVersion: 1 };
@@ -19,7 +24,7 @@ describe('native public service compatibility', () => {
     { ...descriptor, serviceApiVersion: '1' }, { ...descriptor, minimumClientApiVersion: true },
     { ...descriptor, serviceApiVersion: 0 }, { ...descriptor, serviceApiVersion: 1001 },
     { ...descriptor, minimumClientApiVersion: 0 }, { ...descriptor, minimumClientApiVersion: 2 }])('rejects an invalid product or protocol descriptor %j', value => {
-    expect(() => validateServiceCompatibility(value)).toThrow(/compatible TraceOmics server/);
+    expect(() => validateServiceCompatibility(value)).toThrow(nameRe('compatible ', ' server'));
   });
 
   it('uses a bounded, unauthenticated request through the provided connection transport', async () => {

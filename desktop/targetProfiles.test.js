@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import config from './desktopConfig.cjs';
+import brand from '../shared/brand.json';
+
+const APP_NAME = brand.name;
+const escapeRe = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const nameRe = (before = '', after = '', flags = '') => new RegExp(`${before}${escapeRe(APP_NAME)}${after}`, flags);
 
 const { normalizeTargetProfile, normalizeTargetSettings, profileForServerUrl,
   targetServiceIdentity, targetSessionPartition, verifyServerConnection } = config;
@@ -91,7 +96,7 @@ describe('execution target profiles', () => {
     const pending = verifyServerConnection('https://analysis.example.org', {
       fetchImpl: async () => new Response(body, { headers: { 'Content-Type': 'application/json' } }),
     });
-    await expect(pending).rejects.toThrow(/TraceOmics/);
+    await expect(pending).rejects.toThrow(nameRe());
     await expect(pending).rejects.not.toThrow(/oversized-private-diagnostic/);
   });
 
@@ -112,7 +117,7 @@ describe('execution target profiles', () => {
     try {
       await expect(verifyServerConnection('https://analysis.example.org', {
         timeoutMs: 20, fetchImpl: async () => new Response(body),
-      })).rejects.toThrow(/TraceOmics/);
+      })).rejects.toThrow(nameRe());
       expect(cancel).toHaveBeenCalled();
     } finally { stopped = true; clearTimeout(timer); }
   });
@@ -121,7 +126,7 @@ describe('execution target profiles', () => {
     const pending = verifyServerConnection('https://analysis.example.org', {
       fetchImpl: async () => new Response('private-service-error{bad-json'),
     });
-    await expect(pending).rejects.toThrow(/valid TraceOmics compatibility response/);
+    await expect(pending).rejects.toThrow(nameRe('valid ', ' compatibility response'));
     await expect(pending).rejects.not.toThrow(/private-service-error/);
   });
 });
