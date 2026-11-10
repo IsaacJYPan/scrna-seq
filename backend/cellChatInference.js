@@ -6,7 +6,7 @@
 // unsafe or scientifically ambiguous requests before any CellChat computation.
 
 const { projectStorageFileKey } = require('./storage');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
 
 const CELLCHAT_INFERENCE_JOB_TYPE = 'cellchat.infer.v1';
 // The R-side bounded extractor and every durable publication boundary use the

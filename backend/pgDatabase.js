@@ -46,6 +46,8 @@ const {
 } = require('./spatialPipeline');
 const { validateEnrichmentGseaParams } = require('./enrichmentGsea');
 const { validateConditionComparisonParams } = require('./conditionComparison');
+const { codedError } = require('./codedError');
+const { isSafeUserId, isSessionVersion } = require('./sessionIdentifiers');
 const {
   storedExpertRParams,
   expertRSandboxEnabled,
@@ -68,7 +70,6 @@ const {
   getDefaultPipelineManifest,
   isBuiltInPipelineId,
 } = require('./pipelineManifests');
-const { codedError } = require('./errors');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
 const SCHEMA_CONTRACT_VERSION = 20261036;
@@ -1631,22 +1632,6 @@ async function deleteExpiredDemoGuest(userId) {
   } finally {
     client.release();
   }
-}
-
-const MAX_POSTGRES_BIGINT = 9223372036854775807n;
-
-function isCanonicalPositiveIntegerString(value, maximum) {
-  const text = String(value ?? '');
-  if (!/^[1-9][0-9]{0,18}$/.test(text)) return false;
-  try { return BigInt(text) <= maximum; } catch { return false; }
-}
-
-function isSafeUserId(value) {
-  return isCanonicalPositiveIntegerString(value, BigInt(Number.MAX_SAFE_INTEGER));
-}
-
-function isSessionVersion(value) {
-  return isCanonicalPositiveIntegerString(value, MAX_POSTGRES_BIGINT);
 }
 
 async function getUserForSession(userId, sessionVersion) {
@@ -6164,7 +6149,37 @@ async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken,
  * in private project storage; the second artifact contains only the bridge-sanitized,
  * bounded preview used by the UI. No analysis object or lineage edge is created.
  */
-async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+// Pathway enrichment and CellChat workers each publish one bounded results
+// table plus a metadata-only summary. The kinds below differ only in job type,
+// artifact types, row limit, and their public error codes and messages.
+const ENRICHMENT_RESULT_KIND = Object.freeze({
+  jobType: 'enrichment.gsea.v1',
+  resultsType: 'enrichment_results',
+  summaryType: 'enrichment_summary',
+  helperName: 'completeEnrichmentGseaResultByWorker',
+  maxRows: 100000,
+  resultExists: ['ENRICHMENT_RESULT_EXISTS', 'Job already has a pathway-enrichment result artifact.'],
+  resultTypeFixedMessage: 'The enrichment result artifact type is fixed.',
+  resultTooLarge: ['ENRICHMENT_RESULT_TOO_LARGE', 'Pathway-enrichment result exceeds its safe size limit.'],
+  invalidRowCount: ['INVALID_ENRICHMENT_RESULT', 'Pathway-enrichment result row count is invalid.'],
+  summaryTypeFixedMessage: 'The enrichment summary artifact type is fixed.',
+  summaryTooLarge: ['INVALID_ENRICHMENT_SUMMARY', 'Pathway-enrichment summary exceeds its safe size limit.'],
+});
+const CELLCHAT_RESULT_KIND = Object.freeze({
+  jobType: 'cellchat.infer.v1',
+  resultsType: 'cellchat_results',
+  summaryType: 'cellchat_summary',
+  helperName: 'completeCellChatInferenceResultByWorker',
+  maxRows: MAX_CELLCHAT_RESULT_ROWS,
+  resultExists: ['CELLCHAT_RESULT_EXISTS', 'Job already has a cell-communication result artifact.'],
+  resultTypeFixedMessage: 'The cell-communication result artifact type is fixed.',
+  resultTooLarge: ['CELLCHAT_RESULT_TOO_LARGE', 'Cell-communication result exceeds its safe size limit.'],
+  invalidRowCount: ['INVALID_CELLCHAT_RESULT', 'Cell-communication result row count is invalid.'],
+  summaryTypeFixedMessage: 'The cell-communication summary artifact type is fixed.',
+  summaryTooLarge: ['INVALID_CELLCHAT_SUMMARY', 'Cell-communication summary exceeds its safe size limit.'],
+});
+
+async function completeTableAndSummaryResultByWorker(kind, jobId, workerId, claimToken, input = {}, opts = {}) {
   const wid = requireWorkerId(workerId);
   const token = requireClaimToken(claimToken);
   const now = normalizeWorkerNow(opts);
@@ -6173,47 +6188,47 @@ async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken,
   if (!workerHoldsClaim(row, wid, token, now)) {
     throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
   }
-  if (row.job_type !== 'enrichment.gsea.v1') {
-    throw codedError('INVALID_JOB_TYPE', 'A claimed enrichment.gsea.v1 job is required.');
+  if (row.job_type !== kind.jobType) {
+    throw codedError('INVALID_JOB_TYPE', `A claimed ${kind.jobType} job is required.`);
   }
   const existing = await query(
-    "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'enrichment_results' LIMIT 1",
-    [String(row.id)]
+    'SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = $2 LIMIT 1',
+    [String(row.id), kind.resultsType]
   );
   if (existing.rows[0]) {
-    throw codedError('ENRICHMENT_RESULT_EXISTS', 'Job already has a pathway-enrichment result artifact.');
+    throw codedError(kind.resultExists[0], kind.resultExists[1]);
   }
 
   const table = input.resultsArtifact && typeof input.resultsArtifact === 'object'
     ? input.resultsArtifact : {};
   const tableSpec = validateLocalInternalArtifactSpec(table, {
-    defaultArtifactType: 'enrichment_results',
-    helperName: 'completeEnrichmentGseaResultByWorker'
+    defaultArtifactType: kind.resultsType,
+    helperName: kind.helperName
   });
-  if (tableSpec.artifactType !== 'enrichment_results') {
-    throw codedError('INVALID_ARTIFACT_TYPE', 'The enrichment result artifact type is fixed.');
+  if (tableSpec.artifactType !== kind.resultsType) {
+    throw codedError('INVALID_ARTIFACT_TYPE', kind.resultTypeFixedMessage);
   }
   assertProjectArtifactStorageKey(row, tableSpec.storageUri, 'artifacts');
   if (tableSpec.sizeBytes > 50 * 1024 * 1024) {
-    throw codedError('ENRICHMENT_RESULT_TOO_LARGE', 'Pathway-enrichment result exceeds its safe size limit.');
+    throw codedError(kind.resultTooLarge[0], kind.resultTooLarge[1]);
   }
   const nRows = tableSpec.metadata && tableSpec.metadata.nRows;
-  if (!Number.isInteger(nRows) || nRows < 0 || nRows > 100000) {
-    throw codedError('INVALID_ENRICHMENT_RESULT', 'Pathway-enrichment result row count is invalid.');
+  if (!Number.isInteger(nRows) || nRows < 0 || nRows > kind.maxRows) {
+    throw codedError(kind.invalidRowCount[0], kind.invalidRowCount[1]);
   }
 
   const summary = input.summaryArtifact && typeof input.summaryArtifact === 'object'
     ? input.summaryArtifact : {};
   const summarySpec = validateMetadataOnlyArtifactSpec(summary, {
-    defaultArtifactType: 'enrichment_summary', artifactTypeRequired: false
+    defaultArtifactType: kind.summaryType, artifactTypeRequired: false
   });
-  if (summarySpec.artifactType !== 'enrichment_summary'
+  if (summarySpec.artifactType !== kind.summaryType
       || summarySpec.storageKind !== 'metadata_only') {
-    throw codedError('INVALID_ARTIFACT_TYPE', 'The enrichment summary artifact type is fixed.');
+    throw codedError('INVALID_ARTIFACT_TYPE', kind.summaryTypeFixedMessage);
   }
   const encodedSummary = JSON.stringify(summarySpec.metadata);
   if (Buffer.byteLength(encodedSummary, 'utf8') > 128 * 1024) {
-    throw codedError('INVALID_ENRICHMENT_SUMMARY', 'Pathway-enrichment summary exceeds its safe size limit.');
+    throw codedError(kind.summaryTooLarge[0], kind.summaryTooLarge[1]);
   }
 
   const resultsArtifactId = generateJobArtifactId();
@@ -6238,11 +6253,11 @@ async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken,
       throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
     }
     const duplicate = await client.query(
-      "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'enrichment_results' LIMIT 1",
-      [String(row.id)]
+      'SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = $2 LIMIT 1',
+      [String(row.id), kind.resultsType]
     );
     if (duplicate.rows[0]) {
-      throw codedError('ENRICHMENT_RESULT_EXISTS', 'Job already has a pathway-enrichment result artifact.');
+      throw codedError(kind.resultExists[0], kind.resultExists[1]);
     }
     await insertJobArtifactRow(client, {
       id: resultsArtifactId,
@@ -6281,6 +6296,10 @@ async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken,
     resultsArtifact: await getJobArtifactRowById(resultsArtifactId),
     summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
   };
+}
+
+async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  return completeTableAndSummaryResultByWorker(ENRICHMENT_RESULT_KIND, jobId, workerId, claimToken, input, opts);
 }
 
 async function completeConditionComparisonResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
@@ -6696,122 +6715,7 @@ async function completeTrustedMethodResultByWorker(jobId, workerId, claimToken, 
  * is the only CellChat content exposed through project artifact APIs.
  */
 async function completeCellChatInferenceResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
-  if (row.job_type !== 'cellchat.infer.v1') {
-    throw codedError('INVALID_JOB_TYPE', 'A claimed cellchat.infer.v1 job is required.');
-  }
-  const existing = await query(
-    "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'cellchat_results' LIMIT 1",
-    [String(row.id)]
-  );
-  if (existing.rows[0]) {
-    throw codedError('CELLCHAT_RESULT_EXISTS', 'Job already has a cell-communication result artifact.');
-  }
-
-  const table = input.resultsArtifact && typeof input.resultsArtifact === 'object'
-    ? input.resultsArtifact : {};
-  const tableSpec = validateLocalInternalArtifactSpec(table, {
-    defaultArtifactType: 'cellchat_results',
-    helperName: 'completeCellChatInferenceResultByWorker'
-  });
-  if (tableSpec.artifactType !== 'cellchat_results') {
-    throw codedError('INVALID_ARTIFACT_TYPE', 'The cell-communication result artifact type is fixed.');
-  }
-  assertProjectArtifactStorageKey(row, tableSpec.storageUri, 'artifacts');
-  if (tableSpec.sizeBytes > 50 * 1024 * 1024) {
-    throw codedError('CELLCHAT_RESULT_TOO_LARGE', 'Cell-communication result exceeds its safe size limit.');
-  }
-  const nRows = tableSpec.metadata && tableSpec.metadata.nRows;
-  if (!Number.isInteger(nRows) || nRows < 0 || nRows > MAX_CELLCHAT_RESULT_ROWS) {
-    throw codedError('INVALID_CELLCHAT_RESULT', 'Cell-communication result row count is invalid.');
-  }
-
-  const summary = input.summaryArtifact && typeof input.summaryArtifact === 'object'
-    ? input.summaryArtifact : {};
-  const summarySpec = validateMetadataOnlyArtifactSpec(summary, {
-    defaultArtifactType: 'cellchat_summary', artifactTypeRequired: false
-  });
-  if (summarySpec.artifactType !== 'cellchat_summary'
-      || summarySpec.storageKind !== 'metadata_only') {
-    throw codedError('INVALID_ARTIFACT_TYPE', 'The cell-communication summary artifact type is fixed.');
-  }
-  const encodedSummary = JSON.stringify(summarySpec.metadata);
-  if (Buffer.byteLength(encodedSummary, 'utf8') > 128 * 1024) {
-    throw codedError('INVALID_CELLCHAT_SUMMARY', 'Cell-communication summary exceeds its safe size limit.');
-  }
-
-  const resultsArtifactId = generateJobArtifactId();
-  const summaryArtifactId = generateJobArtifactId();
-  const refs = {
-    datasetId: row.dataset_id || null,
-    analysisObjectId: row.analysis_object_id || null,
-    resultAnalysisObjectId: null
-  };
-  const p = await connect();
-  const client = await p.connect();
-  try {
-    await client.query('BEGIN');
-    const claimRow = await client.query(
-      `SELECT 1 FROM jobs
-       WHERE id = $1 AND worker_id = $2 AND claim_token = $3
-         AND status = 'running' AND lease_expires_at > $4
-       FOR UPDATE`,
-      [String(row.id), wid, token, now]
-    );
-    if (!claimRow.rows[0]) {
-      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-    }
-    const duplicate = await client.query(
-      "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'cellchat_results' LIMIT 1",
-      [String(row.id)]
-    );
-    if (duplicate.rows[0]) {
-      throw codedError('CELLCHAT_RESULT_EXISTS', 'Job already has a cell-communication result artifact.');
-    }
-    await insertJobArtifactRow(client, {
-      id: resultsArtifactId,
-      jobRow: row,
-      refs,
-      artifactType: tableSpec.artifactType,
-      name: table.name != null ? String(table.name) : null,
-      description: table.description != null ? String(table.description) : null,
-      mimeType: table.mimeType != null ? String(table.mimeType) : null,
-      storageKind: tableSpec.storageKind,
-      storageUri: tableSpec.storageUri,
-      checksumSha256: tableSpec.checksumSha256,
-      sizeBytes: tableSpec.sizeBytes,
-      status: tableSpec.status,
-      metadata: tableSpec.metadata
-    });
-    await insertJobArtifactRow(client, {
-      id: summaryArtifactId,
-      jobRow: row,
-      refs,
-      artifactType: summarySpec.artifactType,
-      name: summary.name != null ? String(summary.name) : null,
-      description: summary.description != null ? String(summary.description) : null,
-      storageKind: summarySpec.storageKind,
-      status: summarySpec.status,
-      metadata: summarySpec.metadata
-    });
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-  return {
-    resultsArtifact: await getJobArtifactRowById(resultsArtifactId),
-    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
-  };
+  return completeTableAndSummaryResultByWorker(CELLCHAT_RESULT_KIND, jobId, workerId, claimToken, input, opts);
 }
 
 async function resolveCheckpointArtifact(analysisObjectId, projectId) {

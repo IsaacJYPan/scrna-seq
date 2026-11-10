@@ -1,13 +1,21 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Ban, FileText, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  Ban,
+  FileText,
+  Loader2,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
+import useProjectAnalysisJob from '../hooks/useProjectAnalysisJob';
+import { EmptyNotice, JobLogs, Metric, StatusBadge, displayRunStatus, formatDate, runStatusTone } from '../components/analysisRunDisplay';
 
 const ENRICHMENT_JOB_TYPE = 'enrichment.gsea.v1';
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
-const POLL_MS = 3000;
 const JOB_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const SAFE_TARGET_GROUP_RE = /^[A-Za-z0-9 ._+()-]+$/;
 
@@ -64,16 +72,6 @@ function buildEnrichmentParams(params) {
   };
 }
 
-function parseErrorMessage(error) {
-  const raw = error?.message || String(error || 'Request failed.');
-  try {
-    const parsed = JSON.parse(raw);
-    return publicErrorMessage(parsed?.error || raw);
-  } catch {
-    return publicErrorMessage(raw);
-  }
-}
-
 function redactUnsafeText(value) {
   return String(value || '')
     .replace(/[A-Za-z]:[\\/][^\s'")]+/g, '[redacted path]')
@@ -83,12 +81,6 @@ function redactUnsafeText(value) {
     .replace(/\bclaim_?token\b/gi, '[redacted worker field]')
     .replace(/\bstate_?key\b/gi, '[redacted state field]')
     .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+/g, '[redacted state]');
-}
-
-function formatDate(value) {
-  if (!value) return 'Unknown';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
 function formatNumber(value, digits = 3) {
@@ -104,86 +96,6 @@ function formatPercent(value) {
   if (!Number.isFinite(number)) return 'NA';
   const fraction = number > 1 ? number / 100 : number;
   return `${(fraction * 100).toFixed(1)}%`;
-}
-
-function badgeTone(status) {
-  if (status === 'completed') return 'green';
-  if (status === 'failed' || status === 'canceled') return 'rose';
-  if (status === 'running') return 'blue';
-  return 'amber';
-}
-
-function displayRunStatus(status) {
-  return {
-    queued: 'Waiting for compute',
-    running: 'Running',
-    completed: 'Complete',
-    failed: 'Needs attention',
-    canceled: 'Canceled',
-  }[status] || 'Unknown';
-}
-
-function researcherRunNote(entry) {
-  if (entry?.level === 'error') return 'This analysis needs attention.';
-  const message = String(entry?.message || '');
-  if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
-  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
-  if (entry?.level === 'warn') return 'Analysis warning recorded.';
-  return 'Analysis update recorded.';
-}
-
-function StatusBadge({ children, tone = 'slate' }) {
-  const tones = {
-    blue: 'bg-primary/10 text-text border-primary/20',
-    green: 'bg-success/10 text-success border-success/30',
-    amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
-    rose: 'bg-danger/10 text-danger border-danger/30',
-    slate: 'bg-background text-textMuted border-border',
-  };
-  return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${tones[tone] || tones.slate}`}>
-      {children}
-    </span>
-  );
-}
-
-function EmptyNotice({ title, children }) {
-  return (
-    <div className="rounded-lg border border-dashed border-border p-6 text-center">
-      <p className="font-bold text-text">{title}</p>
-      <p className="mt-2 text-sm text-textMuted">{children}</p>
-    </div>
-  );
-}
-
-function Metric({ label, value, detail }) {
-  return (
-    <div className="rounded border border-border bg-surface/70 p-4">
-      <div className="text-2xl font-semibold text-text">{value}</div>
-      <div className="mt-1 text-xs font-medium text-textMuted">{label}</div>
-      {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
-    </div>
-  );
-}
-
-function JobLogs({ logs }) {
-  const rows = Array.isArray(logs) ? logs : [];
-  if (!rows.length) return <EmptyNotice title="No run notes yet">Run notes appear after compute begins.</EmptyNotice>;
-  return (
-    <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-black/20 custom-scrollbar">
-      {rows.map((entry, index) => (
-        <div key={`${entry?.ts || index}-${index}`} className="border-b border-border/40 p-3 text-xs last:border-b-0">
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <StatusBadge tone={entry?.level === 'error' ? 'rose' : entry?.level === 'warn' ? 'amber' : 'slate'}>
-              {entry?.level || 'info'}
-            </StatusBadge>
-            <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
-          </div>
-          <p className="text-textMuted">{researcherRunNote(entry)}</p>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function PathwayTable({ pathways }) {
@@ -243,19 +155,15 @@ export default function PathwayEnrichment({
   checkpointSaveBusy = false,
 }) {
   const [params, setParam] = useTabParams('enrichment', userEmail, objectId, DEFAULT_PARAMS);
-  const [job, setJob] = useState(null);
-  const [logs, setLogs] = useState([]);
-  const [artifacts, setArtifacts] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [canceling, setCanceling] = useState(false);
-  const [error, setError] = useState(null);
-  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
   const [targetGroups, setTargetGroups] = useState([]);
   const [targetGroupsLoading, setTargetGroupsLoading] = useState(false);
 
   const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
+  const {
+    job, logs, artifacts, loading, refreshing, canceling, error, setError, lastRefreshedAt,
+    terminal, refreshJobState, submitJob, cancelJob: cancelActiveJob,
+  } = useProjectAnalysisJob({ jobType: ENRICHMENT_JOB_TYPE, activeProjectId, selectedObjectId });
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
   const selectedAnalysis = (currentWs?.objects || []).find(object => object.id === selectedObjectId)
     || datasetInfo
@@ -295,7 +203,6 @@ export default function PathwayEnrichment({
       && geneSetSizesAreValid
       && !loading
   );
-  const terminal = job?.status ? TERMINAL_STATUSES.has(job.status) : false;
   const summaryArtifact = artifacts.find(artifact => artifact.artifactType === 'enrichment_summary') || null;
   const resultsArtifact = artifacts.find(artifact => artifact.artifactType === 'enrichment_results') || null;
   const summary = summaryArtifact?.metadata?.summary || null;
@@ -311,78 +218,6 @@ export default function PathwayEnrichment({
       ? summaryArtifact.metadata.resolvedParams
       : {}),
   };
-  const selectionKey = `${activeProjectId || ''}:${selectedObjectId || ''}`;
-  const selectionKeyRef = useRef(selectionKey);
-  selectionKeyRef.current = selectionKey;
-
-  const refreshJobState = useCallback(async (
-    jobId,
-    { silent = false, expectedSelectionKey = selectionKeyRef.current } = {}
-  ) => {
-    if (!jobId || !activeProjectId) return null;
-    const api = window.electronAPI || {};
-    if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
-      setError('This analysis service is temporarily unavailable.');
-      return null;
-    }
-    if (!silent) setRefreshing(true);
-    try {
-      const [nextJob, logResponse, nextArtifacts] = await Promise.all([
-        api.getProjectJob(activeProjectId, jobId),
-        api.getProjectJobLogs(activeProjectId, jobId),
-        api.listProjectJobArtifacts(activeProjectId, jobId),
-      ]);
-      if (selectionKeyRef.current !== expectedSelectionKey) return null;
-      setJob(nextJob || null);
-      setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
-      setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
-      setLastRefreshedAt(new Date().toISOString());
-      return nextJob || null;
-    } catch (requestError) {
-      if (selectionKeyRef.current === expectedSelectionKey) {
-        setError(parseErrorMessage(requestError));
-      }
-      return null;
-    } finally {
-      if (!silent && selectionKeyRef.current === expectedSelectionKey) setRefreshing(false);
-    }
-  }, [activeProjectId]);
-
-  useEffect(() => {
-    let canceled = false;
-    setJob(null);
-    setLogs([]);
-    setArtifacts([]);
-    setError(null);
-    setLastRefreshedAt(null);
-    setRefreshing(false);
-    setLoading(false);
-
-    const api = window.electronAPI || {};
-    if (!activeProjectId || !selectedObjectId || !api.listProjectJobs) {
-      return () => { canceled = true; };
-    }
-
-    const restoreLatestJob = async () => {
-      try {
-        const jobs = await api.listProjectJobs(activeProjectId, {
-          jobType: ENRICHMENT_JOB_TYPE,
-          analysisObjectId: selectedObjectId,
-        });
-        const latest = Array.isArray(jobs) ? jobs[0] : null;
-        if (!canceled && latest?.id) {
-          await refreshJobState(latest.id, {
-            silent: true,
-            expectedSelectionKey: selectionKey,
-          });
-        }
-      } catch (requestError) {
-        if (!canceled) setError(parseErrorMessage(requestError));
-      }
-    };
-    restoreLatestJob();
-    return () => { canceled = true; };
-  }, [activeProjectId, refreshJobState, selectedObjectId, selectionKey]);
 
   useEffect(() => {
     let canceled = false;
@@ -408,12 +243,6 @@ export default function PathwayEnrichment({
       .finally(() => { if (!canceled) setTargetGroupsLoading(false); });
     return () => { canceled = true; };
   }, [callApi, datasetInfo, liveObjectAttached, params.groupBy, rSessionId, sessionReady]);
-
-  useEffect(() => {
-    if (!job?.id || terminal) return undefined;
-    const intervalId = window.setInterval(() => refreshJobState(job.id, { silent: true }), POLL_MS);
-    return () => window.clearInterval(intervalId);
-  }, [job?.id, terminal, refreshJobState]);
 
   const launchJob = useCallback(async () => {
     setError(null);
@@ -451,11 +280,7 @@ export default function PathwayEnrichment({
       return setError('Pathway enrichment is temporarily unavailable.');
     }
 
-    const requestSelectionKey = selectionKeyRef.current;
-    setLoading(true);
-    setLogs([]);
-    setArtifacts([]);
-    try {
+    await submitJob(async () => {
       const created = api.createEnrichmentGseaJob
         ? await api.createEnrichmentGseaJob(activeProjectId, selectedObjectId, safeParams)
         : await api.createProjectJob(activeProjectId, {
@@ -463,18 +288,8 @@ export default function PathwayEnrichment({
           analysisObjectId: selectedObjectId,
           parameters: safeParams,
         });
-      if (selectionKeyRef.current !== requestSelectionKey) return undefined;
-      setJob(created);
-      setLastRefreshedAt(new Date().toISOString());
-      await refreshJobState(created.id, {
-        silent: true,
-        expectedSelectionKey: requestSelectionKey,
-      });
-    } catch (requestError) {
-      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(requestError));
-    } finally {
-      if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
-    }
+      return created;
+    });
     return undefined;
   }, [
     activeProjectId,
@@ -484,9 +299,10 @@ export default function PathwayEnrichment({
     isDbBackedObject,
     liveObjectAttached,
     ownsPrivateLiveObject,
-    refreshJobState,
     safeParams,
     selectedObjectId,
+    setError,
+    submitJob,
     sessionReady,
     targetGroupIsValid,
     targetGroupIsAvailable,
@@ -495,26 +311,8 @@ export default function PathwayEnrichment({
   ]);
 
   const cancelJob = useCallback(async () => {
-    if (!activeProjectId || !job?.id || !canCancelJob) return;
-    const api = window.electronAPI || {};
-    if (!api.cancelProjectJob) {
-      setError('Canceling this analysis is temporarily unavailable.');
-      return;
-    }
-    const requestSelectionKey = selectionKeyRef.current;
-    const requestProjectId = activeProjectId;
-    const requestJobId = job.id;
-    setCanceling(true);
-    setError(null);
-    try {
-      await api.cancelProjectJob(requestProjectId, requestJobId);
-      await refreshJobState(requestJobId, { silent: true, expectedSelectionKey: requestSelectionKey });
-    } catch (requestError) {
-      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(requestError));
-    } finally {
-      if (selectionKeyRef.current === requestSelectionKey) setCanceling(false);
-    }
-  }, [activeProjectId, canCancelJob, job?.id, refreshJobState]);
+    if (canCancelJob) await cancelActiveJob();
+  }, [canCancelJob, cancelActiveJob]);
 
   if (!datasetInfo) {
     return (
@@ -703,7 +501,7 @@ export default function PathwayEnrichment({
               <p className="mt-1 text-sm text-textMuted">Compute is allocated when available. When demand is high, a new analysis waits for compute.</p>
             </div>
             <div className="flex items-center gap-2">
-              {job?.status && <StatusBadge tone={badgeTone(job.status)}>{displayRunStatus(job.status)}</StatusBadge>}
+              {job?.status && <StatusBadge tone={runStatusTone(job.status)}>{displayRunStatus(job.status)}</StatusBadge>}
               {job?.id && !terminal && canCancelJob && (
                 <button
                   onClick={cancelJob}

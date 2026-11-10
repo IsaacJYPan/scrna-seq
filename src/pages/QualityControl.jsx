@@ -1,5 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
+import {
+  ShieldCheck,
+  Activity,
+  SlidersHorizontal,
+  AlertTriangle,
+  Scissors,
+  Check,
+  FileText,
+  ChevronRight,
+} from 'lucide-react';
 import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';

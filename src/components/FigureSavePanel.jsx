@@ -4,6 +4,7 @@ import {
   Type, Palette, Settings2, Layers, Loader2, CheckCircle2, AlertCircle, Info
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import { safeFigureFileName } from '../figureFileName';
 
 // Plot types whose R renderer requires explicit features/genes. Mirrors the
 // guards in r-backend/plumber.R build_pub_plot() (FeaturePlot/DotPlot/Heatmap/
@@ -23,14 +24,6 @@ const PALETTES = [
 ];
 
 const LEGEND_POS = ['right', 'bottom', 'none', 'top', 'left'];
-
-function safeFigureFileName(value) {
-  if (typeof value !== 'string') return '';
-  const candidate = value.trim().replace(/[?#].*$/, '');
-  if (!candidate || /[\0\r\n]/.test(candidate)) return '';
-  const fileName = candidate.split(/[\\/]+/).pop();
-  return fileName && fileName !== '.' && fileName !== '..' ? fileName.slice(0, 180) : '';
-}
 
 function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen);

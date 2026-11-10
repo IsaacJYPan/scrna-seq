@@ -7,13 +7,7 @@ import RunMonitor from '../components/RunMonitor';
 import SubmissionRecovery from '../components/SubmissionRecovery';
 import PageHeader from '../components/PageHeader';
 import RefreshButton from '../components/RefreshButton';
-
-function formatDate(value) {
-  if (!value) return 'Unknown';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString();
-}
+import { formatDate } from '../components/analysisRunDisplay';
 
 const SAFE_RESEARCHER_ERROR_MESSAGES = new Set([
   'Project not found.',

@@ -20,7 +20,6 @@ const GENE_CATEGORIES = {
   'Mitochondrial': ['MT-CO1','MT-CO2','MT-ND1','MT-ND4','MT-ATP6','MT-CYB','MT-RNR1','MT-RNR2'],
 };
 
-const CLUSTERS = ['T-Cell', 'B-Cell', 'Monocyte', 'NK Cell', 'Dendritic', 'Platelet'];
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#22c55e', '#eab308'];
 
 function formatViolinData(data) {

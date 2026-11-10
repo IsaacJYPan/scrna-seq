@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import PageHeader from '../components/PageHeader';
+import { safeFigureFileName } from '../figureFileName';
 import {
   ImageIcon, Trash2, Filter, Check, X,
   BookImage, Loader2, LayoutGrid, Rows3, RefreshCw
@@ -21,14 +22,6 @@ function PlotTypeBadge({ plotType }) {
       {plotType}
     </span>
   );
-}
-
-function safeFigureFileName(value) {
-  if (typeof value !== 'string') return '';
-  const candidate = value.trim().replace(/[?#].*$/, '');
-  if (!candidate || /[\0\r\n]/.test(candidate)) return '';
-  const fileName = candidate.split(/[\\/]+/).pop();
-  return fileName && fileName !== '.' && fileName !== '..' ? fileName.slice(0, 180) : '';
 }
 
 function FigureCard({ figure, onDelete, compact }) {

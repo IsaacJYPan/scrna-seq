@@ -1,12 +1,13 @@
 'use strict';
 
+const { codedError } = require('./codedError');
+
 const {
   SEURAT_PIPELINE_PARAM_NAMES,
   validateSeuratPipelineParams,
   assertSupportedSeuratPipelineDataset,
   allocateSeuratCheckpointStorageKey,
 } = require('./seuratPipeline');
-const { codedError } = require('./errors');
 
 const MULTI_SAMPLE_JOB_TYPE = 'seurat.multisample.v1';
 const MIN_MULTI_SAMPLE_INPUTS = 2;

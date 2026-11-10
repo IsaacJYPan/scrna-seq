@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const db = require('./pgDatabase');
 const analysisBranches = require('./analysisBranches');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const MANIFEST_VERSION = 1;

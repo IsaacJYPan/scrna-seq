@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
 
 const HEALTH_PROBE_PREFIX = '.traceomics-web-health-';
 const HEALTH_PROBE_CONTENT = 'traceomics-web-storage-v1\n';

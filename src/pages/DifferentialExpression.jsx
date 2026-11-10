@@ -1,13 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Ban, CheckCircle2, FileText, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
+import React, { useCallback, useMemo } from 'react';
+import {
+  AlertTriangle,
+  Ban,
+  CheckCircle2,
+  FileText,
+  Loader2,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
+import useProjectAnalysisJob from '../hooks/useProjectAnalysisJob';
+import { EmptyNotice, JobLogs, StatusBadge, displayRunStatus, formatDate } from '../components/analysisRunDisplay';
 
 const DEG_JOB_TYPE = 'deg.find_markers.v1';
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
 const JOB_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
-const POLL_MS = 3000;
 
 const DEFAULT_PARAMS = {
   groupBy: 'seurat_clusters',
@@ -51,13 +60,6 @@ function buildDegParams(params) {
   };
 }
 
-function formatDate(value) {
-  if (!value) return 'Unknown';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString();
-}
-
 function formatNumber(value) {
   if (value === null || value === undefined || value === '') return 'NA';
   if (typeof value === 'number') {
@@ -67,59 +69,11 @@ function formatNumber(value) {
   return String(value);
 }
 
-function parseErrorMessage(error) {
-  const raw = error?.message || String(error || 'Request failed.');
-  try {
-    const parsed = JSON.parse(raw);
-    return publicErrorMessage(parsed?.error || raw);
-  } catch {
-    return publicErrorMessage(raw);
-  }
-}
-
 function statusTone(status) {
   if (status === 'completed') return 'green';
   if (status === 'failed' || status === 'canceled') return 'rose';
   if (status === 'running') return 'blue';
   return 'amber';
-}
-
-function displayRunStatus(status) {
-  return {
-    queued: 'Waiting for compute',
-    running: 'Running',
-    completed: 'Complete',
-    failed: 'Needs attention',
-    canceled: 'Canceled',
-  }[status] || 'Unknown';
-}
-
-function researcherRunNote(entry) {
-  if (entry?.level === 'error') return 'This analysis needs attention.';
-  const message = String(entry?.message || '');
-  if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
-  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
-  if (entry?.level === 'warn') return 'Analysis warning recorded.';
-  return 'Analysis update recorded.';
-}
-
-function badgeClass(tone = 'slate') {
-  const tones = {
-    blue: 'bg-primary/10 text-text border-primary/20',
-    green: 'bg-success/10 text-success border-success/30',
-    amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
-    rose: 'bg-danger/10 text-danger border-danger/30',
-    slate: 'bg-background text-textMuted border-border',
-  };
-  return tones[tone] || tones.slate;
-}
-
-function StatusBadge({ children, tone = 'slate' }) {
-  return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${badgeClass(tone)}`}>
-      {children}
-    </span>
-  );
 }
 
 function SummaryMetric({ label, value, detail }) {
@@ -128,42 +82,6 @@ function SummaryMetric({ label, value, detail }) {
       <div className="text-2xl font-semibold text-text">{value}</div>
       <div className="mt-1 text-xs font-medium text-textMuted">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
-    </div>
-  );
-}
-
-function EmptyNotice({ title, children }) {
-  return (
-    <div className="rounded-lg border border-dashed border-border p-6 text-center">
-      <p className="font-bold text-text">{title}</p>
-      <p className="mt-2 text-sm text-textMuted">{children}</p>
-    </div>
-  );
-}
-
-function JobLogs({ logs }) {
-  const rows = Array.isArray(logs) ? logs : [];
-  if (!rows.length) {
-    return (
-      <EmptyNotice title="No run notes yet">
-        Run notes will appear after compute begins.
-      </EmptyNotice>
-    );
-  }
-
-  return (
-    <div className="max-h-64 overflow-y-auto rounded-lg border border-border bg-black/20 custom-scrollbar">
-      {rows.map((entry, index) => (
-        <div key={`${entry?.ts || index}-${index}`} className="border-b border-border/40 p-3 text-xs last:border-b-0">
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <StatusBadge tone={entry?.level === 'error' ? 'rose' : entry?.level === 'warn' ? 'amber' : 'slate'}>
-              {entry?.level || 'info'}
-            </StatusBadge>
-            <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
-          </div>
-          <p className="text-textMuted">{researcherRunNote(entry)}</p>
-        </div>
-      ))}
     </div>
   );
 }
@@ -225,17 +143,13 @@ export default function DifferentialExpression({
   checkpointSaveBusy = false,
 }) {
   const [params, setParam] = useTabParams('deg', userEmail, objectId, DEFAULT_PARAMS);
-  const [job, setJob] = useState(null);
-  const [logs, setLogs] = useState([]);
-  const [artifacts, setArtifacts] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [canceling, setCanceling] = useState(false);
-  const [error, setError] = useState(null);
-  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
 
   const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
+  const {
+    job, logs, artifacts, loading, refreshing, canceling, error, setError, lastRefreshedAt,
+    terminal, refreshJobState, submitJob, cancelJob: cancelActiveJob,
+  } = useProjectAnalysisJob({ jobType: DEG_JOB_TYPE, activeProjectId, selectedObjectId });
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
   const selectedAnalysis = (currentWs?.objects || []).find(object => object.id === selectedObjectId)
     || datasetInfo
@@ -260,98 +174,11 @@ export default function DifferentialExpression({
   );
 
   const safeParams = useMemo(() => buildDegParams(params), [params]);
-  const terminal = job?.status ? TERMINAL_STATUSES.has(job.status) : false;
   const summaryArtifact = artifacts.find(artifact => artifact.artifactType === 'deg_summary') || null;
   const markersArtifact = artifacts.find(artifact => artifact.artifactType === 'deg_markers') || null;
   const summary = summaryArtifact?.metadata?.summary || null;
   const resolvedParams = summaryArtifact?.metadata?.resolvedParams || job?.parameters || safeParams;
   const visibleLogs = logs.length ? logs : (Array.isArray(job?.logs) ? job.logs : []);
-  const selectionKey = `${activeProjectId || ''}:${selectedObjectId || ''}`;
-  const selectionKeyRef = useRef(selectionKey);
-  selectionKeyRef.current = selectionKey;
-
-  const refreshJobState = useCallback(async (
-    jobId,
-    { silent = false, expectedSelectionKey = selectionKeyRef.current } = {}
-  ) => {
-    if (!jobId || !activeProjectId) return null;
-    const api = window.electronAPI || {};
-    if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
-      if (selectionKeyRef.current === expectedSelectionKey) {
-        setError('This analysis service is temporarily unavailable.');
-      }
-      return null;
-    }
-
-    if (!silent) setRefreshing(true);
-    try {
-      const [nextJob, logResponse, nextArtifacts] = await Promise.all([
-        api.getProjectJob(activeProjectId, jobId),
-        api.getProjectJobLogs(activeProjectId, jobId),
-        api.listProjectJobArtifacts(activeProjectId, jobId),
-      ]);
-      if (selectionKeyRef.current !== expectedSelectionKey) return null;
-      setJob(nextJob || null);
-      setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
-      setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
-      setLastRefreshedAt(new Date().toISOString());
-      return nextJob || null;
-    } catch (err) {
-      if (selectionKeyRef.current === expectedSelectionKey) setError(parseErrorMessage(err));
-      return null;
-    } finally {
-      if (!silent && selectionKeyRef.current === expectedSelectionKey) setRefreshing(false);
-    }
-  }, [activeProjectId]);
-
-  useEffect(() => {
-    let canceled = false;
-    setJob(null);
-    setLogs([]);
-    setArtifacts([]);
-    setError(null);
-    setLastRefreshedAt(null);
-    setRefreshing(false);
-    setLoading(false);
-
-    const api = window.electronAPI || {};
-    if (!activeProjectId || !selectedObjectId || !api.listProjectJobs) {
-      return () => { canceled = true; };
-    }
-
-    const restoreLatestJob = async () => {
-      try {
-        const jobs = await api.listProjectJobs(activeProjectId, {
-          jobType: DEG_JOB_TYPE,
-          analysisObjectId: selectedObjectId,
-        });
-        const latest = Array.isArray(jobs) ? jobs[0] : null;
-        if (!canceled && latest?.id) {
-          await refreshJobState(latest.id, {
-            silent: true,
-            expectedSelectionKey: selectionKey,
-          });
-        }
-      } catch (err) {
-        if (!canceled) setError(parseErrorMessage(err));
-      }
-    };
-    restoreLatestJob();
-    return () => { canceled = true; };
-  }, [activeProjectId, refreshJobState, selectedObjectId, selectionKey]);
-
-  useEffect(() => {
-    if (!job?.id || terminal) return undefined;
-    let canceled = false;
-    const poll = async () => {
-      if (!canceled) await refreshJobState(job.id, { silent: true, expectedSelectionKey: selectionKey });
-    };
-    const id = window.setInterval(poll, POLL_MS);
-    return () => {
-      canceled = true;
-      window.clearInterval(id);
-    };
-  }, [job?.id, selectionKey, terminal, refreshJobState]);
 
   const launchDegJob = useCallback(async () => {
     setError(null);
@@ -385,11 +212,7 @@ export default function DifferentialExpression({
       return;
     }
 
-    const requestSelectionKey = selectionKeyRef.current;
-    setLoading(true);
-    setLogs([]);
-    setArtifacts([]);
-    try {
+    await submitJob(async () => {
       const created = api.createDegFindMarkersJob
         ? await api.createDegFindMarkersJob(activeProjectId, selectedObjectId, safeParams)
         : await api.createProjectJob(activeProjectId, {
@@ -397,37 +220,14 @@ export default function DifferentialExpression({
           analysisObjectId: selectedObjectId,
           parameters: safeParams,
         });
-      if (selectionKeyRef.current !== requestSelectionKey) return undefined;
-      setJob(created);
-      setLastRefreshedAt(new Date().toISOString());
-      await refreshJobState(created.id, { silent: true, expectedSelectionKey: requestSelectionKey });
-    } catch (err) {
-      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(err));
-    } finally {
-      if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
-    }
+      return created;
+    });
     return undefined;
-  }, [activeProjectId, canWriteProject, isDbBackedObject, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, unsavedLiveChanges, userEmail]);
+  }, [activeProjectId, canWriteProject, isDbBackedObject, ownsPrivateLiveObject, safeParams, selectedObjectId, setError, submitJob, unsavedLiveChanges, userEmail]);
 
   const cancelDegJob = useCallback(async () => {
-    if (!activeProjectId || !job?.id || !canCancelJob) return;
-    const api = window.electronAPI || {};
-    if (!api.cancelProjectJob) {
-      setError('Canceling this analysis is temporarily unavailable.');
-      return;
-    }
-    const requestSelectionKey = selectionKeyRef.current;
-    setCanceling(true);
-    setError(null);
-    try {
-      await api.cancelProjectJob(activeProjectId, job.id);
-      await refreshJobState(job.id, { silent: true, expectedSelectionKey: requestSelectionKey });
-    } catch (err) {
-      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(err));
-    } finally {
-      if (selectionKeyRef.current === requestSelectionKey) setCanceling(false);
-    }
-  }, [activeProjectId, canCancelJob, job?.id, refreshJobState]);
+    if (canCancelJob) await cancelActiveJob();
+  }, [canCancelJob, cancelActiveJob]);
 
   if (!datasetInfo) {
     return (

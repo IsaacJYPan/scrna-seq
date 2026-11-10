@@ -5,7 +5,8 @@
 // the worker; clients never provide paths or storage keys.
 
 const { isProjectStorageKey, projectStorageFileKey } = require('./storage');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
+const { validateParamsAgainstSpec } = require('./paramSpec');
 
 const SEURAT_PIPELINE_PARAM_SPEC = Object.freeze({
   minCells:          { type: 'int', min: 0, max: 10000, default: 3 },
@@ -30,57 +31,8 @@ const SEURAT_PIPELINE_PARAM_SPEC = Object.freeze({
 const SEURAT_PIPELINE_PARAM_NAMES = Object.freeze(Object.keys(SEURAT_PIPELINE_PARAM_SPEC));
 const SEURAT_PIPELINE_SUPPORTED_DATASET_TYPES = Object.freeze(['tenx_h5']);
 
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
-function validateOne(name, spec, raw) {
-  if (spec.type === 'enum') {
-    if (!spec.values.includes(raw)) {
-      throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be one of: ${spec.values.join(', ')}.`);
-    }
-    return raw;
-  }
-  if (spec.type === 'bool') {
-    if (typeof raw !== 'boolean') {
-      throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be a boolean.`);
-    }
-    return raw;
-  }
-  if (spec.type === 'intOrNull' && raw === null) return null;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-    throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be a finite number.`);
-  }
-  if ((spec.type === 'int' || spec.type === 'intOrNull') && !Number.isInteger(raw)) {
-    throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be an integer.`);
-  }
-  if (raw < spec.min || raw > spec.max) {
-    throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be between ${spec.min} and ${spec.max}.`);
-  }
-  return raw;
-}
-
 function validateSeuratPipelineParams(input) {
-  const raw = input === undefined || input === null ? {} : input;
-  if (!isPlainObject(raw)) {
-    throw codedError('INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
-  }
-  for (const key of Object.keys(raw)) {
-    if (!Object.prototype.hasOwnProperty.call(SEURAT_PIPELINE_PARAM_SPEC, key)) {
-      throw codedError('UNKNOWN_PARAMETER', `Unknown parameter '${key}'.`);
-    }
-  }
-  const params = {};
-  const defaultsApplied = [];
-  for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
-    const spec = SEURAT_PIPELINE_PARAM_SPEC[name];
-    if (!Object.prototype.hasOwnProperty.call(raw, name) || raw[name] === undefined) {
-      params[name] = spec.default;
-      defaultsApplied.push(name);
-    } else {
-      params[name] = validateOne(name, spec, raw[name]);
-    }
-  }
+  const { params, defaultsApplied } = validateParamsAgainstSpec(input, SEURAT_PIPELINE_PARAM_SPEC, SEURAT_PIPELINE_PARAM_NAMES);
   if (params.applyQcFilter && params.minFeaturesFilter > params.maxFeaturesFilter) {
     throw codedError('INVALID_PARAMETER', "Parameter 'minFeaturesFilter' must be <= 'maxFeaturesFilter'.");
   }

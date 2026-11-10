@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { projectStorageFileKey } = require('./storage');
 const { validateEnvironmentReference } = require('./rEnvironment');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
 
 const PROFILE = Object.freeze({
   id: 'scrna-r-4.5-bioconductor-3.22-v1',

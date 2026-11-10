@@ -1,7 +1,7 @@
 'use strict';
 
 const db = require('./pgDatabase');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];

@@ -3,7 +3,8 @@
 // storage paths are derived from server-generated identifiers.
 
 const { projectStorageFileKey } = require('./storage');
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
+const { validateParamsAgainstSpec } = require('./paramSpec');
 
 // The validator records defaults so every durable run retains its resolved inputs.
 const DEG_FIND_MARKERS_PARAM_SPEC = Object.freeze({
@@ -20,66 +21,8 @@ const DEG_FIND_MARKERS_PARAM_SPEC = Object.freeze({
 
 const DEG_FIND_MARKERS_PARAM_NAMES = Object.freeze(Object.keys(DEG_FIND_MARKERS_PARAM_SPEC));
 
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
-function validateOne(name, spec, raw) {
-  if (spec.type === 'enum') {
-    if (!spec.values.includes(raw)) {
-      throw codedError('INVALID_PARAMETER',
-        `Parameter '${name}' must be one of: ${spec.values.join(', ')}.`);
-    }
-    return raw;
-  }
-  if (spec.type === 'bool') {
-    if (typeof raw !== 'boolean') {
-      throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be a boolean.`);
-    }
-    return raw;
-  }
-  if (spec.type === 'intOrNull' && raw === null) {
-    return null;
-  }
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-    throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be a finite number.`);
-  }
-  if (spec.type === 'int' || spec.type === 'intOrNull') {
-    if (!Number.isInteger(raw)) {
-      throw codedError('INVALID_PARAMETER', `Parameter '${name}' must be an integer.`);
-    }
-  }
-  if (raw < spec.min || raw > spec.max) {
-    throw codedError('INVALID_PARAMETER',
-      `Parameter '${name}' must be between ${spec.min} and ${spec.max}.`);
-  }
-  return raw;
-}
-
 function validateDegFindMarkersParams(input) {
-  const raw = input === undefined || input === null ? {} : input;
-  if (!isPlainObject(raw)) {
-    throw codedError('INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
-  }
-
-  for (const key of Object.keys(raw)) {
-    if (!Object.prototype.hasOwnProperty.call(DEG_FIND_MARKERS_PARAM_SPEC, key)) {
-      throw codedError('UNKNOWN_PARAMETER', `Unknown parameter '${key}'.`);
-    }
-  }
-
-  const params = {};
-  const defaultsApplied = [];
-  for (const name of DEG_FIND_MARKERS_PARAM_NAMES) {
-    const spec = DEG_FIND_MARKERS_PARAM_SPEC[name];
-    if (!Object.prototype.hasOwnProperty.call(raw, name) || raw[name] === undefined) {
-      params[name] = spec.default;
-      defaultsApplied.push(name);
-    } else {
-      params[name] = validateOne(name, spec, raw[name]);
-    }
-  }
-  return { params, defaultsApplied };
+  return validateParamsAgainstSpec(input, DEG_FIND_MARKERS_PARAM_SPEC, DEG_FIND_MARKERS_PARAM_NAMES);
 }
 
 const _JOB_ID_RE = /^job_[0-9a-f]+$/;

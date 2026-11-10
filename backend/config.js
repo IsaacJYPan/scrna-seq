@@ -67,8 +67,8 @@ function isStrongSecretValue(raw, minimumLength = 32) {
 /**
  * Parse a positive integer env override, falling back to a safe default. A
  * malformed value (non-numeric, NaN/Infinity, non-integer, or <= 0) falls back
- * rather than silently disabling a limit — mirrors positiveIntFromEnv in
- * server.js so config parsing is consistent across the app.
+ * rather than silently disabling a limit. server.js reuses this for its auth
+ * rate limiter so config parsing is consistent across the app.
  */
 function positiveIntFromEnv(rawValue, fallback) {
   if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return fallback;

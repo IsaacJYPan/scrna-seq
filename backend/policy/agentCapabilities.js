@@ -5,6 +5,8 @@
 // a client, a package, or a delegation row. A capability that is not
 // `delegable` cannot be granted to an agent, whatever the sponsor's own role.
 
+const { codedError } = require('../codedError');
+
 const READ_ROLES = Object.freeze(['owner', 'admin', 'analyst', 'viewer']);
 const WRITE_ROLES = Object.freeze(['owner', 'admin', 'analyst']);
 const MANAGE_ROLES = Object.freeze(['owner', 'admin']);
@@ -69,13 +71,6 @@ const FIXED_POLICY = Object.freeze({
 const MIN_DELEGATION_SECONDS = 15 * 60;
 const MAX_DELEGATION_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_DELEGATION_SECONDS = 7 * 24 * 60 * 60;
-
-function codedError(code, message, status) {
-  const error = new Error(message);
-  error.code = code;
-  if (status) error.status = status;
-  return error;
-}
 
 function capabilityInfo(name) {
   return Object.prototype.hasOwnProperty.call(CAPABILITIES, name) ? CAPABILITIES[name] : null;

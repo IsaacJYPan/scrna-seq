@@ -15,7 +15,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { codedError } = require('../errors');
+const { codedError } = require('../codedError');
 
 const ROOT = path.join(__dirname, '..', '..');
 const RUNNER_FILES = [

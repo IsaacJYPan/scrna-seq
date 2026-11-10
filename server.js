@@ -25,6 +25,7 @@ const {
   allocateExpertRInputStorageKey,
 } = require('./backend/expertR');
 const config = require('./backend/config');
+const { createSessionTokens } = require('./backend/sessionTokens');
 const passwordPolicy = require('./backend/passwordPolicy');
 const storage = require('./backend/storage');
 const { validateStoredDataset } = require('./backend/datasetValidation');
@@ -115,90 +116,7 @@ function initAppDatabase() {
   return appDatabaseReady;
 }
 
-function base64UrlJson(value) {
-  return Buffer.from(JSON.stringify(value)).toString('base64url');
-}
-
-function signPayload(payload) {
-  return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-}
-
-const MAX_POSTGRES_BIGINT = 9223372036854775807n;
-
-function isCanonicalPositiveIntegerString(value, maximum) {
-  const text = String(value ?? '');
-  if (!/^[1-9][0-9]{0,18}$/.test(text)) return false;
-  try { return BigInt(text) <= maximum; } catch { return false; }
-}
-
-function isSafeUserIdString(value) {
-  return isCanonicalPositiveIntegerString(value, BigInt(Number.MAX_SAFE_INTEGER));
-}
-
-function isSessionVersionString(value) {
-  return isCanonicalPositiveIntegerString(value, MAX_POSTGRES_BIGINT);
-}
-
-function issueSession(user) {
-  const sessionVersion = String(user && user.sessionVersion || '');
-  const sessionEpoch = config.sessionEpoch();
-  if (!user || !isSafeUserIdString(user.id) || !isSessionVersionString(sessionVersion)
-      || !config.isValidSessionEpoch(sessionEpoch)) {
-    throw new Error('A valid internal user session generation is required.');
-  }
-  const now = Math.floor(Date.now() / 1000);
-  const payload = base64UrlJson({
-    v: 2,
-    sub: String(user.id),
-    sv: sessionVersion,
-    se: sessionEpoch,
-    iat: now,
-    exp: now + config.sessionTtlSeconds()
-  });
-  return `${payload}.${signPayload(payload)}`;
-}
-
-async function verifySessionDetails(token) {
-  if (!token || typeof token !== 'string' || token.length > 4096) return null;
-  const parts = token.split('.');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-  const [payload, signature] = parts;
-
-  const expected = signPayload(payload);
-  const expectedBuffer = Buffer.from(expected);
-  const signatureBuffer = Buffer.from(signature);
-  if (expectedBuffer.length !== signatureBuffer.length ||
-      !crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) {
-    return null;
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-  } catch (err) {
-    console.warn('[Auth] Rejected malformed session token:', err.message);
-    return null;
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  if (!parsed || Object.getPrototypeOf(parsed) !== Object.prototype
-      || parsed.v !== 2
-      || typeof parsed.sub !== 'string' || !isSafeUserIdString(parsed.sub)
-      || typeof parsed.sv !== 'string' || !isSessionVersionString(parsed.sv)
-      || typeof parsed.se !== 'string' || !config.isValidSessionEpoch(parsed.se)
-      || parsed.se !== config.sessionEpoch()
-      || !Number.isSafeInteger(parsed.iat) || !Number.isSafeInteger(parsed.exp)
-      || parsed.iat > now + 60 || parsed.exp <= now || parsed.exp <= parsed.iat) return null;
-
-  const user = await db.getUserForSession(parsed.sub, parsed.sv);
-  if (!user || String(user.id) !== parsed.sub) return null;
-  return { user, sessionVersion: parsed.sv };
-}
-
-async function verifySession(token) {
-  const details = await verifySessionDetails(token);
-  return details ? details.user : null;
-}
+const { issueSession, verifySessionDetails, verifySession } = createSessionTokens({ secret: SESSION_SECRET, db });
 
 // ── HttpOnly cookie session (hosted-service auth foundation) ─────────────────
 // Browser auth is cookie-only. The signed token carries a server-checked per-user
@@ -705,53 +623,23 @@ function validateRProxyPaths(req, res, next) {
 // key itself is then derived server-side by deriveRStateKey() (above), so the
 // client never controls the `user-{id}` prefix and cannot reach another user's
 // R state.
-const OBJECT_ID_PATTERN = /^[A-Za-z0-9_-]{3,128}$/;
-
-function isValidObjectIdFormat(value) {
-  return typeof value === 'string' && OBJECT_ID_PATTERN.test(value);
-}
-
-// Dataset ids are server-generated as `ds_` + lowercase hex. A client that
-// supplies a `datasetId` (on analysis-object/job creation, or in a dataset route
-// path) must match this shape, else the request is malformed (400) — distinct
-// from a well-formed id that simply does not resolve (404).
-const DATASET_ID_PATTERN = /^ds_[0-9a-f]+$/;
-function isValidDatasetIdFormat(value) {
-  return typeof value === 'string' && DATASET_ID_PATTERN.test(value);
-}
-
-// Analysis-object and job ids are server-generated as `ao_`/`job_` + lowercase
-// hex. A client supplying one (in a project route path, or as a reference field)
-// must match the shape, else the request is malformed (400) — distinct from a
-// well-formed id that simply does not resolve (404).
-const ANALYSIS_OBJECT_ID_PATTERN = /^ao_[0-9a-f]+$/;
-function isValidAnalysisObjectIdFormat(value) {
-  return typeof value === 'string' && ANALYSIS_OBJECT_ID_PATTERN.test(value);
-}
-const JOB_ID_PATTERN = /^job_[0-9a-f]+$/;
-function isValidJobIdFormat(value) {
-  return typeof value === 'string' && JOB_ID_PATTERN.test(value);
-}
-
-// Project-scoped provenance/figure ids are server-generated as `prov_`/`fig_` +
-// lowercase hex. A client supplying one (in a project route path, or as a
-// reference field) must match the shape, else the request is malformed (400) —
-// distinct from a well-formed id that simply does not resolve (404).
-const PROVENANCE_ID_PATTERN = /^prov_[0-9a-f]+$/;
-function isValidProvenanceIdFormat(value) {
-  return typeof value === 'string' && PROVENANCE_ID_PATTERN.test(value);
-}
-const FIGURE_ID_PATTERN = /^fig_[0-9a-f]+$/;
-function isValidFigureIdFormat(value) {
-  return typeof value === 'string' && FIGURE_ID_PATTERN.test(value);
-}
-// Job-artifact ids are server-generated as `art_` + lowercase hex. A client
-// supplying one in a project route path must match the shape, else 400 — distinct
-// from a well-formed id that simply does not resolve (404).
-const ARTIFACT_ID_PATTERN = /^art_[0-9a-f]+$/;
-function isValidArtifactIdFormat(value) {
-  return typeof value === 'string' && ARTIFACT_ID_PATTERN.test(value);
-}
+const {
+  isValidObjectIdFormat,
+  isValidDatasetIdFormat,
+  isValidAnalysisObjectIdFormat,
+  isValidJobIdFormat,
+  isValidArtifactIdFormat,
+  isValidBranchIdFormat,
+  isValidReviewIdFormat,
+  isValidConditionIdFormat,
+  isValidSampleIdFormat,
+} = require('./backend/resourceIds');
+const {
+  REJECTED_CREATOR_FIELDS,
+  REJECTED_OWNER_FIELDS,
+  rejectProjectResourceFields,
+  sendProjectResourceError,
+} = require('./backend/projectResourceHttp');
 
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
 // reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
@@ -814,111 +702,14 @@ function rTestDiagnosticsEnabled() {
   return process.env.ENABLE_R_TEST_DIAGNOSTICS === 'true' && process.env.NODE_ENV !== 'production';
 }
 
-// ── Auth rate limiting ──────────────────────────────────────────────────────
-// Defense-in-depth against credential stuffing / signup abuse. A small,
-// dependency-free fixed-window limiter keyed by client IP is sufficient for
-// this single-node app; a multi-node deployment would swap this for a shared
-// store (e.g. Redis). The window/limit are read per-request from the
-// environment so tests can tighten them deterministically without re-importing
-// the module, and each limiter exposes reset() so tests can clear state between
-// cases (preventing rate-limit leakage across tests).
-const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-const DEFAULT_AUTH_RATE_LIMIT_MAX = 10;
-const MAX_AUTH_RATE_LIMIT_KEYS = 10000;
-
-// Parse a positive-integer env override, falling back to a safe default. A
-// malformed value (non-numeric, NaN/Infinity, non-integer, or <= 0) must NEVER
-// silently disable the limiter — that would turn a typo into an open door — so
-// we fall CLOSED to the secure default instead of producing NaN (which would
-// make `count > NaN` always false and skip limiting entirely).
-function positiveIntFromEnv(rawValue, fallback) {
-  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return fallback;
-  const n = Number(rawValue);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;
-  return n;
-}
-
-function authRateLimitWindowMs() {
-  return positiveIntFromEnv(process.env.AUTH_RATE_LIMIT_WINDOW_MS, DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS);
-}
-function authRateLimitMax() {
-  return positiveIntFromEnv(process.env.AUTH_RATE_LIMIT_MAX, DEFAULT_AUTH_RATE_LIMIT_MAX);
-}
-
-// The DISABLE_RATE_LIMIT escape hatch is for local/dev/test convenience only.
-// It must NEVER take effect in production: rate limiting is a security control
-// there, and a stray env var must not be able to silently remove credential-
-// stuffing / signup-abuse protection.
-function rateLimitDisabled() {
-  return process.env.DISABLE_RATE_LIMIT === 'true' && process.env.NODE_ENV !== 'production';
-}
-
-function createRateLimiter() {
-  const hits = new Map(); // ip -> { count, resetAt }
-  let nextSweepAt = 0;
-
-  function sweepExpired(now, windowMs) {
-    for (const [key, entry] of hits) {
-      if (now >= entry.resetAt) hits.delete(key);
-    }
-    // At most one O(n) sweep per minute (or per shorter configured window).
-    // A full map rejects unseen keys immediately between sweeps.
-    nextSweepAt = now + Math.min(windowMs, 60 * 1000);
-  }
-
-  function middleware(req, res, next) {
-    if (rateLimitDisabled()) return next();
-
-    const windowMs = authRateLimitWindowMs();
-    const max = authRateLimitMax();
-    const key = req.ip || req.socket?.remoteAddress || 'unknown';
-    const now = Date.now();
-
-    if (now >= nextSweepAt) sweepExpired(now, windowMs);
-
-    // Fail closed for unseen addresses when a distributed source fills the
-    // bounded key table. Existing callers retain their budgets; expired keys
-    // are removed above. Nginx provides a second, independent ingress limit.
-    if (!hits.has(key) && hits.size >= MAX_AUTH_RATE_LIMIT_KEYS) {
-      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(windowMs / 1000))));
-      return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
-    }
-
-    let entry = hits.get(key);
-    if (!entry || now >= entry.resetAt) {
-      entry = { count: 0, resetAt: now + windowMs };
-      hits.set(key, entry);
-    }
-    entry.count += 1;
-
-    if (entry.count > max) {
-      const retryAfterSec = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
-      res.setHeader('Retry-After', String(retryAfterSec));
-      return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
-    }
-    next();
-  }
-
-  middleware.reset = () => { hits.clear(); nextSweepAt = 0; };
-  middleware.keyCount = () => hits.size;
-  return middleware;
-}
-
-function isValidBranchIdFormat(value) {
-  return typeof value === 'string' && /^br_[0-9a-f]+$/.test(value);
-}
-
-function isValidReviewIdFormat(value) {
-  return typeof value === 'string' && /^rev_[0-9a-f]+$/.test(value);
-}
-
-function isValidConditionIdFormat(value) {
-  return typeof value === 'string' && /^cond_[0-9a-f]+$/.test(value);
-}
-
-function isValidSampleIdFormat(value) {
-  return typeof value === 'string' && /^sample_[0-9a-f]+$/.test(value);
-}
+// ── Auth rate limiting (backend/authRateLimit.js) ───────────────────────────
+const {
+  MAX_AUTH_RATE_LIMIT_KEYS,
+  authRateLimitMax,
+  authRateLimitWindowMs,
+  createRateLimiter,
+  rateLimitDisabled,
+} = require('./backend/authRateLimit');
 
 // Separate limiters per endpoint so login attempts and signup attempts do not
 // share (or exhaust) one another's budget.
@@ -1275,35 +1066,7 @@ const rProxyAdmission = createRProxyAdmission();
 // the vault before reaching R (and the r-path-drift guard stays satisfied).
 const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths', 'storage_key', 'dataset_storage_key'];
 
-// Middleware
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', [
-    "default-src 'self'",
-    "base-uri 'self'",
-    "object-src 'none'",
-    "frame-ancestors 'none'",
-    "form-action 'self'",
-    "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
-    "font-src 'self' data:",
-    "connect-src 'self'",
-    "worker-src 'self' blob:",
-    "media-src 'self' blob:",
-  ].join('; '));
-  if (config.isProduction() && req.secure) {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  }
-  const healthPath = req.path === '/livez' || req.path === '/readyz';
-  if (config.isProduction() && !healthPath && !req.secure) {
-    return res.status(426).json({ error: 'HTTPS required.' });
-  }
-  return next();
-});
+app.use(require('./backend/securityHeaders').securityHeaders);
 
 // Agent credentials are honored only by /api/automation/v1. Every other API
 // route refuses them explicitly, and mixed human+agent credentials are refused
@@ -1647,7 +1410,6 @@ app.use('/api/db', provenanceRoutes({ db, requireAuth }));
 app.use('/api/analysis-objects', express.json());
 app.use('/api/analysis-objects', requireAuth);
 
-const REJECTED_OWNER_FIELDS = ['userId', 'user_id', 'ownerUserId', 'owner_user_id'];
 const REJECTED_ANALYSIS_OBJECT_STORAGE_FIELDS = [
   'storageUri', 'storage_uri',
   'storageKey', 'storage_key',
@@ -2041,7 +1803,6 @@ app.post('/api/pipeline-registry/definitions', async (req, res) => {
 
 // Body fields that name the row creator/owner. Ownership always derives from the
 // session, so any client-supplied value here is rejected outright.
-const REJECTED_CREATOR_FIELDS = ['createdByUserId', 'created_by_user_id'];
 
 // Map the coded errors thrown by the org/project DB helpers to HTTP statuses.
 // 404 for unknown/not-accessible resources (no existence leak), 403 for a known
@@ -2507,97 +2268,6 @@ app.patch('/api/projects/:projectId/datasets/:datasetId', async (req, res) => {
 // metadata does NOT gain access to another user's live R session. The opt-in
 // worker remains allowlisted and does not change this boundary.
 
-// Map the coded errors thrown by the project-scoped analysis-object/job helpers
-// to HTTP statuses: 404 for unknown/not-accessible (no existence leak), 403 for a
-// known member lacking the role, 409 for a non-cancelable (terminal) job, 400 for
-// input validation.
-function sendProjectResourceError(res, e, context) {
-  if (e?.code === 'DEMO_COMPUTE_LIMIT') {
-    res.setHeader('Retry-After', '10');
-    return res.status(429).json({ error: e.message });
-  }
-  switch (e.code) {
-    case 'EXPERT_R_UNAVAILABLE':
-    case 'TARGET_UNAVAILABLE':
-      return res.status(503).json({ error: e.message, ...(e.code === 'TARGET_UNAVAILABLE' ? { code: e.code } : {}) });
-    case 'NOT_FOUND':
-    case 'PARENT_NOT_FOUND':
-    case 'DATASET_NOT_FOUND':
-    case 'ANALYSIS_OBJECT_NOT_FOUND':
-    case 'RESULT_OBJECT_NOT_FOUND':
-    case 'JOB_NOT_FOUND':
-    case 'SUBMISSION_NOT_FOUND':
-    case 'PROVENANCE_NOT_FOUND':
-    case 'FIGURE_NOT_FOUND':
-    case 'PIPELINE_NOT_FOUND':
-    case 'BRANCH_NOT_FOUND':
-    case 'EXPERIMENTAL_DESIGN_NOT_FOUND':
-    case 'CONTRAST_NOT_FOUND':
-    case 'ARTIFACT_NOT_DOWNLOADABLE':
-      return res.status(404).json({ error: e.message });
-    case 'FORBIDDEN':
-      return res.status(403).json({ error: e.message });
-    case 'JOB_NOT_CANCELABLE':
-    case 'JOB_NOT_RETRYABLE':
-    case 'SUBMISSION_REQUEST_CONFLICT':
-    case 'BRANCH_NAME_EXISTS':
-    case 'BRANCH_ARCHIVED':
-    case 'BRANCH_VERSION_CONFLICT':
-    case 'BRANCH_NOT_REVIEWABLE':
-    case 'REVIEW_NOT_OPEN':
-    case 'REVIEW_NOT_APPROVED':
-    case 'EXPERIMENTAL_DESIGN_CONFLICT':
-    case 'METADATA_VALUE_ALREADY_BOUND':
-    case 'SAMPLE_ALREADY_BOUND':
-      return res.status(409).json({ error: e.message, code: e.code });
-    case 'INVALID_OBJECT_TYPE':
-    case 'INVALID_METADATA':
-    case 'INVALID_JOB_TYPE':
-    case 'INVALID_PARAMETERS':
-    case 'INVALID_SUBMISSION_REQUEST':
-    case 'UNKNOWN_PARAMETER':
-    case 'INVALID_PARAMETER':
-    case 'INVALID_PACKAGES':
-    case 'INVALID_PARENT_IDS':
-    case 'INVALID_PLOT_TYPE':
-    case 'INVALID_OWNER':
-    case 'INVALID_PIPELINE_DEFINITION':
-    case 'INVALID_PIPELINE_MANIFEST':
-    case 'INVALID_PIPELINE_SELECTION':
-    case 'INVALID_BRANCH':
-    case 'INVALID_BRANCH_HEAD':
-    case 'INVALID_REVIEW':
-    case 'INVALID_EXPERIMENTAL_DESIGN':
-    case 'UNSUPPORTED_CONDITION_MODEL':
-    case 'INVALID_AUDIT_CURSOR':
-      return res.status(400).json({ error: e.message, ...(e.code === 'UNSUPPORTED_CONDITION_MODEL' ? { code: e.code } : {}) });
-    default:
-      console.error(`[${context}]`, e);
-      return res.status(500).json({ error: 'Internal error.' });
-  }
-}
-
-// Reject any client attempt to set a server-controlled field on a project-scoped
-// analysis-object/job create. Returns true (and has sent a 400) when one is
-// present. project_id is taken from the route, never the body.
-function rejectProjectResourceFields(req, res, { extra = [] } = {}) {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-  if (body.id !== undefined) {
-    res.status(400).json({ error: 'Id is server-assigned and must not be provided.' });
-    return true;
-  }
-  const forbidden = [
-    ...REJECTED_OWNER_FIELDS, ...REJECTED_CREATOR_FIELDS,
-    'projectId', 'project_id', ...extra
-  ];
-  for (const field of forbidden) {
-    if (body[field] !== undefined) {
-      res.status(400).json({ error: `Field '${field}' is not allowed; it is server-controlled.` });
-      return true;
-    }
-  }
-  return false;
-}
 
 app.get('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
   try {
@@ -3453,221 +3123,14 @@ app.post('/api/projects/:projectId/jobs/:jobId/cancel', async (req, res) => {
   }
 });
 
-// ── Project-scoped provenance metadata ──────────────────────────────────
-// Append-only provenance records associated with a project, readable by project
-// members by role. project_id comes from the route; the responsible actor from
-// the session. There is no update/delete route (provenance is append-only). R
-// execution/state is untouched — this is metadata only.
-app.post('/api/projects/:projectId/provenance', async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-  // Reject server-controlled id/owner/creator/project fields, plus the actor email
-  // (server-derived from the session, never the body).
-  if (rejectProjectResourceFields(req, res, { extra: ['userEmail', 'user_email'] })) return;
+// ── Project-scoped provenance metadata (backend/projectProvenanceRoutes.js)
+app.use('/api/projects/:projectId/provenance', require('./backend/projectProvenanceRoutes').projectProvenanceRoutes({ db }));
 
-  // Validate reference id shapes → 400 before touching the DB (well-formed-but-
-  // unresolved / cross-project ids become 404 in the DB layer).
-  if (body.datasetId !== undefined && body.datasetId !== null && !isValidDatasetIdFormat(body.datasetId)) {
-    return res.status(400).json({ error: 'Malformed dataset ID.' });
-  }
-  if (body.analysisObjectId !== undefined && body.analysisObjectId !== null && !isValidAnalysisObjectIdFormat(body.analysisObjectId)) {
-    return res.status(400).json({ error: 'Malformed analysis object ID.' });
-  }
-  if (body.jobId !== undefined && body.jobId !== null && !isValidJobIdFormat(body.jobId)) {
-    return res.status(400).json({ error: 'Malformed job ID.' });
-  }
-  if (body.resultAnalysisObjectId !== undefined && body.resultAnalysisObjectId !== null && !isValidAnalysisObjectIdFormat(body.resultAnalysisObjectId)) {
-    return res.status(400).json({ error: 'Malformed result analysis object ID.' });
-  }
-  if (body.parentIds !== undefined && body.parentIds !== null) {
-    if (!Array.isArray(body.parentIds)) {
-      return res.status(400).json({ error: 'parentIds must be an array.' });
-    }
-    for (const parentRef of body.parentIds) {
-      if (!isValidProvenanceIdFormat(parentRef)) {
-        return res.status(400).json({ error: 'Malformed parent provenance ID.' });
-      }
-    }
-  }
+// ── Project-scoped figure metadata (backend/projectFigureRoutes.js) ─────
+app.use('/api/projects/:projectId/figures', require('./backend/projectFigureRoutes').projectFigureRoutes({ db }));
 
-  try {
-    const created = await db.createProjectProvenance(req.user.id, req.params.projectId, {
-      datasetId: body.datasetId,
-      analysisObjectId: body.analysisObjectId,
-      jobId: body.jobId,
-      resultAnalysisObjectId: body.resultAnalysisObjectId,
-      parentIds: body.parentIds,
-      timestamp: body.timestamp,
-      language: body.language,
-      languageVersion: body.languageVersion,
-      packages: body.packages,
-      script: body.script,
-      parameters: body.parameters,
-      operation: body.operation
-    });
-    res.status(201).json(created);
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectProvenance');
-  }
-});
-
-app.get('/api/projects/:projectId/provenance', async (req, res) => {
-  const filters = {
-    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
-    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
-    jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
-    operation: typeof req.query.operation === 'string' ? req.query.operation : undefined
-  };
-  try {
-    res.json(await db.listProjectProvenance(req.user.id, req.params.projectId, filters));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectProvenance');
-  }
-});
-
-app.get('/api/projects/:projectId/provenance/:provenanceId', async (req, res) => {
-  if (!isValidProvenanceIdFormat(req.params.provenanceId)) {
-    return res.status(400).json({ error: 'Malformed provenance ID.' });
-  }
-  try {
-    const prov = await db.getProjectProvenance(req.user.id, req.params.projectId, req.params.provenanceId);
-    if (!prov) return res.status(404).json({ error: 'Provenance record not found.' });
-    res.json(prov);
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectProvenance');
-  }
-});
-
-// ── Project-scoped figure metadata ──────────────────────────────────────
-// Figure metadata associated with a project, readable by members by role.
-// SECURITY: a client may NOT supply file_path / storage key / raw path here, and
-// the API never returns one — figure metadata is decoupled from any file-access
-// surface (there is intentionally no figure download route in this branch).
-// project_id comes from the route; the responsible actor from the session.
-const REJECTED_FIGURE_PATH_FIELDS = [
-  'filePath', 'file_path', 'storageKey', 'storage_key', 'storageUri', 'storage_uri',
-  'internalStorageKey', 'internal_storage_key', 'path'
-];
-
-app.post('/api/projects/:projectId/figures', async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-  // Reject server-controlled id/owner/creator/project fields, the actor email, and
-  // — critically — any client-supplied file path / storage key.
-  if (rejectProjectResourceFields(req, res, { extra: ['userEmail', 'user_email', ...REJECTED_FIGURE_PATH_FIELDS] })) return;
-
-  if (body.analysisObjectId !== undefined && body.analysisObjectId !== null && !isValidAnalysisObjectIdFormat(body.analysisObjectId)) {
-    return res.status(400).json({ error: 'Malformed analysis object ID.' });
-  }
-  if (body.jobId !== undefined && body.jobId !== null && !isValidJobIdFormat(body.jobId)) {
-    return res.status(400).json({ error: 'Malformed job ID.' });
-  }
-  if (body.provenanceId !== undefined && body.provenanceId !== null && !isValidProvenanceIdFormat(body.provenanceId)) {
-    return res.status(400).json({ error: 'Malformed provenance ID.' });
-  }
-  if (body.datasetId !== undefined && body.datasetId !== null && !isValidDatasetIdFormat(body.datasetId)) {
-    return res.status(400).json({ error: 'Malformed dataset ID.' });
-  }
-
-  try {
-    const created = await db.createProjectFigure(req.user.id, req.params.projectId, {
-      analysisObjectId: body.analysisObjectId,
-      jobId: body.jobId,
-      provenanceId: body.provenanceId,
-      datasetId: body.datasetId,
-      plotType: body.plotType,
-      title: body.title,
-      params: body.params,
-      fileFormat: body.fileFormat,
-      thumbnailB64: body.thumbnailB64
-    });
-    res.status(201).json(created);
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectFigures');
-  }
-});
-
-app.get('/api/projects/:projectId/figures', async (req, res) => {
-  const filters = {
-    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
-    jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
-    provenanceId: typeof req.query.provenanceId === 'string' ? req.query.provenanceId : undefined,
-    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
-    plotType: typeof req.query.plotType === 'string' ? req.query.plotType : undefined
-  };
-  try {
-    res.json(await db.listProjectFigures(req.user.id, req.params.projectId, filters));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectFigures');
-  }
-});
-
-app.get('/api/projects/:projectId/figures/:figureId', async (req, res) => {
-  if (!isValidFigureIdFormat(req.params.figureId)) {
-    return res.status(400).json({ error: 'Malformed figure ID.' });
-  }
-  try {
-    const fig = await db.getProjectFigure(req.user.id, req.params.projectId, req.params.figureId);
-    if (!fig) return res.status(404).json({ error: 'Figure not found.' });
-    res.json(fig);
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectFigures');
-  }
-});
-
-// ── Project-scoped job artifacts & checkpoints (read-only metadata) ──────
-// Durable artifact/checkpoint METADATA produced by jobs, readable by project
-// members by role. There is intentionally NO create/mutate route (artifact
-// creation is worker/helper-driven), and these endpoints return metadata only.
-// A separate exact allowlist below provides controlled authenticated exports for
-// selected result tables; checkpoints remain non-downloadable. The serializer
-// omits storage_uri, so no internal/local path or storage key is ever exposed;
-// claim tokens / worker internals are not in the artifact model at all. Legacy
-// NULL-project artifacts never appear (the helpers always pin a real project_id).
-app.get('/api/projects/:projectId/artifacts', async (req, res) => {
-  const filters = {
-    jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
-    artifactType: typeof req.query.artifactType === 'string' ? req.query.artifactType : undefined,
-    status: typeof req.query.status === 'string' ? req.query.status : undefined,
-    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
-    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined,
-    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
-    provenanceId: typeof req.query.provenanceId === 'string' ? req.query.provenanceId : undefined,
-    figureId: typeof req.query.figureId === 'string' ? req.query.figureId : undefined
-  };
-  try {
-    res.json(await db.listProjectArtifacts(req.user.id, req.params.projectId, filters));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectArtifacts');
-  }
-});
-
-app.get('/api/projects/:projectId/artifacts/:artifactId', async (req, res) => {
-  if (!isValidArtifactIdFormat(req.params.artifactId)) {
-    return res.status(400).json({ error: 'Malformed artifact ID.' });
-  }
-  try {
-    const artifact = await db.getProjectArtifact(req.user.id, req.params.projectId, req.params.artifactId);
-    if (!artifact) return res.status(404).json({ error: 'Artifact not found.' });
-    res.json(artifact);
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectArtifacts');
-  }
-});
-
-app.get('/api/projects/:projectId/jobs/:jobId/artifacts', async (req, res) => {
-  if (!isValidJobIdFormat(req.params.jobId)) {
-    return res.status(400).json({ error: 'Malformed job ID.' });
-  }
-  const filters = {
-    artifactType: typeof req.query.artifactType === 'string' ? req.query.artifactType : undefined,
-    status: typeof req.query.status === 'string' ? req.query.status : undefined,
-    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
-  };
-  try {
-    res.json(await db.listProjectJobArtifacts(req.user.id, req.params.projectId, req.params.jobId, filters));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectArtifacts');
-  }
-});
+// ── Project-scoped job artifacts & checkpoints (read-only metadata) (backend/projectArtifactRoutes.js)
+app.use('/api/projects/:projectId', require('./backend/projectArtifactRoutes').projectArtifactRoutes({ db }));
 
 // ── R Plumber Proxy ─────────────────────────────────────────────────────
 // Forward all /api/r/* requests to localhost:8000/*

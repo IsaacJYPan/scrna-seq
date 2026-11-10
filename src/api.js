@@ -184,7 +184,7 @@ export function buildCheckpointSaveJobPayload(analysisObjectId) {
   };
 }
 
-const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
+const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).slice(2, 11);
 localStorage.setItem('client_id', CLIENT_ID);
 // The HttpOnly session cookie set by the backend is the only authentication
 // credential. This key remains exported solely so migration cleanup and tests

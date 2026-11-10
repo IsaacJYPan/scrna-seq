@@ -5,20 +5,10 @@ import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
+import { displayRunStatus } from '../components/analysisRunDisplay';
 
-const JOB_TYPE = 'explore.summarize.v1';
 const TERMINAL = new Set(['completed', 'failed', 'canceled']);
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
-
-function displayRunStatus(status) {
-  return {
-    queued: 'Waiting for compute',
-    running: 'Running',
-    completed: 'Complete',
-    failed: 'Needs attention',
-    canceled: 'Canceled',
-  }[status] || 'Preparing';
-}
 
 function panelPlot(panel) {
   const rows = Array.isArray(panel?.rows) ? panel.rows : [];
@@ -186,11 +176,8 @@ export default function ExploratoryAnalysis({
 
         <div className="flex items-center gap-3 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
           <ShieldCheck size={18} className="text-success" />
-          {/* Legacy infrastructure wording intentionally withheld from the researcher UI:
-          <span>Private checkpoint hydration · isolated runtime · aggregate-only result</span>
-          */}
           <span>Private analysis workspace · aggregate-only result</span>
-          {job?.status && <span className="ml-auto text-xs font-semibold text-textMuted">{displayRunStatus(job.status)}</span>}
+          {job?.status && <span className="ml-auto text-xs font-semibold text-textMuted">{displayRunStatus(job.status, 'Preparing')}</span>}
           {job?.id && <button className="btn btn-secondary p-2" onClick={() => refresh(job.id)} aria-label="Refresh result"><RefreshCw size={14} /></button>}
         </div>
         {error && <div className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}

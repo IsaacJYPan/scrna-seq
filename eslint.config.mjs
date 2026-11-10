@@ -35,7 +35,9 @@ export default [
       ...js.configs.recommended.rules,
       'react-hooks/rules-of-hooks': 'warn',
       'react-hooks/exhaustive-deps': 'warn',
-      'no-unused-vars': ['warn', { varsIgnorePattern: '^[A-Z_]', argsIgnorePattern: '^_' }],
+      // React stays importable for the classic JSX pragma; other unused names are
+      // reported, including capitalized components and icons.
+      'no-unused-vars': ['warn', { varsIgnorePattern: '^(React$|_)', argsIgnorePattern: '^_' }],
       'no-empty': ['warn', { allowEmptyCatch: true }]
     }
   },
@@ -43,7 +45,7 @@ export default [
   // Shared contracts and server modules.
   {
     files: ['shared/**/*.mjs'],
-    languageOptions: { ecmaVersion: 2022, sourceType: 'module', globals: { TextEncoder: 'readonly' } },
+    languageOptions: { ecmaVersion: 2025, sourceType: 'module', globals: { TextEncoder: 'readonly' } },
     rules: js.configs.recommended.rules,
   },
   {

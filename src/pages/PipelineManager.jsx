@@ -1,30 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, Layers, Loader2, RefreshCw,
+  AlertTriangle,
+  Layers,
 } from 'lucide-react';
 import PipelineCatalog from '../components/PipelineCatalog';
 import ExecutablePipelines from '../components/ExecutablePipelines';
 import WorkflowLibrary from '../components/WorkflowLibrary';
-import { SeuratPipelinePanel } from './Workspace';
+import { SeuratPipelinePanel } from '../components/SeuratPipelinePanel';
 import {
   DEFAULT_PIPELINE_ID,
   getDefaultPipelineManifest,
   resolvePipelineManifest,
   validatePipelineManifest,
 } from '../pipelines/pipelineRegistry';
-import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 import RefreshButton from '../components/RefreshButton';
-
-function parseApiError(error) {
-  const raw = error?.message || String(error || 'Request failed.');
-  try {
-    const parsed = JSON.parse(raw);
-    return publicErrorMessage(parsed?.error || raw);
-  } catch {
-    return publicErrorMessage(raw);
-  }
-}
+import { parseErrorMessage } from '../components/analysisRunDisplay';
 
 function selectedObjectForProject(currentWs, activeProjectId, datasetInfo) {
   const selectedIds = currentWs?.selectedObjectIds || [];
@@ -187,7 +178,7 @@ export default function PipelineManager({
       return { definitions: normalized.definitions, selection: nextSelection };
     } catch (requestError) {
       if (!mountedRef.current || sequence !== pipelineOperationSequenceRef.current || projectId !== projectRef.current) return null;
-      setError(parseApiError(requestError));
+      setError(parseErrorMessage(requestError));
       return null;
     } finally {
       if (mountedRef.current && sequence === pipelineOperationSequenceRef.current && projectId === projectRef.current) {
@@ -236,7 +227,7 @@ export default function PipelineManager({
       selectionChangedRef.current?.(nextSelection.definition.manifest);
     } catch (requestError) {
       if (mountedRef.current && sequence === pipelineOperationSequenceRef.current && projectId === projectRef.current) {
-        setError(parseApiError(requestError));
+        setError(parseErrorMessage(requestError));
       }
     } finally {
       if (mountedRef.current && sequence === pipelineOperationSequenceRef.current && projectId === projectRef.current) {

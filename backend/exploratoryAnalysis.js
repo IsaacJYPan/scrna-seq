@@ -1,6 +1,6 @@
 'use strict';
 
-const { codedError } = require('./errors');
+const { codedError } = require('./codedError');
 
 const EXPLORATORY_ANALYSIS_RECIPES = Object.freeze([
   'overview',
