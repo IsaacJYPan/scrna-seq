@@ -82,6 +82,36 @@ check(
 check("the summary records the contrast id", identical(bundle$scientificSummary$contrastId, "contrast_ab"))
 check("numerator/denominator are no longer free parameters", is.null(bundle$scientificSummary$numerator))
 
+# Organism: pathway and communication recipes never assume human.
+mouse_symbols <- sort(AnnotationDbi::keys(org.Mm.eg.db::org.Mm.eg.db, keytype = "SYMBOL"))
+mouse_symbols <- mouse_symbols[grepl("^[A-Z][a-z][a-z0-9]+$", mouse_symbols)]
+mouse_symbols <- mouse_symbols[seq(1L, by = 100L, length.out = n_genes)]
+mouse_mapping <- study_symbol_mapping(mouse_symbols, "mouse")
+check("mouse symbols map with the mouse annotation database", mouse_mapping$mapping_rate >= 0.95)
+check("the mapping reports its species", identical(mouse_mapping$species, "mouse"))
+human_on_mouse <- error_message(study_symbol_mapping(mouse_symbols, "human"))
+check(
+  "a human request on mouse symbols is refused with the mapping rate",
+  grepl("map to human Entrez IDs \\(minimum 60%\\); check that species matches the data", human_on_mouse)
+)
+check("an unknown species is refused", grepl("Choose species", error_message(study_symbol_mapping(mouse_symbols, "rat"))))
+
+mouse_obj <- obj
+mouse_counts <- counts
+rownames(mouse_counts) <- mouse_symbols
+mouse_obj <- CreateSeuratObject(counts = as(mouse_counts, "dgCMatrix"), meta.data = cells)
+mouse_obj <- NormalizeData(mouse_obj, verbose = FALSE)
+pathway_params <- list(recipe = "study_pathways", contrastId = "contrast_ab", targetGroup = "0")
+check(
+  "study_pathways without species is refused",
+  grepl("Choose species", error_message(condition_study_analysis(mouse_obj, pathway_params, design = design)))
+)
+pathway_params$species <- "human"
+check(
+  "study_pathways with human species on mouse data is refused before GO scoring",
+  grepl("check that species matches the data", error_message(condition_study_analysis(mouse_obj, pathway_params, design = design)))
+)
+
 if (failures > 0L) {
   cat(failures, "check(s) failed\n")
   quit(status = 1L)

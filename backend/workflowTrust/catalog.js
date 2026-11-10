@@ -273,7 +273,8 @@ DEFINITIONS.push(
       groupMap: { type: 'groupMap', role: 'design' },
       conditionName: { type: 'safeLabel', role: 'design' },
       contrastId: { type: 'contrastId', role: 'design' },
-      targetGroup: { type: 'populationLabel', role: 'design' }
+      targetGroup: { type: 'populationLabel', role: 'design' },
+      species: { type: 'enum', values: ['human', 'mouse'], role: 'design' }
     },
     resources: { cpus: 1, memoryMiB: 12288, maxWallSeconds: 3600 },
     validation: ['job.completed', 'result.artifact.present'],

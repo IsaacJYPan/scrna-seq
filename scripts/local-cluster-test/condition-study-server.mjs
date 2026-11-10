@@ -38,11 +38,11 @@ if(command.action==='accept'){
  const studies=[];
  for(const conditionName of ['all','control','moderate','severe']){
   for(const recipe of ['study_composition','study_qc','study_expression'])studies.push({recipe,conditionName});
-  if(conditionName!=='all')studies.push({recipe:'study_communication',conditionName});
+  if(conditionName!=='all')studies.push({recipe:'study_communication',conditionName,species:'human'});
  }
  if(contrastId){
   studies.push({recipe:'study_de',contrastId});
-  for(const targetGroup of (process.env.TRACEOMICS_STUDY_TARGET_GROUPS||'').split(',').filter(Boolean))studies.push({recipe:'study_pathways',contrastId,targetGroup});
+  for(const targetGroup of (process.env.TRACEOMICS_STUDY_TARGET_GROUPS||'').split(',').filter(Boolean))studies.push({recipe:'study_pathways',contrastId,targetGroup,species:'human'});
  }else console.log('SKIP study_de/study_pathways: set TRACEOMICS_STUDY_CONTRAST_ID to a registered contrast');
  for(const fixedParameters of studies){
   const variations=['study_expression','study_de','study_pathways'].includes(fixedParameters.recipe)?{featureNames:['','*']}:{};

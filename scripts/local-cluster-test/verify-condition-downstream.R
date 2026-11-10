@@ -7,7 +7,7 @@ obj$sample_id<-paste0('S',rep(1:8,length.out=ncol(obj)));obj$condition<-ifelse(a
 obj$seurat_clusters<-as.character((seq_len(ncol(obj))%/%8)%%2);Idents(obj)<-obj$seurat_clusters
 for(recipe in if('--communication-only'%in%commandArgs(TRUE))'study_communication' else c('study_pathways','study_communication')){
   if(recipe=='study_communication'){obj<-readRDS('/source/exports/evolved-study/blinded/selected-checkpoint.rds')$global;obj$sample_id<-paste0('S',rep(1:8,length.out=ncol(obj)));obj$condition<-ifelse(as.integer(sub('S','',obj$sample_id))<=4,'A','B');obj$donor_code<-obj$sample_id}
-  params<-list(recipe=recipe,groupMap=if(recipe=='study_communication')'' else '0=PopulationA;1=PopulationB',targetGroup='PopulationA',conditionName=if(recipe=='study_communication')'A' else 'all')
+  params<-list(recipe=recipe,groupMap=if(recipe=='study_communication')'' else '0=PopulationA;1=PopulationB',targetGroup='PopulationA',conditionName=if(recipe=='study_communication')'A' else 'all',species='human')
   contrast<-if(recipe=='study_pathways')harness_contrast_args(obj,'B','A') else list()
   if(recipe=='study_pathways')params$contrastId<-'contrast_harness'
   result<-condition_study_analysis(obj,params,design=contrast$design,contrast_labels=contrast$contrast_labels)

@@ -40,7 +40,7 @@ describe('workflow release catalog', () => {
   it('marks what a study asks as design choices a person fixes', () => {
     expect(byKey('condition-pseudobulk').definition.parameterSchema.contrastId.role).toBe('design');
     const workbench = byKey('study-workbench').definition.parameterSchema;
-    for (const name of ['contrastId', 'groupMap', 'conditionName', 'targetGroup']) {
+    for (const name of ['contrastId', 'groupMap', 'conditionName', 'targetGroup', 'species']) {
       expect(workbench[name].role, name).toBe('design');
     }
     expect(workbench.featureNames.role).toBeUndefined();
@@ -52,11 +52,25 @@ describe('workflow release catalog', () => {
     const workbench = byKey('study-workbench');
     expect(() => workbench.validateParameters({ recipe: 'study_de' })).toThrow(/contrastId/);
     expect(() => workbench.validateParameters({ recipe: 'study_de', numerator: 'a', denominator: 'b' })).toThrow();
-    expect(workbench.validateParameters({ recipe: 'study_pathways', contrastId: 'contrast_ab12', targetGroup: 'T' }))
-      .toMatchObject({ recipe: 'study_pathways', contrastId: 'contrast_ab12' });
+    expect(workbench.validateParameters({
+      recipe: 'study_pathways', contrastId: 'contrast_ab12', targetGroup: 'T', species: 'mouse',
+    })).toMatchObject({ recipe: 'study_pathways', contrastId: 'contrast_ab12', species: 'mouse' });
     expect(() => workbench.validateParameters({ recipe: 'study_qc', contrastId: 'contrast_ab12' })).toThrow();
     const outputs = workbench.definition.outputs.map((o) => o.artifactType);
     expect(outputs).toContain('study_inference_summary');
+  });
+
+  it('requires an explicit organism for pathway and communication recipes', () => {
+    const workbench = byKey('study-workbench');
+    expect(() => workbench.validateParameters({ recipe: 'study_pathways', contrastId: 'contrast_ab12', targetGroup: 'T' }))
+      .toThrow(/species/);
+    expect(() => workbench.validateParameters({ recipe: 'study_communication', conditionName: 'control' }))
+      .toThrow(/species/);
+    expect(() => workbench.validateParameters({ recipe: 'study_communication', conditionName: 'control', species: 'rat' }))
+      .toThrow(/species/);
+    expect(workbench.validateParameters({ recipe: 'study_communication', conditionName: 'control', species: 'human' }).species)
+      .toBe('human');
+    expect(() => workbench.validateParameters({ recipe: 'study_qc', species: 'human' })).toThrow(/species/);
   });
 
   it('no longer accepts the unused sampleInputs parameter type', () => {

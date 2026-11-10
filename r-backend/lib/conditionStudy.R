@@ -39,6 +39,39 @@ study_contrast_design <- function(design, contrast_labels) {
   )
 }
 
+# The organism is a design choice the study fixes; never assumed. Symbols are
+# mapped with that organism's annotation database and a run whose mapping rate
+# falls below the floor is refused rather than scored against the wrong genome.
+STUDY_MIN_SYMBOL_MAPPING_RATE <- 0.6
+
+study_species <- function(value) {
+  if (!is_scalar_string(value) || !(value %in% c("human", "mouse"))) {
+    stop("Choose species (human or mouse) for this recipe")
+  }
+  value
+}
+
+study_symbol_mapping <- function(symbols, species) {
+  species <- study_species(species)
+  org_db <- if (identical(species, "human")) org.Hs.eg.db::org.Hs.eg.db else org.Mm.eg.db::org.Mm.eg.db
+  symbols <- unique(as.character(symbols))
+  # select() errors when no key is valid; that is a zero mapping rate.
+  mapped <- tryCatch(
+    suppressMessages(AnnotationDbi::select(org_db, keys = symbols, keytype = "SYMBOL", columns = "ENTREZID")),
+    error = function(e) data.frame(SYMBOL = character(), ENTREZID = character())
+  )
+  mapped <- mapped[!is.na(mapped$ENTREZID), , drop = FALSE]
+  mapped <- mapped[!duplicated(mapped$SYMBOL), , drop = FALSE]
+  rate <- if (length(symbols)) nrow(mapped) / length(symbols) else 0
+  if (rate < STUDY_MIN_SYMBOL_MAPPING_RATE) {
+    stop(sprintf(
+      "Only %.1f%% of %d gene symbols map to %s Entrez IDs (minimum %.0f%%); check that species matches the data",
+      100 * rate, length(symbols), species, 100 * STUDY_MIN_SYMBOL_MAPPING_RATE
+    ))
+  }
+  list(mapped = mapped, org_db = org_db, species = species, input_symbols = length(symbols), mapping_rate = rate)
+}
+
 condition_study_analysis <- function(input_obj, params, design = NULL, contrast_labels = NULL) {
   obj <- study_group_map(input_obj, params$groupMap)
   if (!all(c("sample_id", "condition") %in% colnames(obj[[]]))) stop("Multi-sample metadata required")
@@ -147,12 +180,8 @@ condition_study_analysis <- function(input_obj, params, design = NULL, contrast_
         "Choose targetGroup for condition pathway analysis"
       )
       f <- frame[frame$cell_type == params$targetGroup, ]
-      mapped <- suppressMessages(AnnotationDbi::select(
-        org.Hs.eg.db::org.Hs.eg.db,
-        keys = unique(f$gene), keytype = "SYMBOL", columns = "ENTREZID"
-      ))
-      mapped <- mapped[!is.na(mapped$ENTREZID), ]
-      mapped <- mapped[!duplicated(mapped$SYMBOL), ]
+      mapping <- study_symbol_mapping(f$gene, params$species)
+      mapped <- mapping$mapped
       f <- f[match(mapped$SYMBOL, f$gene), ]
       f$entrez <- mapped$ENTREZID
       f <- f[order(f$p_value, -abs(f$log_fc)), ]
@@ -160,7 +189,7 @@ condition_study_analysis <- function(input_obj, params, design = NULL, contrast_
       ranks <- sort(setNames(sign(f$log_fc) * sqrt(f$f_statistic), f$entrez), decreasing = TRUE)
       set.seed(42)
       gsea <- suppressMessages(clusterProfiler::gseGO(
-        geneList = ranks, OrgDb = org.Hs.eg.db::org.Hs.eg.db, keyType = "ENTREZID", ont = "BP",
+        geneList = ranks, OrgDb = mapping$org_db, keyType = "ENTREZID", ont = "BP",
         minGSSize = 15, maxGSSize = 500, pvalueCutoff = 1, verbose = FALSE, eps = 1e-10
       ))
       g <- as.data.frame(gsea)
@@ -173,6 +202,8 @@ condition_study_analysis <- function(input_obj, params, design = NULL, contrast_
       tables$mapping <- study_frame(data.frame(
         input_genes = nrow(frame[frame$cell_type == params$targetGroup, ]),
         mapped_genes = length(ranks),
+        species = mapping$species,
+        mapping_rate = round(mapping$mapping_rate, 4),
         tested_pathways = nrow(g),
         significant_pathways = sum(g$p.adjust <= .05),
         rank_metric = "signed_sqrt_edgeR_QLF"
@@ -199,7 +230,7 @@ condition_study_analysis <- function(input_obj, params, design = NULL, contrast_
     p0 <- normalize_cellchat_inference_params(list(
       groupBy = "seurat_clusters",
       assay = "RNA",
-      species = "human",
+      species = study_species(params$species),
       databaseCategory = "secreted_signaling",
       analysisIntent = "single_context",
       minCellsPerGroup = 20L,
@@ -244,6 +275,7 @@ condition_study_analysis <- function(input_obj, params, design = NULL, contrast_
     condition = params$conditionName,
     contrastId = params$contrastId,
     nCells = ncol(obj),
+    species = params$species,
     groupMap = params$groupMap,
     pointRendering = if (recipe == "study_de") "all_tested_genes_raster_points_vector_axes" else "recipe_native",
     warnings = as.list(c(
