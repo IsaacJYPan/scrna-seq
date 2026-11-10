@@ -145,7 +145,11 @@ function createStudyService({ db, withTransaction, approvals }) {
     const inputSpec = release.definition.inputs[0];
     const composed = inputSpec.kind === 'analysis_object';
     if (composed && body.datasetIds !== undefined) {
-      throw codedError('INVALID_INPUT', 'This workflow runs on the accepted result of another study; give sourceStudyId, not datasetIds.', 400);
+      throw codedError(
+        'INVALID_INPUT',
+        'This workflow runs on the accepted result of another study; give sourceStudyId, not datasetIds.',
+        400
+      );
     }
     if (!composed && body.sourceStudyId !== undefined) {
       throw codedError('INVALID_INPUT', 'This workflow takes datasets as input; sourceStudyId is not allowed.', 400);
@@ -208,7 +212,11 @@ function createStudyService({ db, withTransaction, approvals }) {
       if (!dataset) throw codedError('DATASET_NOT_FOUND', 'Dataset not found.', 404);
       const fileTypes = release.definition.inputs[0].fileTypes;
       if (!fileTypes.includes(dataset.file_type) || dataset.upload_status !== 'uploaded' || dataset.validation_status === 'invalid') {
-        throw codedError('INPUT_NOT_APPLICABLE', `Dataset ${datasetId} is not a ready ${fileTypes.join('/')} input for this workflow.`, 400);
+        throw codedError(
+          'INPUT_NOT_APPLICABLE',
+          `Dataset ${datasetId} is not a ready ${fileTypes.join('/')} input for this workflow.`,
+          400
+        );
       }
       if (!/^[0-9a-f]{64}$/.test(String(dataset.sha256 || ''))) {
         throw codedError('INPUT_NOT_PINNED', `Dataset ${datasetId} has no recorded checksum, so its exact version cannot be pinned.`, 400);
@@ -266,7 +274,9 @@ function createStudyService({ db, withTransaction, approvals }) {
     const source = rows[0];
     if (!source) throw codedError('NOT_FOUND', 'Source study not found.', 404);
     const { rows: rel } = await db.query('SELECT release_key FROM workflow_releases WHERE id = $1', [source.release_id]);
-    const allowedSources = inputSpec.fromReleases || (Array.isArray(inputSpec.fromRelease) ? inputSpec.fromRelease : [inputSpec.fromRelease]);
+    const allowedSources =
+      inputSpec.fromReleases ||
+      (Array.isArray(inputSpec.fromRelease) ? inputSpec.fromRelease : [inputSpec.fromRelease]);
     if (!allowedSources.includes(rel[0]?.release_key)) {
       const wanted = allowedSources.map((key) => releases.find((r) => r.key === key)?.definition.title || key);
       throw codedError('INPUT_NOT_APPLICABLE', `The source study must run one of: ${wanted.join('; ')}.`.slice(0, 600), 400);
@@ -284,7 +294,11 @@ function createStudyService({ db, withTransaction, approvals }) {
       throw codedError('INPUT_NOT_APPLICABLE', 'You can only build on accepted results of studies you created.', 403);
     }
     const plan = JSON.parse(source.canonical_json);
-    if(inputSpec.requiresStage && ['qc','normalize','pca','cluster','umap'].indexOf(plan.parameters.stopAfter||'umap')<3) throw codedError('INPUT_NOT_APPLICABLE','This workflow requires a completed clustering checkpoint.',400);
+    if (
+      inputSpec.requiresStage &&
+      ['qc', 'normalize', 'pca', 'cluster', 'umap'].indexOf(plan.parameters.stopAfter || 'umap') < 3
+    )
+      throw codedError('INPUT_NOT_APPLICABLE', 'This workflow requires a completed clustering checkpoint.', 400);
     return {
       studyId: source.id,
       input: {

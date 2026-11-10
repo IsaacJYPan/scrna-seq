@@ -202,8 +202,26 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
   router.post('/projects/:projectId/runs/:runId/cancel', route('run.cancelOwn', async (req, actor) => ({
     schema: 'traceomics.automation.run.v1', run: await admission.cancelForAgent(actor, req.params.runId),
   })));
-  router.get('/projects/:projectId/runs/:runId/inspection',route('results.inspect',async(req,actor)=>({schema:'traceomics.automation.inspection.v1',...(await inspection.inspect(actor,req.params.runId))})));
-  router.get('/projects/:projectId/runs/:runId/artifacts/:artifactId',route('results.inspect',async(req,actor)=>({schema:'traceomics.automation.artifact-preview.v1',...(await inspection.artifact(actor,req.params.runId,req.params.artifactId,{offset:req.query.offset===undefined?0:Number(req.query.offset),limit:req.query.limit===undefined?50:Number(req.query.limit),format:req.query.format||'png',table:req.query.table,group:req.query.group}))})));
+  router.get(
+    '/projects/:projectId/runs/:runId/inspection',
+    route('results.inspect', async (req, actor) => ({
+      schema: 'traceomics.automation.inspection.v1',
+      ...(await inspection.inspect(actor, req.params.runId))
+    }))
+  );
+  router.get(
+    '/projects/:projectId/runs/:runId/artifacts/:artifactId',
+    route('results.inspect', async (req, actor) => ({
+      schema: 'traceomics.automation.artifact-preview.v1',
+      ...(await inspection.artifact(actor, req.params.runId, req.params.artifactId, {
+        offset: req.query.offset === undefined ? 0 : Number(req.query.offset),
+        limit: req.query.limit === undefined ? 50 : Number(req.query.limit),
+        format: req.query.format || 'png',
+        table: req.query.table,
+        group: req.query.group
+      }))
+    }))
+  );
 
   // Isolated development (docs/spec.md phase 4): the agent's own R scripts.
   if (sandboxes) {

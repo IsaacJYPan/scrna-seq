@@ -91,12 +91,23 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   })
 
   qc_distribution <- function(values) {
-    values <- as.numeric(values);values <- values[is.finite(values)]
-    if(!length(values))return(NULL)
-    as.list(setNames(as.numeric(quantile(values,c(0,.25,.5,.75,1),names=FALSE)),c("min","q25","median","q75","max")))
+    values <- as.numeric(values)
+    values <- values[is.finite(values)]
+    if (!length(values)) return(NULL)
+    as.list(setNames(
+      as.numeric(quantile(values, c(0, .25, .5, .75, 1), names = FALSE)),
+      c("min", "q25", "median", "q75", "max")
+    ))
   }
-  qc_before <- lapply(obj@meta.data[,c("nCount_RNA","nFeature_RNA","percent.mt"),drop=FALSE],qc_distribution)
-  sample_qc<-if(multi_sample)lapply(split(obj[[]],obj$sample_id),function(m)list(sample=as.character(m$sample_id[1]),condition=as.character(m$condition[1]),cells=nrow(m),counts=qc_distribution(m$nCount_RNA),genes=qc_distribution(m$nFeature_RNA),mitochondrial=qc_distribution(m$percent.mt))) else list()
+  qc_before <- lapply(obj@meta.data[, c("nCount_RNA", "nFeature_RNA", "percent.mt"), drop = FALSE], qc_distribution)
+  sample_qc <- if (multi_sample) lapply(split(obj[[]], obj$sample_id), function(m) list(
+    sample = as.character(m$sample_id[1]),
+    condition = as.character(m$condition[1]),
+    cells = nrow(m),
+    counts = qc_distribution(m$nCount_RNA),
+    genes = qc_distribution(m$nFeature_RNA),
+    mitochondrial = qc_distribution(m$percent.mt)
+  )) else list()
   if (apply_qc) {
     keep <- obj$nFeature_RNA >= min_features_filter &
       obj$nFeature_RNA <= max_features_filter &
@@ -132,12 +143,17 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   }
 
   # ---- Cluster ----
-  graph_reduction<-"pca"
-  if(stage>=4L&&identical(p$integrationMethod,"rpca")) {
-    if(!multi_sample||norm_method!="LogNormalize")stop("RPCA requires multiple samples and LogNormalize")
-    obj[["RNA"]]<-split(obj[["RNA"]],f=obj$sample_id)
-    obj<-IntegrateLayers(object=obj,method=RPCAIntegration,orig.reduction="pca",new.reduction="integrated.rpca",dims=seq_len(npcs),verbose=FALSE)
-    obj<-JoinLayers(obj);graph_reduction<-"integrated.rpca"
+  graph_reduction <- "pca"
+  if (stage >= 4L && identical(p$integrationMethod, "rpca")) {
+    if (!multi_sample || norm_method != "LogNormalize") stop("RPCA requires multiple samples and LogNormalize")
+    obj[["RNA"]] <- split(obj[["RNA"]], f = obj$sample_id)
+    obj <- IntegrateLayers(
+      object = obj, method = RPCAIntegration,
+      orig.reduction = "pca", new.reduction = "integrated.rpca",
+      dims = seq_len(npcs), verbose = FALSE
+    )
+    obj <- JoinLayers(obj)
+    graph_reduction <- "integrated.rpca"
   }
   if(stage >= 4L) {
   avail_dims <- ncol(Embeddings(obj, "pca"))
@@ -180,14 +196,22 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
   # ---- Summarize ----
   summary_out <- list(
     completed_stage = completed_stage,
-    diagnostics = list(sample_qc=unname(sample_qc),qc_before=qc_before,qc_after=lapply(obj@meta.data[,c("nCount_RNA","nFeature_RNA","percent.mt"),drop=FALSE],qc_distribution),
-      pca_variance=if(stage>=3L)as.list(as.numeric(Stdev(obj,"pca")^2/sum(Stdev(obj,"pca")^2)))else list(),
-      pca_variance_basis="fraction_among_stored_PCs",
-      cluster_sizes=as.list(cluster_counts),
-      checks=list(contains_nonfinite_counts=any(vapply(count_checks,function(x)x[["nonfinite"]],logical(1))),
-                  negative_counts=any(vapply(count_checks,function(x)x[["negative"]],logical(1))),
-                  integer_counts=all(vapply(count_checks,function(x)x[["integer"]],logical(1))),
-                  doublets_assessed=FALSE,ambient_rna_assessed=FALSE,batch_effects_assessed=FALSE)),
+    diagnostics = list(
+      sample_qc = unname(sample_qc),
+      qc_before = qc_before,
+      qc_after = lapply(obj@meta.data[, c("nCount_RNA", "nFeature_RNA", "percent.mt"), drop = FALSE], qc_distribution),
+      pca_variance = if (stage >= 3L) as.list(as.numeric(Stdev(obj, "pca")^2 / sum(Stdev(obj, "pca")^2))) else list(),
+      pca_variance_basis = "fraction_among_stored_PCs",
+      cluster_sizes = as.list(cluster_counts),
+      checks = list(
+        contains_nonfinite_counts = any(vapply(count_checks, function(x) x[["nonfinite"]], logical(1))),
+        negative_counts = any(vapply(count_checks, function(x) x[["negative"]], logical(1))),
+        integer_counts = all(vapply(count_checks, function(x) x[["integer"]], logical(1))),
+        doublets_assessed = FALSE,
+        ambient_rna_assessed = FALSE,
+        batch_effects_assessed = FALSE
+      )
+    ),
     n_cells = ncol(obj),
     n_features = nrow(obj),
     pre_filter_cells = pre_filter_cells,

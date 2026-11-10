@@ -67,6 +67,28 @@ export default [
     }
   },
 
+  // Trust, policy, and admission code decides what agents may do and must stay
+  // reviewable by a person. Long string, template, and regex literals are exempt.
+  {
+    files: [
+      'backend/workflowTrust/**/*.js',
+      'backend/automation/**/*.js',
+      'backend/policy/**/*.js',
+      'backend/studyEnvelopes/**/*.js',
+      'backend/resourceAdmission/**/*.js'
+    ],
+    ignores: ['**/*.test.js'],
+    rules: {
+      'max-len': ['error', {
+        code: 140,
+        ignoreUrls: true,
+        ignoreStrings: true,
+        ignoreTemplateLiterals: true,
+        ignoreRegExpLiterals: true
+      }]
+    }
+  },
+
   // Node scripts also contain Playwright callbacks that use browser globals.
   {
     files: ['scripts/**/*.js'],

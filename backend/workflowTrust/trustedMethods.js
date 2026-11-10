@@ -44,7 +44,9 @@ const TEXT_PATTERNS = Object.freeze({
   genes: new RegExp(`^${SYMBOL}(,${SYMBOL}){0,199}$`),
   labels: new RegExp(`^${SYMBOL}(,${SYMBOL}){0,99}$`),
   labelMap: new RegExp(`^${SYMBOL}=${LABEL}(;${SYMBOL}=${LABEL}){0,199}$`),
-  geneSets: new RegExp(`^[A-Za-z][A-Za-z0-9_]{0,39}:${SYMBOL}(,${SYMBOL}){0,199}(;[A-Za-z][A-Za-z0-9_]{0,39}:${SYMBOL}(,${SYMBOL}){0,199}){0,19}$`),
+  geneSets: new RegExp(
+    `^[A-Za-z][A-Za-z0-9_]{0,39}:${SYMBOL}(,${SYMBOL}){0,199}(;[A-Za-z][A-Za-z0-9_]{0,39}:${SYMBOL}(,${SYMBOL}){0,199}){0,19}$`
+  )
 });
 
 function fail(message) { throw new Error(`Trusted method catalog: ${message}`); }
@@ -55,7 +57,12 @@ function only(value, fields, label) {
   for (const key of Object.keys(value)) if (!fields.includes(key)) fail(`${label}: unknown field ${key}.`);
 }
 function line(value, label, max = 200) {
-  if (typeof value !== 'string' || !value.trim() || value.length > max || [...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) {
+  if (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value.length > max ||
+    [...value].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
+  ) {
     fail(`${label} must be 1-${max} characters on one line.`);
   }
 }
@@ -105,7 +112,8 @@ function checkValue(parameter, value) {
     case 'text':
       if (typeof value !== 'string' || value.length > parameter.maxLength) bad(`must be text of at most ${parameter.maxLength} characters`);
       // An empty default means "not used"; any other value must match its grammar.
-      if (value !== '' && !TEXT_PATTERNS[parameter.pattern].test(value)) bad(`must be a ${parameter.pattern} list in the documented format`);
+      if (value !== '' && !TEXT_PATTERNS[parameter.pattern].test(value))
+        bad(`must be a ${parameter.pattern} list in the documented format`);
       return value;
     default:
       if (typeof value !== 'number' || !Number.isFinite(value)) bad('must be a finite number');
@@ -132,9 +140,11 @@ function validateMethod(method, catalog) {
   }
   only(method.provenance, ['kind', 'title', 'url', 'upstream', 'citation', 'doi', 'reviewedAgainst'], `${method.key} provenance`);
   if (!['vignette', 'paper-repository', 'book'].includes(method.provenance.kind)) fail(`${method.key} provenance kind is unknown.`);
-  for (const field of ['title', 'url', 'upstream', 'citation', 'reviewedAgainst']) line(method.provenance[field], `${method.key} provenance ${field}`, 300);
+  for (const field of ['title', 'url', 'upstream', 'citation', 'reviewedAgainst'])
+    line(method.provenance[field], `${method.key} provenance ${field}`, 300);
   if (!/^https:\/\/[A-Za-z0-9.-]+\//.test(method.provenance.url)) fail(`${method.key} provenance url must be https.`);
-  if (method.provenance.doi !== undefined && !/^10\.\d{4,9}\/\S{1,200}$/.test(method.provenance.doi)) fail(`${method.key} doi is malformed.`);
+  if (method.provenance.doi !== undefined && !/^10\.\d{4,9}\/\S{1,200}$/.test(method.provenance.doi))
+    fail(`${method.key} doi is malformed.`);
   if (!Array.isArray(method.deviations) || method.deviations.length > 20) fail(`${method.key} deviations must be a list.`);
   method.deviations.forEach((d, i) => line(d, `${method.key} deviation ${i}`, 400));
   if (!Array.isArray(method.parameters) || method.parameters.length > 24) fail(`${method.key} has too many parameters.`);
@@ -152,7 +162,8 @@ function validateMethod(method, catalog) {
   if (method.outputs[method.summaryOutput]?.type !== 'metrics') fail(`${method.key} summaryOutput must name a metrics output.`);
   if (method.outputs.analysis && method.outputs.analysis.type !== 'rds') fail(`${method.key} 'analysis' must be rds.`);
   // The summary metrics a method promises; studies may rank trials by them.
-  if (!Array.isArray(method.metrics) || method.metrics.length < 1 || method.metrics.length > 30) fail(`${method.key} must list 1-30 metrics.`);
+  if (!Array.isArray(method.metrics) || method.metrics.length < 1 || method.metrics.length > 30)
+    fail(`${method.key} must list 1-30 metrics.`);
   for (const metric of method.metrics) {
     only(metric, ['key', 'label'], `${method.key} metric`);
     if (!METRIC.test(metric.key || '')) fail(`${method.key} metric keys must be [A-Za-z0-9_].`);
@@ -166,11 +177,16 @@ function validateMethod(method, catalog) {
   }
   if (!Array.isArray(method.accepts) || !method.accepts.length) fail(`${method.key} must accept at least one source.`);
   for (const source of method.accepts) {
-    const ok = BASE_RELEASES.includes(source) || (source.startsWith('trusted:') && catalog.methods.some((m) => `trusted:${m.key}` === source && m.outputs.analysis));
+    const ok =
+      BASE_RELEASES.includes(source) ||
+      (source.startsWith('trusted:') && catalog.methods.some(m => `trusted:${m.key}` === source && m.outputs.analysis));
     if (!ok) fail(`${method.key} accepts unknown source ${source}.`);
   }
   if (method.requires !== undefined) {
-    if (!Array.isArray(method.requires) || !method.requires.every((item) => ['clusters', 'umap', 'spatial', 'multiSample'].includes(item))) {
+    if (
+      !Array.isArray(method.requires) ||
+      !method.requires.every(item => ['clusters', 'umap', 'spatial', 'multiSample'].includes(item))
+    ) {
       fail(`${method.key} requires must list clusters/umap/spatial/multiSample.`);
     }
   }
@@ -182,7 +198,8 @@ function validateMethod(method, catalog) {
     if (!source.includes(`write_output("${name}"`)) fail(`${method.key} never writes declared output ${name}.`);
   }
   // Methods must not reach the network, the shell, or evaluate text.
-  const forbidden = /\b(system2?|shell|eval|parse|source|download\.file|url|curl|install\.packages|BiocManager|remotes|Sys\.setenv|file\.remove|unlink)\s*\(/;
+  const forbidden =
+    /\b(system2?|shell|eval|parse|source|download\.file|url|curl|install\.packages|BiocManager|remotes|Sys\.setenv|file\.remove|unlink)\s*\(/;
   const hit = source.split('\n').find((text) => !text.trim().startsWith('#') && forbidden.test(text));
   if (hit) fail(`${method.key} uses a forbidden call: ${hit.trim().slice(0, 80)}`);
   return { ...method, source, sourceSha256: sha256(Buffer.from(source, 'utf8')) };
