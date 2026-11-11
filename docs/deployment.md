@@ -234,7 +234,11 @@ original 20 MiB output and 200/250 MiB input limits until updated.
 
 This release requires database schema contract `20261036`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
-starting the upgraded services. It adds delegated-agent principals, project
+starting the upgraded services. `init:postgres` applies the baseline schema and
+then every pending migration in `backend/pg/migrations`, recording each in the
+`schema_migrations` table; with `DATABASE_SCHEMA_MANAGED_EXTERNALLY=true` the
+services refuse to start while any migration is pending. See the
+[migrations guide](../backend/pg/migrations/README.md). It adds delegated-agent principals, project
 delegations, hashed agent credentials, inert proposals, an append-only
 automation audit, approved workflow releases, studies, plans, agent runs and
 result acceptances; see [agent automation](agent-automation.md) for the deployment

@@ -55,6 +55,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The schema upgrade check reads the schema of an earlier release.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -72,6 +75,9 @@ jobs:
         # contract, desktop connection profiles, and the production build before
         # costly certification starts.
         run: npm run check:ci-preflight
+
+      - name: Verify a schema upgrade matches a fresh install
+        run: npm run test:schema-upgrade
 
   browser-preflight:
     name: Browser release preflight
