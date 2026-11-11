@@ -1100,6 +1100,12 @@ app.get('/readyz', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.status(result.httpStatus).json(result.body);
 });
+// Operational metrics for the private network: absent unless METRICS_TOKEN is
+// set, and only for callers presenting it (backend/observability/metrics.js).
+app.get('/metrics', require('./backend/observability/metrics').createMetricsHandler({
+  db,
+  storageRoot: () => storage.storageRoot(),
+}));
 
 // Public, non-secret UI policy. Keep this ahead of database initialization so
 // the login page can accurately hide registration during a database outage.
