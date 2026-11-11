@@ -287,7 +287,7 @@ async function seuratPipelineHandler(ctx) {
         log: (entry) => ctx.log(entry),
         isCanceled: () => (typeof ctx.isCanceled === 'function' ? ctx.isCanceled() : false),
       });
-      descriptor = seuratPipelineDescriptor(operation, body);
+      descriptor = seuratPipelineDescriptor(operation, body, params);
     } catch (err) {
       await ctx.log({ level: 'error', message: `${handlerName} handler: Slurm execution failed (${err.code || 'ERROR'}).` });
       await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, err);

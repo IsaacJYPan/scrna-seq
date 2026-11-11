@@ -33,7 +33,7 @@ else
   [ "$mode" = badsum ] && sum=0000000000000000000000000000000000000000000000000000000000000000
   size=$(stat -c %s "$run_dir/output/checkpoint.rds")
   cat > "$run_dir/output/result.json" <<JSON
-{"ok":true,"summary":{"n_cells":120,"n_features":2000,"n_clusters":3,"cluster_sizes":[40,40,40],"reductions":["pca","umap"],"normalization_method":"LogNormalize","resolution":0.8,"used_seed":7},"warnings":[],"checkpoint":{"saved":true,"checksum_sha256":"$sum","size_bytes":$size},"versions":{"seurat_version":"5.1.0","r_version":"4.4.1"}}
+{"ok":true,"summary":{"n_cells":120,"n_features":2000,"n_clusters":3,"cluster_sizes":[40,40,40],"reductions":["pca","umap"],"normalization_method":"LogNormalize","resolution":0.8,"used_seed":7},"warnings":[],"effective_parameters":$(cat "$run_dir/params.json"),"checkpoint":{"saved":true,"checksum_sha256":"$sum","size_bytes":$size},"versions":{"seurat_version":"5.1.0","r_version":"4.4.1"}}
 JSON
   echo COMPLETED > "$FAKE_SLURM_STATE/$n"
 fi

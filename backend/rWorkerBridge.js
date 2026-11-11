@@ -10,6 +10,7 @@ const { ENRICHMENT_GSEA_PARAM_NAMES } = require('./enrichmentGsea');
 const { CELLCHAT_INFERENCE_PARAM_NAMES, MAX_CELLCHAT_RESULT_ROWS } = require('./cellChatInference');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
 const { CONTRAST_RECIPES, EXPLORATORY_ANALYSIS_PARAM_NAMES } = require('./exploratoryAnalysis');
+const { verifiedEffectiveParameters } = require('./rBridge/effectiveParameters');
 const {
   codedError,
   sanitizeRBridgeError,
@@ -236,8 +237,9 @@ function createDefaultRCaller(config = {}) {
 // Builds the sanitized Seurat pipeline descriptor from an R response body. Shared
 // by the R service bridge and the Slurm executor, which reads the same body from
 // the cluster runner's output.
-function seuratPipelineDescriptor(operation, body) {
+function seuratPipelineDescriptor(operation, body, requestedParams) {
   const spec = R_BRIDGE_OPERATIONS[operation];
+  const effectiveParameters = verifiedEffectiveParameters(requestedParams, body);
   const summary = sanitizePipelineSummary(body);
   const checkpoint = sanitizeCheckpointInfo(body);
   if (checkpoint.saved === true && !checkpoint.checksumSha256) {
@@ -259,6 +261,7 @@ function seuratPipelineDescriptor(operation, body) {
       scientific_output: true,
       ranAt: new Date().toISOString(),
       summary,
+      effectiveParameters,
       warnings: sanitizeNameList(body.warnings, 32, 160),
     },
   };
@@ -750,6 +753,7 @@ async function runRBridgeOperation(args = {}) {
     // The bridge returns the SANITIZED pieces the worker needs; the worker (not the
     // bridge) writes the DB result object + artifacts. checkpoint carries only save
     // success + integrity (checksum/size) — never the storage path/key.
+    const effectiveParameters = verifiedEffectiveParameters(request.body && request.body.params, body);
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
@@ -775,6 +779,7 @@ async function runRBridgeOperation(args = {}) {
         ranAt: new Date().toISOString(),
         objectId: objectContext.objectId,
         summary,
+        effectiveParameters,
       },
     };
   }
@@ -1007,10 +1012,11 @@ async function runRBridgeOperation(args = {}) {
   }
 
   if (operation === 'r.seurat.pipeline.v1' || operation === 'r.seurat.multisample.v1') {
-    return seuratPipelineDescriptor(operation, body);
+    return seuratPipelineDescriptor(operation, body, request.body && request.body.params);
   }
 
   if (operation === 'r.spatial.seurat.v1') {
+    const effectiveParameters = verifiedEffectiveParameters(request.body && request.body.params, body);
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
@@ -1033,6 +1039,7 @@ async function runRBridgeOperation(args = {}) {
         scientific_output: true,
         ranAt: new Date().toISOString(),
         summary,
+        effectiveParameters,
         warnings: sanitizeNameList(body.warnings, 32, 160),
       },
     };

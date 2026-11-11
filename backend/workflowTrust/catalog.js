@@ -392,7 +392,7 @@ function validateScalar(schema, name, value) {
     trustedMethods.checkValue({ key: name, type: 'text', pattern: spec.pattern, maxLength: spec.maxLength }, value);
     return;
   }
-  if (spec.type === 'intOrNull' && value === null) return;
+  if ((spec.type === 'intOrNull' || spec.nullMeansDefault) && value === null) return;
   if (typeof value !== 'number' || !Number.isFinite(value)) fail('must be a finite number');
   if ((spec.type === 'int' || spec.type === 'intOrNull') && !Number.isInteger(value)) fail('must be an integer');
   if (value < spec.min || value > spec.max) fail(`must be between ${spec.min} and ${spec.max}`);

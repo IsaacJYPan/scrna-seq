@@ -1,8 +1,37 @@
 'use strict';
 const crypto = require('node:crypto');
+
+// The digest covers exactly the columns that define a condition design. A new
+// column (or a change to an unrelated one) must not alter the digest and fail
+// pending plans; a change to any listed column must.
+const CONTRAST_DESIGN_COLUMNS = [
+  'id',
+  'project_id',
+  'analysis_object_id',
+  'name',
+  'numerator_condition_id',
+  'denominator_condition_id',
+  'unit_of_replication',
+  'paired',
+  'cell_type_column',
+  'blocking_factor',
+  'covariates_json',
+  'status'
+];
+const SAMPLE_DESIGN_COLUMNS = [
+  'snapshot.sample_id',
+  'snapshot.condition_id',
+  'snapshot.donor_code',
+  'snapshot.cell_metadata_column',
+  'snapshot.cell_metadata_value',
+  'sample.batch',
+  'sample.metadata_json'
+];
+
 async function snapshot(db, projectId, analysisObjectId, contrastId) {
   const { rows } = await db.query(
-    'SELECT * FROM condition_contrasts WHERE id=$1 AND project_id=$2 AND analysis_object_id=$3',
+    `SELECT ${CONTRAST_DESIGN_COLUMNS.join(', ')} FROM condition_contrasts
+      WHERE id = $1 AND project_id = $2 AND analysis_object_id = $3`,
     [contrastId, projectId, analysisObjectId]
   );
   if (rows.length !== 1 || rows[0].status === 'invalid')
@@ -11,7 +40,11 @@ async function snapshot(db, projectId, analysisObjectId, contrastId) {
       status: 409
     });
   const samples = await db.query(
-    'SELECT snapshot.*,sample.batch,sample.metadata_json FROM condition_contrast_samples snapshot JOIN biological_samples sample ON sample.id=snapshot.sample_id WHERE snapshot.contrast_id=$1 ORDER BY snapshot.sample_id',
+    `SELECT ${SAMPLE_DESIGN_COLUMNS.join(', ')}
+       FROM condition_contrast_samples snapshot
+       JOIN biological_samples sample ON sample.id = snapshot.sample_id
+      WHERE snapshot.contrast_id = $1
+      ORDER BY snapshot.sample_id`,
     [contrastId]
   );
   if (samples.rows.length < 4)
@@ -34,4 +67,4 @@ async function verifyDesign(db, plan) {
       code: 'WORKFLOW_DESIGN_CHANGED'
     });
 }
-module.exports = { pinDesign, verifyDesign };
+module.exports = { pinDesign, verifyDesign, CONTRAST_DESIGN_COLUMNS, SAMPLE_DESIGN_COLUMNS };

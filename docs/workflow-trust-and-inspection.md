@@ -16,7 +16,9 @@ This invalidates earlier release approvals deliberately. Operator runtime pins m
 
 `seurat-qc-cluster` accepts `stopAfter`: `qc`, `normalize`, `pca`, `cluster`, or `umap` (default). Each run saves a separate checkpoint. Prefix runs recompute deterministically from the pinned input; they do not resume computation from the preceding checkpoint. An agent can inspect QC before deciding filtering and inspect PCA before further runs. Clustering-dependent follow-ons reject incomplete source checkpoints.
 
-QC inspection includes before/after quantiles, counts, finite/nonnegative/integer count checks, cluster sizes and PC variance fractions **among stored PCs**. Doublets, ambient RNA and batch effects are explicitly reported as unassessed; these diagnostics do not certify a clean dataset. Default filtering thresholds must be checked against observed distributions.
+QC inspection includes before/after quantiles, counts, finite/nonnegative/integer count checks, cluster sizes and PC variance fractions **among stored PCs**. The summary reports how many mitochondrial (MT-/mt-) genes matched. When none match, `percent_mt_available` is false, a warning says so, and a `maxPercentMt` filter below 100 is refused rather than silently passing every cell.
+
+The pipeline records what it ran. R refuses an invalid or out-of-range parameter instead of replacing it with a default or clamping it, and returns its effective parameters; the worker refuses to record a run whose effective parameters differ from the validated request. The seed defaults to 42; no job path draws a random seed. Doublets, ambient RNA and batch effects are explicitly reported as unassessed; these diagnostics do not certify a clean dataset. Default filtering thresholds must be checked against observed distributions.
 
 ## Scientific inspection permission
 

@@ -287,6 +287,9 @@ jobs:
       - name: Verify workbench condition DE uses the registered contrast
         run: npm run test:r-condition-study-contrast
 
+      - name: Verify strict pipeline parameters and mitochondrial QC
+        run: npm run test:r-pipeline-parameters
+
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 

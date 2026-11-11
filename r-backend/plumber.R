@@ -815,31 +815,30 @@ function(req, res) {
   }
   p <- body$params
 
-  # Defensive coercion/clamps (Node already validated against its allowlist; R never
-  # trusts blindly). A bad/missing value falls back to the documented default.
-  as_int <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.integer(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
+  # Strict validation (Node validated first; R never trusts blindly). An invalid
+  # value is refused, never replaced by a default or clamped to a bound.
+  effective <- tryCatch(
+    validate_seurat_pipeline_parameters(p, parameter_names = c(
+      "normalizationMethod", "scaleFactor", "variableFeatures", "pcaDims", "clusterDims",
+      "clusterResolution", "umapDims", "umapComponents", "umapNeighbors", "umapMinDist", "seed"
+    )),
+    error = function(e) e
+  )
+  if (inherits(effective, "error")) {
+    res$status <- 400
+    return(list(error = conditionMessage(effective)))
   }
-  as_num <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.numeric(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
-  }
-
-  norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
-  if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
-  scale_factor    <- as_num(p$scaleFactor,       10000, 1, 1e7)
-  nfeatures       <- as_int(p$variableFeatures,  2000, 50, 10000)
-  pca_dims        <- as_int(p$pcaDims,           50, 2, 100)
-  cluster_dims    <- as_int(p$clusterDims,       15, 2, 100)
-  cluster_res     <- as_num(p$clusterResolution, 0.8, 0.01, 10)
-  umap_dims       <- as_int(p$umapDims,          15, 2, 100)
-  umap_components <- as_int(p$umapComponents,    2, 2, 3)
-  umap_neighbors  <- as_int(p$umapNeighbors,     30, 2, 200)
-  umap_min_dist   <- as_num(p$umapMinDist,       0.3, 0, 1)
-  used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+  norm_method     <- effective$normalizationMethod
+  scale_factor    <- effective$scaleFactor
+  nfeatures       <- effective$variableFeatures
+  pca_dims        <- effective$pcaDims
+  cluster_dims    <- effective$clusterDims
+  cluster_res     <- effective$clusterResolution
+  umap_dims       <- effective$umapDims
+  umap_components <- effective$umapComponents
+  umap_neighbors  <- effective$umapNeighbors
+  umap_min_dist   <- effective$umapMinDist
+  used_seed       <- effective$seed
 
   storage_key <- body$storage_key
   if (is.null(storage_key) || !is.character(storage_key) || nchar(storage_key) == 0) {
@@ -912,6 +911,7 @@ function(req, res) {
         resolution = cluster_res,
         used_seed = used_seed
       ),
+      effective_parameters = effective,
       checkpoint = list(
         saved = saved,
         checksum_sha256 = if (is.na(checksum)) NULL else checksum,
@@ -964,15 +964,14 @@ function(req, res) {
     }
   }
 
-  as_int <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.integer(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
-  }
-  as_num <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.numeric(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
+  # Refuse invalid parameters before any work; the core validates again.
+  parameter_error <- tryCatch({
+    validate_seurat_pipeline_parameters(p)
+    NULL
+  }, error = function(e) conditionMessage(e))
+  if (!is.null(parameter_error)) {
+    res$status <- 400
+    return(list(error = parameter_error))
   }
 
   dataset_storage_key <- body$dataset_storage_key
@@ -1163,13 +1162,11 @@ function(req, res) {
     res$status <- 400
     return(list(error = "Missing storage key."))
   }
-  as_int <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.integer(v)); if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
-  }
-  as_num <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.numeric(v)); if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
+  # Strict validation: an invalid value is refused, never defaulted or clamped.
+  effective <- tryCatch(validate_seurat_pipeline_parameters(p), error = function(e) e)
+  if (inherits(effective, "error")) {
+    res$status <- 400
+    return(list(error = conditionMessage(effective)))
   }
   tryCatch({
     receipt_binding <- validate_completion_receipt_binding(
@@ -1189,8 +1186,8 @@ function(req, res) {
     if (!inherits(obj, "Seurat") || ncol(obj) < 3 || length(Images(obj)) < 1) {
       stop("Visium bundle did not produce a spatial Seurat object.")
     }
-    min_cells <- as_int(p$minCells, 3, 0, 10000)
-    min_features <- as_int(p$minFeatures, 200, 0, 100000)
+    min_cells <- effective$minCells
+    min_features <- effective$minFeatures
     spatial_counts <- LayerData(obj, assay = "Spatial", layer = "counts")
     keep_features <- Matrix::rowSums(spatial_counts > 0) >= min_cells
     keep_spots <- obj$nFeature_Spatial >= min_features
@@ -1201,51 +1198,61 @@ function(req, res) {
     raw_obj <- obj
     warnings <- c()
     pre_filter_cells <- ncol(obj)
-    mt_ok <- TRUE
-    tryCatch({
-      obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
-    }, error = function(e) {
-      mt_ok <<- FALSE; warnings <<- c(warnings, "percent.mt could not be computed")
-      obj[["percent.mt"]] <<- 0
-    })
-    apply_qc <- isTRUE(p$applyQcFilter)
+    # Count mitochondrial features: with none, percent.mt is 0 everywhere and a
+    # filter on it would silently pass every spot.
+    mt_feature_count <- sum(grepl("^[Mm][Tt]-", rownames(obj)))
+    mt_ok <- mt_feature_count > 0L
+    if (mt_ok) {
+      tryCatch({
+        obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
+      }, error = function(e) {
+        mt_ok <<- FALSE; warnings <<- c(warnings, "percent.mt could not be computed")
+        obj[["percent.mt"]] <<- 0
+      })
+    } else {
+      warnings <- c(warnings, "No mitochondrial genes (MT- or mt- prefix) were found; percent.mt is unavailable and is not a QC criterion.")
+      obj[["percent.mt"]] <- 0
+    }
+    apply_qc <- effective$applyQcFilter
+    if (apply_qc && !mt_ok && effective$maxPercentMt < 100) {
+      stop("maxPercentMt filtering needs mitochondrial genes, but none matched the MT- prefix.")
+    }
     if (apply_qc) {
-      min_features_filter <- as_int(p$minFeaturesFilter, 200, 0, 100000)
-      max_features_filter <- as_int(p$maxFeaturesFilter, 2500, 1, 1000000)
-      max_percent_mt <- as_num(p$maxPercentMt, 5, 0, 100)
+      min_features_filter <- effective$minFeaturesFilter
+      max_features_filter <- effective$maxFeaturesFilter
+      max_percent_mt <- effective$maxPercentMt
       keep <- obj$nFeature_Spatial >= min_features_filter &
         obj$nFeature_Spatial <= max_features_filter & obj$percent.mt <= max_percent_mt
       if (sum(keep) < 3) stop("QC filtering would leave fewer than 3 spots.")
       obj <- subset(obj, cells = colnames(obj)[keep])
     }
     post_filter_cells <- ncol(obj)
-    norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
-    if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
-    nfeatures <- as_int(p$variableFeatures, 2000, 50, 10000)
-    used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+    norm_method <- effective$normalizationMethod
+    nfeatures <- effective$variableFeatures
+    used_seed <- effective$seed
     set.seed(used_seed)
     if (identical(norm_method, "SCTransform")) {
       obj <- SCTransform(obj, assay = "Spatial", verbose = FALSE)
     } else {
       obj <- NormalizeData(obj, assay = "Spatial", normalization.method = "LogNormalize",
-                           scale.factor = as_num(p$scaleFactor, 10000, 1, 1e7), verbose = FALSE)
+                           scale.factor = effective$scaleFactor, verbose = FALSE)
       obj <- FindVariableFeatures(obj, assay = "Spatial", selection.method = "vst",
                                   nfeatures = nfeatures, verbose = FALSE)
       obj <- ScaleData(obj, assay = "Spatial", features = VariableFeatures(obj), verbose = FALSE)
     }
-    npcs <- min(as_int(p$pcaDims, 50, 2, 100), ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
+    npcs <- min(effective$pcaDims, ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
     if (is.na(npcs) || npcs < 2) stop("Insufficient spots/features for PCA.")
     obj <- RunPCA(obj, npcs = npcs, seed.use = used_seed, verbose = FALSE)
     avail_dims <- ncol(Embeddings(obj, "pca"))
-    cdims <- min(as_int(p$clusterDims, 15, 2, 100), avail_dims)
-    cluster_res <- as_num(p$clusterResolution, 0.8, 0.01, 10)
+    cdims <- min(effective$clusterDims, avail_dims)
+    cluster_res <- effective$clusterResolution
     obj <- FindNeighbors(obj, reduction = "pca", dims = seq_len(cdims), verbose = FALSE)
     obj <- FindClusters(obj, resolution = cluster_res, random.seed = used_seed, verbose = FALSE)
-    udims <- min(as_int(p$umapDims, 15, 2, 100), avail_dims)
-    neighbors <- min(as_int(p$umapNeighbors, 30, 2, 200), ncol(obj) - 1)
+    udims <- min(effective$umapDims, avail_dims)
+    neighbors <- min(effective$umapNeighbors, ncol(obj) - 1)
     obj <- RunUMAP(obj, reduction = "pca", dims = seq_len(udims),
-                   n.components = as_int(p$umapComponents, 2, 2, 3), n.neighbors = neighbors,
-                   min.dist = as_num(p$umapMinDist, 0.3, 0, 1), seed.use = used_seed,
+                   n.components = effective$umapComponents, n.neighbors = neighbors,
+                   min.dist = effective$umapMinDist, seed.use = used_seed,
                    verbose = FALSE)
     safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
     atomic_save_rds(list(global = obj, raw = raw_obj), safe_path)
@@ -1257,13 +1264,14 @@ function(req, res) {
       summary = list(
         n_cells = ncol(obj), n_features = nrow(obj),
         pre_filter_cells = pre_filter_cells, post_filter_cells = post_filter_cells,
-        percent_mt_available = mt_ok, n_variable_features = length(VariableFeatures(obj)),
+        percent_mt_available = mt_ok, n_mt_features = as.integer(mt_feature_count), n_variable_features = length(VariableFeatures(obj)),
         n_pcs = npcs, n_clusters = length(cluster_counts),
         cluster_sizes = as.list(as.integer(cluster_counts)),
         reductions = as.list(names(obj@reductions)), normalization_method = norm_method,
         resolution = cluster_res, used_seed = used_seed
       ),
       warnings = as.list(warnings),
+      effective_parameters = effective,
       checkpoint = list(saved = TRUE, checksum_sha256 = checksum, size_bytes = size_bytes),
       versions = list(seurat_version = as.character(utils::packageVersion("Seurat")),
                       r_version = as.character(getRversion()))
