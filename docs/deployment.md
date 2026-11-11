@@ -1416,3 +1416,19 @@ The current Rocker R base and official Caddy images publish ARM64 variants (see
 <https://hub.docker.com/r/rocker/r-ver/tags> and
 <https://hub.docker.com/_/caddy>), but that must be rechecked for the exact
 release tags/digests on the deployment day.
+
+## Observability
+
+Set `METRICS_TOKEN` (at least 32 characters) on the web service to enable
+`GET /metrics`, a Prometheus text endpoint for the private network. Callers must
+send `Authorization: Bearer <METRICS_TOKEN>`; without the variable the route does
+not exist. It reports jobs waiting or running by job type, completed-job
+durations (median and 95th percentile) and failures by job type and error code
+over the last 24 hours, free and total bytes on the durable storage volume, and
+the runs and CPU seconds reserved by outstanding agent runs. Labels are job
+types, statuses and error codes only; no identifiers, names, paths or
+parameters are exposed.
+
+The worker writes one JSON log line per finished job
+(`{"event":"job.finished","jobType":…,"status":…,"durationMs":…,"errorCode":…}`),
+so failing job types can be followed without reading container logs.

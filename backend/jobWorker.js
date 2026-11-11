@@ -1389,7 +1389,7 @@ function createJobWorker(options = {}) {
   async function tick() {
     timer = null;
     if (!running) return;
-    tickInFlight = runOnce()
+    tickInFlight = runOnceWithEvent()
       .catch((err) => log.error(`[worker ${workerId}] tick error: ${safeDiagnosticCode(err)}`))
       .finally(() => {
         tickInFlight = null;
@@ -1424,7 +1424,24 @@ function createJobWorker(options = {}) {
     return running;
   }
 
-  return { runOnce, start, stop, isRunning, workerId, leaseSeconds };
+  // One structured line per finished job, for operators and log pipelines:
+  // job type, outcome, duration and error code only (no ids, names or paths).
+  async function runOnceWithEvent() {
+    const startedAt = Date.now();
+    const outcome = await runOnce();
+    if (outcome && outcome.jobId && typeof logger.info === 'function') {
+      logger.info(JSON.stringify({
+        event: 'job.finished',
+        jobType: outcome.jobType || null,
+        status: outcome.status,
+        durationMs: Date.now() - startedAt,
+        ...(outcome.error && outcome.error.code ? { errorCode: String(outcome.error.code).slice(0, 80) } : {}),
+      }));
+    }
+    return outcome;
+  }
+
+  return { runOnce: runOnceWithEvent, start, stop, isRunning, workerId, leaseSeconds };
 }
 
 // Number of Slurm jobs this installation waits on at once (SLURM_MAX_RUNNING,
