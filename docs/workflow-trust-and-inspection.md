@@ -28,6 +28,9 @@ The standard figure bundle provides native MCP PNG image content and SVG/PDF emb
 
 ## Downstream releases
 
+The complete, generated list of releases is in [workflow-releases.md](workflow-releases.md).
+
+
 - `seurat-markers`: cluster-versus-rest marker genes, not replicated condition effects.
 - `pathway-gsea`: ranked GO enrichment for one group, with mapping statistics and warnings. Group, species, gene-set collection and cutoff are design choices a person fixes.
 - `cellchat-single-context`: bounded single-context candidate ligand–receptor inference. It does not establish physical interaction, causality or condition differences. Grouping, species, database and cell limits are design choices.

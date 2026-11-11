@@ -25,6 +25,7 @@
     "pipeline:pack": "node scripts/pack-pipeline.mjs",
     "workflow:pack": "node scripts/pack-workflow.mjs",
     "trusted-workflows:build": "node scripts/build-trusted-workflows.mjs",
+    "docs:releases": "node scripts/generate-release-list.mjs",
     "platform-developer": "node scripts/manage-platform-developer.js",
     "expert-r-access": "node scripts/manage-expert-r-access.js",
     "slurm:qualify": "node scripts/qualify-slurm.js",

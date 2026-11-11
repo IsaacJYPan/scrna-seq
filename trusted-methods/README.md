@@ -42,8 +42,10 @@ Already built in and agent-runnable: Seurat QC/normalization/clustering for
 sheet (`seurat-multisample`), classic Visium (`spatial-seurat`), cluster
 markers (`seurat-markers`), ranked GO enrichment (`pathway-gsea`) and
 single-context CellChat (`cellchat-single-context`). The built-in condition
-comparison (`condition.pseudobulk_de.v1`) remains person-only; `pseudobulk-de`
-here is its agent-runnable counterpart and a candidate for consolidation.
+comparison is also agent-runnable as `condition-pseudobulk`, on a contrast a
+person registers and fixes. `pseudobulk-de` here is a second implementation of
+the same test and a candidate for consolidation. The complete list is generated
+from the catalog in [docs/workflow-releases.md](../docs/workflow-releases.md).
 
 Compositions of methods live in [`workflows.json`](workflows.json): atlas
 cleanup, disease-vs-control atlas, Visium domains, and imaging niches. The builder

@@ -77,11 +77,14 @@ choose the profile with that in mind.
 ## Approved workflow execution (phase 2)
 
 **Releases.** The only operations an agent can run are listed in
-`backend/workflowTrust/catalog.js`. A release digest covers its handler files
-(`backend/seuratPipeline.js`, `backend/jobs/pipelineHandlers.js`,
-`r-backend/plumber.R`), parameter schema, resources, inputs, and outputs. When
-any of those bytes change, the release gets a new id, the old one is marked
-superseded, and it must be approved again. The first release,
+`backend/workflowTrust/catalog.js`; [workflow-releases.md](workflow-releases.md)
+is generated from it and lists every release with its design parameters and
+selectable metrics. A release digest covers its handler files, parameter schema,
+resources, inputs, outputs and selectable metrics, plus the trust manifest: the
+hash of every production source file under `backend/`, `r-backend/`, `shared/`,
+`cli/` and `trusted-methods/methods/`, the lockfiles and Dockerfiles, and the
+pinned runtime image. When any of those bytes change, every release gets a new
+id, the old ones are marked superseded, and they must be approved again. The first release,
 `seurat-qc-cluster` v1, runs the existing `seurat.pipeline.v1` job on an
 uploaded 10x HDF5 dataset.
 

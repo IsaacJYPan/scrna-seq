@@ -38,14 +38,23 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
 - Seurat preprocessing for single-sample and multi-sample 10x data, plus classic
   Space Ranger Visium data.
 - QC, PCA, UMAP, gene expression, heatmaps, and marker finding.
-- Ranked pathway enrichment, replicate-aware pseudobulk comparisons, and
-  single-context CellChat candidate analysis.
+- Ranked pathway enrichment, replicate-aware pseudobulk comparisons on raw
+  counts, and single-context CellChat candidate analysis.
+- A library of trusted methods, including reference-based cell annotation
+  (`annotate-singler`) and cluster labeling (`label-clusters`), doublet and
+  ambient-RNA assessment, integration, trajectories, and spatial domains. They
+  run as approved workflows in the isolated sandbox; see the
+  [release list](docs/workflow-releases.md).
+- Agent-drafted reports: sections are drafted, reviewed by a person, finalized
+  and exported as Markdown ([agent automation](docs/agent-automation.md)).
 - [Shared pipelines](docs/pipelines.md), [custom workflow steps](docs/workflow-pipelines.md),
   and a private R console on installations with the isolated R runtime configured.
 
-Cell annotation, cross-condition CellChat, and publication report generation
-are not yet available. See [analysis workflows](docs/analysis-workflows.md) for
-the supported methods and their interpretation.
+Limitations: annotation is available through the trusted methods, not yet as a
+guided step in production; cross-condition CellChat is not supported; there is
+no generated Methods text or reproducibility bundle yet. See
+[analysis workflows](docs/analysis-workflows.md) for the supported methods and
+their interpretation.
 
 ## AI agents
 
