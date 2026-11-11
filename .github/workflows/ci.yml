@@ -220,6 +220,8 @@ jobs:
             any::org.Hs.eg.db
             any::org.Mm.eg.db
             any::GO.db
+            any::edgeR
+            any::limma
             any::BiocNeighbors
             any::NMF
             github::immunogenomics/presto@a24772a135c7895a8183b007376050556c60a05b
