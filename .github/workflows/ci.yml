@@ -168,10 +168,18 @@ jobs:
 
       - name: Install PostgreSQL client tools
         # The real backup/restore drill uses pg_dump and pg_restore against the
-        # isolated CI service database.
-        run: >-
-          sudo apt-get update &&
-          sudo apt-get install -y --no-install-recommends postgresql-client
+        # isolated CI service database. The runner's own postgresql-client is
+        # newer than the PostgreSQL 16 server, and a newer pg_dump writes
+        # settings PostgreSQL 16 rejects on restore, so install the 16 client
+        # that production uses from the PostgreSQL apt repository.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          echo "PG_DUMP_PATH=/usr/lib/postgresql/16/bin/pg_dump" >> "$GITHUB_ENV"
+          echo "PG_RESTORE_PATH=/usr/lib/postgresql/16/bin/pg_restore" >> "$GITHUB_ENV"
+          /usr/lib/postgresql/16/bin/pg_dump --version
 
       - name: Validate and build deployable Node images
         run: |
