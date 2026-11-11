@@ -92,7 +92,26 @@ async function primaryButtonHoverContrast(button) {
     } finally { clearTimeout(deadline); }
   });
   return button.evaluate(el => {
-    const parseRgb = value => (value.match(/\d+(?:\.\d+)?/g) || []).slice(0, 3).map(Number);
+    const parseRgba = value => {
+      const parts = (value.match(/\d+(?:\.\d+)?/g) || []).map(Number);
+      return [parts[0] || 0, parts[1] || 0, parts[2] || 0, parts.length > 3 ? parts[3] : 1];
+    };
+    // A translucent hover tint is seen over whatever is behind it, so blend
+    // the button's background onto its ancestors' (and finally white) before
+    // measuring contrast.
+    const effectiveBackground = node => {
+      const layers = [];
+      for (let current = node; current; current = current.parentElement) {
+        const color = parseRgba(window.getComputedStyle(current).backgroundColor);
+        if (color[3] > 0) layers.push(color);
+        if (color[3] >= 1) break;
+      }
+      return layers.reduceRight((below, [red, green, blue, alpha]) => [
+        red * alpha + below[0] * (1 - alpha),
+        green * alpha + below[1] * (1 - alpha),
+        blue * alpha + below[2] * (1 - alpha),
+      ], [255, 255, 255]);
+    };
     const relativeLuminance = ([red, green, blue]) => {
       const channel = value => {
         const normalized = value / 255;
@@ -103,8 +122,8 @@ async function primaryButtonHoverContrast(button) {
       return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue);
     };
     const style = window.getComputedStyle(el);
-    const foreground = parseRgb(style.color);
-    const background = parseRgb(style.backgroundColor);
+    const foreground = parseRgba(style.color).slice(0, 3);
+    const background = effectiveBackground(el);
     const foregroundLum = relativeLuminance(foreground);
     const backgroundLum = relativeLuminance(background);
     return {
