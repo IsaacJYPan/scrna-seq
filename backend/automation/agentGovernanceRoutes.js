@@ -80,7 +80,8 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
     const pinned = release.definition.handler.find((h) => h.path === release.readableSource);
     const bytes = require('fs').readFileSync(require('path').join(__dirname, '..', '..', release.readableSource));
     const sha = require('crypto').createHash('sha256').update(bytes).digest('hex');
-    if (!pinned || pinned.sha256 !== sha) throw Object.assign(new Error('The release source changed.'), { code: 'RELEASE_SOURCE_CHANGED', status: 409 });
+    if (!pinned || pinned.sha256 !== sha)
+      throw Object.assign(new Error('The release source changed.'), { code: 'RELEASE_SOURCE_CHANGED', status: 409 });
     const { readableSteps } = require('../../shared/readableR.mjs');
     return { schema: 'traceomics.release-steps.v1', releaseId: release.id, source: { path: release.readableSource, sha256: sha },
       steps: readableSteps(bytes.toString('utf8')) };
@@ -101,8 +102,14 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
   if (sandboxes) {
     router.get('/agent-sandboxes', route((req, actor) => sandboxes.listForHuman(actor, req.params.projectId)));
     router.post('/agent-sandboxes', route((req, actor) => sandboxes.create(actor, req.params.projectId, req.body || {}), { status: 201 }));
-    router.get('/agent-sandboxes/:sandboxId', route((req, actor) => sandboxes.getForHuman(actor, req.params.projectId, req.params.sandboxId)));
-    router.post('/agent-sandboxes/:sandboxId/close', route((req, actor) => sandboxes.close(actor, req.params.projectId, req.params.sandboxId)));
+    router.get(
+      '/agent-sandboxes/:sandboxId',
+      route((req, actor) => sandboxes.getForHuman(actor, req.params.projectId, req.params.sandboxId))
+    );
+    router.post(
+      '/agent-sandboxes/:sandboxId/close',
+      route((req, actor) => sandboxes.close(actor, req.params.projectId, req.params.sandboxId))
+    );
     router.post('/agent-sandbox-runs/:runId/review', route(
       (req, actor) => sandboxes.reviewRun(actor, req.params.projectId, req.params.runId, req.body || {})));
     // Raw file from a run's output bundle, for the review screen.
@@ -146,7 +153,13 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
         res.end(exported.markdown);
       } catch (error) {
         const status = Number(error.status) || (error.code === 'NOT_FOUND' ? 404 : error.code === 'FORBIDDEN' ? 403 : 500);
-        res.status(status).json(status >= 500 ? { error: 'The report is unavailable.', code: 'INTERNAL' } : { error: error.message, code: error.code });
+        res
+          .status(status)
+          .json(
+            status >= 500
+              ? { error: 'The report is unavailable.', code: 'INTERNAL' }
+              : { error: error.message, code: error.code }
+          );
       }
     });
   }

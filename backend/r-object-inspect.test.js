@@ -225,7 +225,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — bridge allowlist & input cont
   it('createDefaultRCaller (defense-in-depth) refuses any non-allowlisted target BEFORE HTTP', async () => {
     const callR = createDefaultRCaller({ port: 8000, token: 't' });
     // Only the reviewed bridge targets exist; this set remains exact/closed.
-    expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
+    expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toEqual(['GET /health', 'GET /object/inspect', 'GET /runtime/workflow-trust', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
     expect(isAllowedRBridgeTarget('GET', '/object/inspect')).toBe(true);
     expect(isAllowedRBridgeTarget('GET', '/health')).toBe(true);
     expect(isAllowedRBridgeTarget('POST', '/object/inspect')).toBe(false);

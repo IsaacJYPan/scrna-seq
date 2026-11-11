@@ -9,7 +9,8 @@ const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
 const { ENRICHMENT_GSEA_PARAM_NAMES } = require('./enrichmentGsea');
 const { CELLCHAT_INFERENCE_PARAM_NAMES, MAX_CELLCHAT_RESULT_ROWS } = require('./cellChatInference');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
-const { EXPLORATORY_ANALYSIS_PARAM_NAMES } = require('./exploratoryAnalysis');
+const { CONTRAST_RECIPES, EXPLORATORY_ANALYSIS_PARAM_NAMES } = require('./exploratoryAnalysis');
+const { verifiedEffectiveParameters } = require('./rBridge/effectiveParameters');
 const {
   codedError,
   sanitizeRBridgeError,
@@ -54,6 +55,36 @@ const {
 const DEFAULT_R_BRIDGE_TIMEOUT_MS = 10000;
 
 const MAX_R_BRIDGE_TIMEOUT_MS = 600000;
+
+// Fixed R design body for a server-resolved condition contrast. Only trusted
+// project rows reach R; models with batch or covariate terms are refused here.
+function conditionDesignBody(design) {
+  const contrast = design && design.contrast;
+  const samples = design && design.samples;
+  if (!contrast || !Array.isArray(samples) || samples.length < 4 || samples.length > 1000) {
+    throw codedError('R_CONDITION_COMPARISON_REQUIRED', 'Server-resolved condition comparison is required.');
+  }
+  if (contrast.blockingFactor || (Array.isArray(contrast.covariates) && contrast.covariates.length > 0)) {
+    throw codedError(
+      'R_CONDITION_MODEL_UNSUPPORTED',
+      'Unsupported condition-model terms cannot cross the trusted R boundary.'
+    );
+  }
+  return {
+    unit_of_replication: contrast.unitOfReplication,
+    paired: contrast.paired === true,
+    model_formula: contrast.paired === true ? '~ donor + condition' : '~ condition',
+    cell_type_column: contrast.cellTypeColumn,
+    samples: samples.map((sample) => ({
+      sample_id: sample.sampleId,
+      condition: sample.condition,
+      donor_code: sample.donorCode,
+      unit_id: sample.unitId,
+      cell_metadata_column: sample.cellMetadataColumn,
+      cell_metadata_value: sample.cellMetadataValue,
+    })),
+  };
+}
 
 function createDefaultRCaller(config = {}) {
   let endpoint = null;
@@ -206,8 +237,9 @@ function createDefaultRCaller(config = {}) {
 // Builds the sanitized Seurat pipeline descriptor from an R response body. Shared
 // by the R service bridge and the Slurm executor, which reads the same body from
 // the cluster runner's output.
-function seuratPipelineDescriptor(operation, body) {
+function seuratPipelineDescriptor(operation, body, requestedParams) {
   const spec = R_BRIDGE_OPERATIONS[operation];
+  const effectiveParameters = verifiedEffectiveParameters(requestedParams, body);
   const summary = sanitizePipelineSummary(body);
   const checkpoint = sanitizeCheckpointInfo(body);
   if (checkpoint.saved === true && !checkpoint.checksumSha256) {
@@ -229,6 +261,7 @@ function seuratPipelineDescriptor(operation, body) {
       scientific_output: true,
       ranAt: new Date().toISOString(),
       summary,
+      effectiveParameters,
       warnings: sanitizeNameList(body.warnings, 32, 160),
     },
   };
@@ -458,52 +491,32 @@ async function runRBridgeOperation(args = {}) {
       if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
     }
     request.body = { operation, params: safeParams };
+    // Contrast recipes carry the server-resolved, person-registered design.
+    if (CONTRAST_RECIPES.includes(safeParams.recipe)) {
+      const design = exploration.design;
+      if (!design || !design.contrast || design.contrast.id !== safeParams.contrastId) {
+        throw codedError('R_CONDITION_COMPARISON_REQUIRED', 'Server-resolved condition contrast is required.');
+      }
+      request.body.design = conditionDesignBody(design);
+      request.body.contrast_labels = {
+        numerator: String(design.contrast.numeratorName || 'numerator').slice(0, 80),
+        denominator: String(design.contrast.denominatorName || 'denominator').slice(0, 80),
+      };
+    }
   }
 
   if (spec.carriesConditionComparison) {
     const comparison = args.conditionComparison;
-    const design = comparison && comparison.design;
-    const contrast = design && design.contrast;
-    const samples = design && design.samples;
     const resultStorageKey = comparison && comparison.resultStorageKey;
-    if (
-      !contrast ||
-      !Array.isArray(samples) ||
-      samples.length < 4 ||
-      samples.length > 1000 ||
-      typeof resultStorageKey !== 'string' ||
-      resultStorageKey === ''
-    ) {
+    if (typeof resultStorageKey !== 'string' || resultStorageKey === '') {
       throw codedError(
         'R_CONDITION_COMPARISON_REQUIRED',
         'Server-resolved condition comparison is required.'
       );
     }
-    if (
-      contrast.blockingFactor ||
-      (Array.isArray(contrast.covariates) && contrast.covariates.length > 0)
-    ) {
-      throw codedError(
-        'R_CONDITION_MODEL_UNSUPPORTED',
-        'Unsupported condition-model terms cannot cross the trusted R boundary.'
-      );
-    }
     request.body = {
       operation,
-      design: {
-        unit_of_replication: contrast.unitOfReplication,
-        paired: contrast.paired === true,
-        model_formula: contrast.paired === true ? '~ donor + condition' : '~ condition',
-        cell_type_column: contrast.cellTypeColumn,
-        samples: samples.map((sample) => ({
-          sample_id: sample.sampleId,
-          condition: sample.condition,
-          donor_code: sample.donorCode,
-          unit_id: sample.unitId,
-          cell_metadata_column: sample.cellMetadataColumn,
-          cell_metadata_value: sample.cellMetadataValue,
-        })),
-      },
+      design: conditionDesignBody(comparison.design),
       storage_key: resultStorageKey,
     };
   }
@@ -740,6 +753,7 @@ async function runRBridgeOperation(args = {}) {
     // The bridge returns the SANITIZED pieces the worker needs; the worker (not the
     // bridge) writes the DB result object + artifacts. checkpoint carries only save
     // success + integrity (checksum/size) — never the storage path/key.
+    const effectiveParameters = verifiedEffectiveParameters(request.body && request.body.params, body);
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
@@ -765,6 +779,7 @@ async function runRBridgeOperation(args = {}) {
         ranAt: new Date().toISOString(),
         objectId: objectContext.objectId,
         summary,
+        effectiveParameters,
       },
     };
   }
@@ -997,10 +1012,11 @@ async function runRBridgeOperation(args = {}) {
   }
 
   if (operation === 'r.seurat.pipeline.v1' || operation === 'r.seurat.multisample.v1') {
-    return seuratPipelineDescriptor(operation, body);
+    return seuratPipelineDescriptor(operation, body, request.body && request.body.params);
   }
 
   if (operation === 'r.spatial.seurat.v1') {
+    const effectiveParameters = verifiedEffectiveParameters(request.body && request.body.params, body);
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
@@ -1023,6 +1039,7 @@ async function runRBridgeOperation(args = {}) {
         scientific_output: true,
         ranAt: new Date().toISOString(),
         summary,
+        effectiveParameters,
         warnings: sanitizeNameList(body.warnings, 32, 160),
       },
     };

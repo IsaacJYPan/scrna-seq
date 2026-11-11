@@ -199,7 +199,7 @@ describe('PipelineManager', () => {
     fireEvent.change(ui.getByLabelText('Minimum distance'), { target: { value: '0.25' } });
     fireEvent.click(ui.getByLabelText('Apply QC filter'));
     fireEvent.click(ui.getByText('Reproducibility'));
-    fireEvent.change(ui.getByLabelText('Seed (optional)'), { target: { value: '42' } });
+    fireEvent.change(ui.getByLabelText('Seed (default 42)'), { target: { value: '42' } });
     fireEvent.click(ui.getByRole('button', { name: /Run Seurat preprocessing/i }));
     await waitFor(() => expect(window.electronAPI.createSeuratPipelineJob).toHaveBeenCalledTimes(1));
     expect(window.electronAPI.createSeuratPipelineJob).toHaveBeenCalledWith('proj_1', expect.objectContaining({

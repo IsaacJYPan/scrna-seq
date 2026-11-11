@@ -16,8 +16,20 @@ const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
   'metadataField',
   'maxGroups',
   'histogramBins',
-  'featureNames','groupMap','conditionName','numerator','denominator','targetGroup',
+  'featureNames',
+  'groupMap',
+  'conditionName',
+  'contrastId',
+  'targetGroup',
+  'species',
 ]);
+// Recipes that test a condition contrast. They run on a person-registered
+// contrast (resolved and pinned server side), never on labels in cell metadata.
+const CONTRAST_RECIPES = Object.freeze(['study_de', 'study_pathways']);
+// Recipes that use an organism's annotation (GO, ligand-receptor databases).
+// The organism is never assumed.
+const SPECIES_RECIPES = Object.freeze(['study_pathways', 'study_communication']);
+const SPECIES = Object.freeze(['human', 'mouse']);
 
 function requirePlainObject(value) {
   if (value === undefined || value === null) return {};
@@ -63,8 +75,33 @@ function validateExploratoryAnalysisParams(input) {
     maxGroups: boundedInteger(raw.maxGroups, 'maxGroups', 24, 2, 32),
     histogramBins: boundedInteger(raw.histogramBins, 'histogramBins', 24, 8, 50),
   };
-  for(const [name,kind] of [['featureNames','geneList'],['groupMap','groupMap']])if(raw[name]!==undefined)params[name]=require('./scientificChoices').scientificText(kind,raw[name]);
-  for(const name of ['conditionName','numerator','denominator','targetGroup'])if(raw[name]!==undefined){if(typeof raw[name]!=='string'||(raw[name]!==''&&!/^[A-Za-z0-9_.-]{1,80}$/.test(raw[name])))throw codedError('INVALID_PARAMETER',`Invalid ${name}.`);params[name]=raw[name];}
+  for (const [name, kind] of [
+    ['featureNames', 'geneList'],
+    ['groupMap', 'groupMap']
+  ])
+    if (raw[name] !== undefined) params[name] = require('./scientificChoices').scientificText(kind, raw[name]);
+  for (const name of ['conditionName', 'targetGroup'])
+    if (raw[name] !== undefined) {
+      if (typeof raw[name] !== 'string' || (raw[name] !== '' && !/^[A-Za-z0-9_.-]{1,80}$/.test(raw[name])))
+        throw codedError('INVALID_PARAMETER', `Invalid ${name}.`);
+      params[name] = raw[name];
+    }
+  if (CONTRAST_RECIPES.includes(recipe)) {
+    if (typeof raw.contrastId !== 'string' || !/^contrast_[a-f0-9]+$/.test(raw.contrastId)) {
+      throw codedError('INVALID_PARAMETER', `${recipe} requires contrastId, a registered condition contrast.`);
+    }
+    params.contrastId = raw.contrastId;
+  } else if (raw.contrastId !== undefined) {
+    throw codedError('INVALID_PARAMETER', `contrastId applies only to ${CONTRAST_RECIPES.join(' and ')}.`);
+  }
+  if (SPECIES_RECIPES.includes(recipe)) {
+    if (!SPECIES.includes(raw.species)) {
+      throw codedError('INVALID_PARAMETER', `${recipe} requires species: ${SPECIES.join(' or ')}.`);
+    }
+    params.species = raw.species;
+  } else if (raw.species !== undefined) {
+    throw codedError('INVALID_PARAMETER', `species applies only to ${SPECIES_RECIPES.join(' and ')}.`);
+  }
 
   if (recipe === 'feature_by_group') {
     if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {
@@ -83,6 +120,8 @@ function validateExploratoryAnalysisParams(input) {
 }
 
 module.exports = {
+  CONTRAST_RECIPES,
+  SPECIES_RECIPES,
   EXPLORATORY_ANALYSIS_RECIPES,
   EXPLORATORY_ANALYSIS_PARAM_NAMES,
   validateExploratoryAnalysisParams,

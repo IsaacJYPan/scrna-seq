@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const db = require('./pgDatabase');
 const {
@@ -198,7 +199,7 @@ describe.skipIf(!CONFIGURED)('seurat.multisample.v1 project and worker boundary'
       logger: silentLogger(),
       callR: async (request) => {
         calls.push(request);
-        return { status: 200, body: pipelineBody() };
+        return { status: 200, body: withEffectiveParameters(request, pipelineBody()) };
       },
     });
     const outcome = await worker.runOnce();
@@ -254,7 +255,7 @@ describe.skipIf(!CONFIGURED)('seurat.multisample.v1 bridge request construction'
       },
       input: { path: '../../escape', code: 'system("x")' },
       markRDispatchStarted: async () => {},
-      callR: async request => { calls.push(request); return { status: 200, body: pipelineBody() }; },
+      callR: async request => { calls.push(request); return { status: 200, body: withEffectiveParameters(request, pipelineBody()) }; },
       logger: silentLogger(),
     });
     expect(JSON.stringify(calls[0].body)).not.toContain('../../escape');

@@ -57,6 +57,75 @@ describe.skipIf(!CONFIGURED)('Postgres experimental design', () => {
     })).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
+  it('resolves the same registered contrast for condition DE and workbench contrast jobs', async () => {
+    const { owner, project, object } = await seed();
+    const treated = await design.createCondition(owner.id, project.id, { name: 'treated' });
+    const control = await design.createCondition(owner.id, project.id, { name: 'control' });
+    for (const [condition, prefix] of [[treated, 't'], [control, 'c']]) {
+      for (let index = 1; index <= 2; index += 1) {
+        const sample = await design.createSample(owner.id, project.id, {
+          name: `${prefix}${index}`, conditionId: condition.id, donorCode: `${prefix}d${index}`,
+        });
+        await design.bindSample(owner.id, project.id, object.id, {
+          sampleId: sample.id, cellMetadataColumn: 'orig.ident', cellMetadataValue: `${prefix}${index}`,
+        });
+      }
+    }
+    const contrast = await design.createContrast(owner.id, project.id, {
+      name: 'treated-v-control', analysisObjectId: object.id,
+      numeratorConditionId: treated.id, denominatorConditionId: control.id, unitOfReplication: 'donor',
+    });
+    const resolve = async (parameters) => {
+      const job = await db.createProjectJob(owner.id, project.id, {
+        jobType: 'explore.summarize.v1', analysisObjectId: object.id, parameters,
+      });
+      const claim = await db.claimNextJob('worker_contrast_test', { leaseSeconds: 60 });
+      expect(claim.id).toBe(job.id);
+      try {
+        return await db.getConditionComparisonInputsForJobByWorker(job.id, 'worker_contrast_test', claim.claimToken);
+      } finally {
+        await db.query("UPDATE jobs SET status = 'canceled' WHERE id = $1", [job.id]);
+      }
+    };
+    const inputs = await resolve({ recipe: 'study_de', contrastId: contrast.id });
+    expect(inputs.contrast).toMatchObject({ id: contrast.id, numeratorName: 'treated', denominatorName: 'control' });
+    expect(inputs.samples).toHaveLength(4);
+    expect(inputs.samples.filter((sample) => sample.condition === 'numerator')).toHaveLength(2);
+    await expect(resolve({ recipe: 'study_qc' })).rejects.toMatchObject({ code: 'INVALID_JOB_TYPE' });
+  });
+
+  it('pins a contrast by its design columns, not by every column of the tables', async () => {
+    const { pinDesign } = require('./workflowTrust/design');
+    const { owner, project, object } = await seed();
+    const treated = await design.createCondition(owner.id, project.id, { name: 'treated' });
+    const control = await design.createCondition(owner.id, project.id, { name: 'control' });
+    for (const [condition, prefix] of [[treated, 't'], [control, 'c']]) {
+      for (let index = 1; index <= 2; index += 1) {
+        const sample = await design.createSample(owner.id, project.id, {
+          name: `${prefix}${index}`, conditionId: condition.id, donorCode: `${prefix}d${index}`,
+        });
+        await design.bindSample(owner.id, project.id, object.id, {
+          sampleId: sample.id, cellMetadataColumn: 'orig.ident', cellMetadataValue: `${prefix}${index}`,
+        });
+      }
+    }
+    const contrast = await design.createContrast(owner.id, project.id, {
+      name: 'pinned', analysisObjectId: object.id,
+      numeratorConditionId: treated.id, denominatorConditionId: control.id, unitOfReplication: 'donor',
+    });
+    const before = await pinDesign(db, project.id, object.id, contrast.id);
+    // A schema change that adds a column must not change the design digest.
+    await db.query("ALTER TABLE condition_contrasts ADD COLUMN IF NOT EXISTS reviewer_note TEXT DEFAULT 'later'");
+    await db.query("ALTER TABLE biological_samples ADD COLUMN IF NOT EXISTS freezer_box TEXT DEFAULT 'A1'");
+    expect((await pinDesign(db, project.id, object.id, contrast.id)).sha256).toBe(before.sha256);
+    // Changing what the design says does.
+    await db.query(
+      'UPDATE condition_contrast_samples SET cell_metadata_value = $2 WHERE contrast_id = $1 AND cell_metadata_value = $3',
+      [contrast.id, 't9', 't1']
+    );
+    expect((await pinDesign(db, project.id, object.id, contrast.id)).sha256).not.toBe(before.sha256);
+  });
+
   it('enforces authenticated HTTP fields and project isolation', async () => {
     const { owner, project } = await seed();
     const server = await startServer();

@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const db = require('./pgDatabase');
 const { createJobWorker, checkpointForkHandler, DEFAULT_HANDLERS } = require('./jobWorker');
@@ -58,7 +59,7 @@ function caller(record, loadResponse = { status: 200, body: loadBody() }) {
   return async (request) => {
     record.push(request);
     if (request.path === '/object/pbmc-pipeline') {
-      return { status: 200, body: pipelineBody() };
+      return { status: 200, body: withEffectiveParameters(request, pipelineBody()) };
     }
     if (request.path === '/object/checkpoint-load') return loadResponse;
     return { status: 200, body: {} };

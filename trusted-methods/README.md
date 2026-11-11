@@ -42,8 +42,10 @@ Already built in and agent-runnable: Seurat QC/normalization/clustering for
 sheet (`seurat-multisample`), classic Visium (`spatial-seurat`), cluster
 markers (`seurat-markers`), ranked GO enrichment (`pathway-gsea`) and
 single-context CellChat (`cellchat-single-context`). The built-in condition
-comparison (`condition.pseudobulk_de.v1`) remains person-only; `pseudobulk-de`
-here is its agent-runnable counterpart and a candidate for consolidation.
+comparison is also agent-runnable as `condition-pseudobulk`, on a contrast a
+person registers and fixes. `pseudobulk-de` here is a second implementation of
+the same test and a candidate for consolidation. The complete list is generated
+from the catalog in [docs/workflow-releases.md](../docs/workflow-releases.md).
 
 Compositions of methods live in [`workflows.json`](workflows.json): atlas
 cleanup, disease-vs-control atlas, Visium domains, and imaging niches. The builder
@@ -91,7 +93,9 @@ an ad hoc script. The library is meant to grow by one reviewed method at a time.
    installation calls.
 2. Add the catalog entry: provenance (URL, upstream file, citation, the version
    reviewed against), deviations, parameters with roles, outputs, a `metrics`
-   output and the metric keys it promises, resources, and `accepts`.
+   output and the metric keys it promises (each with a `kind`: `descriptive`,
+   `quality` or `inferential`; studies cannot rank trials by inferential
+   metrics), resources, and `accepts`.
 3. Run `npx vitest run backend/trusted-methods.test.js --environment node`.
 4. If the method needs a package that is not in the R image, add it to
    `r-backend/Dockerfile` in the trusted-method layer. Methods fail with a

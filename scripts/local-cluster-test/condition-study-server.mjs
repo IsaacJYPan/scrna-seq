@@ -30,13 +30,24 @@ if(command.action==='accept'){
  const round=Date.now();
  const settings=[['seurat-markers',{randomSeed:42,topMarkersPerCluster:30},{maxCellsPerIdent:[2000,null]}],['standard-figures',{}, {recipe:['figure_qc','figure_pca','figure_umap','figure_heatmap','figure_dot','figure_feature']}]];
  for(const [key,fixedParameters,variations] of settings)await post('/studies',{name:`${key} handoff ${round}`,releaseId:releases.find(r=>r.key===key).id,sourceStudyId:selectedSource,maxTrials:20,maxCpuSeconds:100000,fixedParameters,variations});
- for(const recipe of ['study_composition','study_qc','study_expression','study_de','study_pathways','study_communication']){
- const variations={groupMap:['','*']};
- if(['study_expression','study_de','study_pathways'].includes(recipe))variations.featureNames=['','*'];
- if(['study_expression','study_qc','study_composition','study_communication'].includes(recipe))variations.conditionName=['all','control','moderate','severe'];
- if(['study_de','study_pathways'].includes(recipe)){variations.numerator=['severe','moderate','control'];variations.denominator=['control','moderate','severe'];}
- if(recipe==='study_pathways')variations.targetGroup=['','*'];
- await post('/studies',{name:`${recipe} handoff ${round}`,releaseId:releases.find(r=>r.key==='study-workbench').id,sourceStudyId:selectedSource,maxTrials:60,maxCpuSeconds:250000,fixedParameters:{recipe},variations});
+ // What a study asks is fixed by the sponsor: the condition, the group map,
+ // the registered contrast and the target population. Only the display gene
+ // panel may vary. Contrast recipes need a contrast registered on the selected
+ // result (TRACEOMICS_STUDY_CONTRAST_ID); without one they are skipped.
+ const contrastId=process.env.TRACEOMICS_STUDY_CONTRAST_ID;
+ const studies=[];
+ for(const conditionName of ['all','control','moderate','severe']){
+  for(const recipe of ['study_composition','study_qc','study_expression'])studies.push({recipe,conditionName});
+  if(conditionName!=='all')studies.push({recipe:'study_communication',conditionName,species:'human'});
+ }
+ if(contrastId){
+  studies.push({recipe:'study_de',contrastId});
+  for(const targetGroup of (process.env.TRACEOMICS_STUDY_TARGET_GROUPS||'').split(',').filter(Boolean))studies.push({recipe:'study_pathways',contrastId,targetGroup,species:'human'});
+ }else console.log('SKIP study_de/study_pathways: set TRACEOMICS_STUDY_CONTRAST_ID to a registered contrast');
+ for(const fixedParameters of studies){
+  const variations=['study_expression','study_de','study_pathways'].includes(fixedParameters.recipe)?{featureNames:['','*']}:{};
+  const label=[fixedParameters.recipe,fixedParameters.conditionName,fixedParameters.targetGroup].filter(Boolean).join(' ');
+  await post('/studies',{name:`${label} handoff ${round}`,releaseId:releases.find(r=>r.key==='study-workbench').id,sourceStudyId:selectedSource,maxTrials:60,maxCpuSeconds:250000,fixedParameters,variations});
  }
  fs.writeFileSync(path.join(out,'sponsor-handoff.json'),JSON.stringify({selectedRunId:command.runId,completedAt:new Date().toISOString()}));console.log('DOWNSTREAM_STUDIES_READY');
 }else if(command.action==='shutdown'){clearInterval(timer);await worker.stop();await new Promise(r=>server.close(r));await db.close();process.exit(0);}

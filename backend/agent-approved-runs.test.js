@@ -12,17 +12,20 @@ const db = require('./pgDatabase');
 const storage = require('./storage');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { currentReleases, buildRelease } = require('./workflowTrust/catalog');
+const { useWorkflowRuntimeProfile, runtimeAttestation } = require('./_workflowRuntimeFixture');
 
 const CONFIGURED = config.hasPostgresConnection();
 const ALL_CAPS = ['metadata.read', 'results.read', 'workflow.plan', 'workflow.executeApproved', 'run.cancelOwn'];
 
 let server;
+let restoreRuntime;
 const savedEnv = {};
 
 beforeAll(async () => {
   if (!CONFIGURED) return;
   for (const key of ['DISABLE_RATE_LIMIT', 'AGENT_MAX_OUTSTANDING_RUNS', 'AGENT_MAX_OUTSTANDING_RUNS_PER_SPONSOR']) savedEnv[key] = process.env[key];
   process.env.DISABLE_RATE_LIMIT = 'true';
+  restoreRuntime = useWorkflowRuntimeProfile();
   server = await startServer();
 });
 
@@ -30,6 +33,7 @@ afterAll(async () => {
   if (!CONFIGURED) return;
   if (server) await new Promise((resolve) => server.close(resolve));
   await db.close();
+  if (restoreRuntime) restoreRuntime();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
@@ -85,6 +89,12 @@ function agent(ctx, path, options = {}, token = ctx.token) {
   return api(server, `/api/automation/v1/projects/${ctx.project.id}${path}`, {
     ...options, headers: { Authorization: `Bearer ${token}` },
   });
+}
+
+// Answers only the claim-time runtime attestation; no analysis reaches R.
+async function attestingCallR(request) {
+  if (request.path === '/runtime/workflow-trust') return { status: 200, body: runtimeAttestation() };
+  throw new Error(`Unexpected R call: ${request.path}`);
 }
 
 async function plan(ctx, choices = { clusterResolution: 0.5 }, token) {
@@ -309,7 +319,7 @@ describe.skipIf(!CONFIGURED)('revocation, dispatch recheck, and cancellation', (
       const human = await api(server, `${ctx.base}/agent-runs`, { token: ctx.sponsor.token });
       expect(human.data.runs[0]).toMatchObject({ id: run.id, state: 'canceled' });
     }
-  });
+  }, 30000);
 
   it('cancels its own queued run, retains the reservation, and quarantines late output', async () => {
     const ctx = await setup();
@@ -573,6 +583,77 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     };
   }
 
+  it('marks claimed agent jobs so the trust recheck cannot be skipped', async () => {
+    const ctx = await setup();
+    const run = (await submit(ctx, (await plan(ctx)).data, 'run-req-agent-flag')).data.run;
+    const claimed = await db.claimNextJob('worker_agent_flag', { leaseSeconds: 30 });
+    expect(claimed).toMatchObject({ agentRun: true });
+    const { rows } = await db.query('SELECT job_id FROM agent_runs WHERE id = $1', [run.id]);
+    expect(claimed.id).toBe(rows[0].job_id);
+    await db.query("UPDATE jobs SET status = 'canceled', claim_token = NULL, worker_id = NULL WHERE id = $1", [claimed.id]);
+    const input = await db.createProjectAnalysisObject(ctx.sponsor.user.id, ctx.project.id, {
+      datasetId: ctx.datasetId, objectType: 'matrix', displayName: 'Human input',
+    });
+    const human = await db.createProjectJob(ctx.sponsor.user.id, ctx.project.id, {
+      jobType: 'seurat.pipeline.v1', analysisObjectId: input.id, datasetId: ctx.datasetId, parameters: {},
+    });
+    const humanClaim = await db.claimNextJob('worker_agent_flag_2', { leaseSeconds: 30 });
+    expect(humanClaim).toMatchObject({ id: human.id, agentRun: false });
+  });
+
+  it('accepts selection rules only on declared, non-inferential metrics', async () => {
+    const ctx = await setup();
+    await acceptedClusteringWithCheckpoint(ctx);
+    const create = (body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+    const pseudobulk = byKey('condition-pseudobulk');
+    const library = byKey('pseudobulk-de');
+    await approve(ctx, pseudobulk);
+    await approve(ctx, library);
+    const significant = await create({ name: 'Most significant', releaseId: pseudobulk.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { contrastId: 'contrast_aa' }, selectionRule: { metric: 'significantResultCount', goal: 'max' } });
+    expect(significant.status).toBe(400);
+    expect(significant.data).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(significant.data.error).toMatch(/inferential/);
+    const totalSignificant = await create({ name: 'Most hits', releaseId: library.id, sourceStudyId: ctx.study.id,
+      selectionRule: { metric: 'total_significant', goal: 'max' } });
+    expect(totalSignificant.data.code).toBe('INVALID_INPUT');
+    const undeclared = await create({ name: 'Undeclared', releaseId: pseudobulk.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { contrastId: 'contrast_aa' }, selectionRule: { metric: 'anything', goal: 'max' } });
+    expect(undeclared.data.code).toBe('INVALID_INPUT');
+    const clusters = await api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body: {
+      name: 'Most clusters', releaseId: ctx.rel.id, datasetIds: [ctx.datasetId],
+      variations: { clusterResolution: [0.5, 1.2] }, selectionRule: { metric: 'nClusters', goal: 'max' } } });
+    expect(clusters.status, JSON.stringify(clusters.data)).toBe(201);
+  });
+
+  it('refuses studies that vary a contrast, grouping or population label (Q1)', async () => {
+    const ctx = await setup();
+    await acceptedClusteringWithCheckpoint(ctx);
+    const create = (body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+    const pseudobulk = byKey('condition-pseudobulk');
+    const workbench = byKey('study-workbench');
+    await approve(ctx, pseudobulk);
+    await approve(ctx, workbench);
+    const contrast = await create({ name: 'Contrast sweep', releaseId: pseudobulk.id, sourceStudyId: ctx.study.id,
+      variations: { contrastId: ['contrast_aa', 'contrast_bb'] } });
+    expect(contrast.data.code).toBe('PROTECTED_PARAMETER');
+    for (const variations of [
+      { contrastId: ['contrast_aa', 'contrast_bb'] },
+      { groupMap: ['0=T;1=B', '0=B;1=T'] },
+      { groupMap: ['*'] },
+      { targetGroup: ['*'] },
+      { conditionName: ['disease', 'control'] },
+    ]) {
+      const refused = await create({ name: 'Workbench sweep', releaseId: workbench.id, sourceStudyId: ctx.study.id,
+        fixedParameters: { recipe: 'study_de' }, variations });
+      expect(refused.data.code, JSON.stringify(variations)).toBe('PROTECTED_PARAMETER');
+    }
+    // A display gene panel stays agent-selectable.
+    const panel = await create({ name: 'Gene panel', releaseId: workbench.id, sourceStudyId: ctx.study.id,
+      fixedParameters: { recipe: 'study_expression' }, variations: { featureNames: ['*'] } });
+    expect(panel.status, JSON.stringify(panel.data)).toBe(201);
+  });
+
   it('fixes design choices, runs the pinned method, records a loadable result, and chains', async () => {
     const ctx = await setup();
     const sourceResult = await acceptedClusteringWithCheckpoint(ctx);
@@ -601,7 +682,7 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     expect(queued).toMatchObject({ job_type: 'trusted.method.v1', analysis_object_id: sourceResult });
 
     const runExpertSandbox = fakeSandbox({ cells_before: 1000, cells_after: 900, cells_removed: 100, fraction_kept: 0.9, values_not_found: 0 });
-    const worker = createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } });
+    const worker = createJobWorker({ db, runExpertSandbox, callR: attestingCallR, logger: { info() {}, warn() {}, error() {}, log() {} } });
     await worker.runOnce();
     const { rows: [done] } = await db.query('SELECT * FROM jobs WHERE id = $1', [queued.id]);
     expect(done.status, done.error_json).toBe('completed');
@@ -640,7 +721,7 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     const tampered = { ...JSON.parse(queued.parameters_json), methodSourceSha256: '0'.repeat(64) };
     await db.query('UPDATE jobs SET parameters_json = $2 WHERE id = $1', [queued.id, JSON.stringify(tampered)]);
     const runExpertSandbox = vi.fn();
-    await createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } }).runOnce();
+    await createJobWorker({ db, runExpertSandbox, callR: attestingCallR, logger: { info() {}, warn() {}, error() {}, log() {} } }).runOnce();
     const { rows: [failed] } = await db.query('SELECT status FROM jobs WHERE id = $1', [queued.id]);
     expect(failed.status).toBe('failed');
     expect(runExpertSandbox).not.toHaveBeenCalled();

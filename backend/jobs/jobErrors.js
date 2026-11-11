@@ -6,6 +6,8 @@ const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   WORKFLOW_RUNTIME_MISMATCH: 'The analysis runtime differs from the approved package or image inventory. Reapproval is required.',
   WORKFLOW_INPUT_CHANGED: 'A pinned study input changed. A new study approval is required.',
   WORKFLOW_DESIGN_CHANGED: 'The pinned condition design changed. A new plan and approval are required.',
+  WORKFLOW_TRUST_UNAVAILABLE: 'The approved plan of this agent run could not be checked, so it did not run.',
+  WORKFLOW_TRUST_MISSING: 'This agent run has no approved plan, so it did not run.',
   ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
   SLURM_UNAVAILABLE: 'The Slurm target is not configured for this installation.',
   SLURM_SUBMIT_FAILED: 'The cluster did not accept the job. Check the Slurm partition and account settings.',

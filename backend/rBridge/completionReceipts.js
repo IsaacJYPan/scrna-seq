@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const storage = require('../storage');
 const { codedError } = require('./errors');
 const { R_BRIDGE_OPERATIONS } = require('./operations');
+const { verifiedEffectiveParameters, requestedPipelineParameters } = require('./effectiveParameters');
 const {
   sanitizePipelineSummary,
   sanitizeCheckpointInfo,
@@ -290,8 +291,10 @@ function validateReceiptPayloadSchema(jobType, payload) {
     const topKeys = ['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(
       jobType
     )
-      ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings']
-      : ['ok', 'summary', 'checkpoint', 'versions'];
+      ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings', 'effective_parameters']
+      : jobType === 'pbmc.pipeline.v1'
+        ? ['ok', 'summary', 'checkpoint', 'versions', 'effective_parameters']
+        : ['ok', 'summary', 'checkpoint', 'versions'];
     assertExactObjectKeys(payload, topKeys);
     if (payload.ok !== true)
       throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
@@ -305,6 +308,7 @@ function validateReceiptPayloadSchema(jobType, payload) {
         'pre_filter_cells',
         'post_filter_cells',
         'percent_mt_available',
+        'n_mt_features',
         'n_variable_features',
         'n_pcs',
         'n_clusters',
@@ -607,6 +611,11 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
     if (!checkpoint.saved || !checkpoint.checksumSha256 || checkpoint.sizeBytes === null) {
       throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
     }
+    // A recovered pipeline result is recorded only if it ran with the job's
+    // validated parameters, exactly as for a direct reply.
+    const effectiveParameters = jobType === 'checkpoint.save.v1'
+      ? null
+      : verifiedEffectiveParameters(requestedPipelineParameters(job), body);
     return {
       operation: rOperation,
       artifactType: spec.artifactType,
@@ -622,6 +631,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
         ranAt: new Date().toISOString(),
         ...(job.analysisObjectId ? { objectId: job.analysisObjectId } : {}),
         summary,
+        ...(effectiveParameters ? { effectiveParameters } : {}),
         ...(['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
           ? { warnings: sanitizeNameList(body.warnings, 32, 160) }
           : {}),

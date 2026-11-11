@@ -110,6 +110,9 @@ describe.skipIf(!CONFIGURED)('Slurm target through the real worker', () => {
     const runDir = path.join(fake.remote, job.id);
     fs.mkdirSync(path.join(runDir, 'output'), { recursive: true });
     fs.writeFileSync(path.join(runDir, 'job.sh'), `#SBATCH --job-name=tro-${job.id}\n`);
+    // Staged before submission in a real run, like job.sh.
+    fs.writeFileSync(path.join(runDir, 'params.json'),
+      JSON.stringify(require('./seuratPipeline').validateSeuratPipelineParams(job.parameters || {}).params));
     require('child_process').execFileSync('sbatch', ['--parsable', path.join(runDir, 'job.sh')], { env: process.env });
     await dbmod.query("INSERT INTO hpc_dispatches (job_id, target, remote_dir, state) VALUES ($1, 'slurm', $2, 'submitting')", [job.id, runDir]);
     await createJobWorker({ db: dbmod, logger: silentLogger(), storageProvider: provider, slurmExecutor: executor }).runOnce();

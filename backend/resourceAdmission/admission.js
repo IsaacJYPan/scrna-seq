@@ -118,11 +118,20 @@ function publicRun(row) {
     inputs: plan.inputs,
     choices: plan.choices,
     state,
-    ...(state==='failed'?{failure:{code:failureMessage?failureCode:'ANALYSIS_FAILED',message:failureMessage||'Analysis failed. Ask the operator for a bounded technical diagnosis.'}}:{}),
+    ...(state === 'failed'
+      ? {
+          failure: {
+            code: failureMessage ? failureCode : 'ANALYSIS_FAILED',
+            message: failureMessage || 'Analysis failed. Ask the operator for a bounded technical diagnosis.'
+          }
+        }
+      : {}),
     jobStatus: row.job_status,
     reservation: {
-      cpus: row.reserved_cpus, memoryMiB: row.reserved_memory_mib,
-      maxWallSeconds: row.max_wall_seconds, cpuSeconds: Number(row.reserved_cpu_seconds),
+      cpus: row.reserved_cpus,
+      memoryMiB: row.reserved_memory_mib,
+      maxWallSeconds: row.max_wall_seconds,
+      cpuSeconds: Number(row.reserved_cpu_seconds)
     },
     resultAnalysisObjectId: state === 'candidate_ready' ? row.result_analysis_object_id || null : null,
     resultArtifactId: state === 'candidate_ready' ? row.result_artifact_id || null : null,
@@ -131,7 +140,7 @@ function publicRun(row) {
     createdAt: row.created_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
-    canceledAt: row.canceled_at,
+    canceledAt: row.canceled_at
   };
 }
 
@@ -190,7 +199,10 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         throw codedError('STUDY_AMENDMENT_REQUIRED', 'Plan multi-sample runs on the first dataset of the sample sheet.', 409);
       }
       for (const entry of study.inputs_json) {
-        const { rows: pinned } = await client.query('SELECT * FROM datasets WHERE id = $1 AND project_id = $2', [entry.datasetId, study.project_id]);
+        const { rows: pinned } = await client.query('SELECT * FROM datasets WHERE id = $1 AND project_id = $2', [
+          entry.datasetId,
+          study.project_id
+        ]);
         if (!pinned[0] || pinned[0].sha256 !== entry.datasetSha256) {
           throw codedError('INPUT_CHANGED', 'A pinned sample is no longer available in its exact version.', 409);
         }
@@ -221,8 +233,19 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     }
     for (const [key, allowed] of Object.entries(variations)) {
       const value = Object.prototype.hasOwnProperty.call(choices, key) ? choices[key] : allowed[0];
-      const freeText=allowed.includes('*')&&['geneList','groupMap','populationLabel'].includes(schema[key]?.type);
-      if(freeText){try{require('../scientificChoices').scientificText(schema[key].type,value);}catch(error){throw codedError('STUDY_CONSTRAINT_VIOLATION',error.message,409);}}
+      // Defense in depth: a design parameter is never varied, even if a study
+      // row says otherwise. Only display gene panels accept free text.
+      if (schema[key]?.role === 'design') {
+        throw codedError('PROTECTED_PARAMETER', `'${key.slice(0, 64)}' is a study design choice and must be fixed.`, 409);
+      }
+      const freeText = allowed.includes('*') && schema[key]?.type === 'geneList';
+      if (freeText) {
+        try {
+          require('../scientificChoices').scientificText(schema[key].type, value);
+        } catch (error) {
+          throw codedError('STUDY_CONSTRAINT_VIOLATION', error.message, 409);
+        }
+      }
       if (!freeText && !allowed.some((candidate) => sameValue(candidate, value))) {
         throw codedError('STUDY_AMENDMENT_REQUIRED', `That value of '${key}' is outside the study's permitted options.`, 409);
       }
@@ -237,7 +260,16 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       await liveDelegation(client, actor);
       const study = await studyForAgent(client, actor, body.studyId);
       const release = await approvedRelease(client, study);
-        if (!(study.execution_target==='slurm'?release.definition.trust.slurmRuntime:release.definition.trust.runtime)) throw codedError('WORKFLOW_RUNTIME_REQUIRED', 'Configure and approve a pinned workflow runtime before planning.', 409);
+        if (
+          !(study.execution_target === 'slurm'
+            ? release.definition.trust.slurmRuntime
+            : release.definition.trust.runtime)
+        )
+          throw codedError(
+            'WORKFLOW_RUNTIME_REQUIRED',
+            'Configure and approve a pinned workflow runtime before planning.',
+            409
+          );
       if (typeof body.datasetId !== 'string') throw codedError('INVALID_INPUT', 'datasetId is required.', 400);
       const { input } = await pinnedInput(client, study, body.datasetId, release);
       const choices = resolveChoices(study, body.choices, release.definition.parameterSchema);
@@ -261,31 +293,64 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       const expiresAt = new Date(clock[0].expires_at).toISOString();
       let sampleInputs;
       if(release.jobType==='seurat.multisample.v1') {
-        if(parameters.samples[0].datasetId!==input.datasetId)throw codedError('INVALID_INPUT','Use the first registered sample as the dataset anchor.',400);
+        if (parameters.samples[0].datasetId !== input.datasetId)
+          throw codedError('INVALID_INPUT', 'Use the first registered sample as the dataset anchor.', 400);
         sampleInputs=[];
-        for(const sample of parameters.samples)sampleInputs.push((await pinnedInput(client,study,sample.datasetId,release,{secondary:true})).input);
+        for (const sample of parameters.samples)
+          sampleInputs.push((await pinnedInput(client, study, sample.datasetId, release, { secondary: true })).input);
       }
       const spec = {
         schema: 'traceomics.execution-plan.v1',
         projectId: actor.delegation.projectId,
         actor: {
-          kind: 'agent', principalId: actor.principalId, sponsorUserId: actor.sponsorUserId,
-          delegationId: actor.delegation.id, delegationVersion: actor.delegation.version,
-          policySchema: actor.delegation.policy.schema,
+          kind: 'agent',
+          principalId: actor.principalId,
+          sponsorUserId: actor.sponsorUserId,
+          delegationId: actor.delegation.id,
+          delegationVersion: actor.delegation.version,
+          policySchema: actor.delegation.policy.schema
         },
-        release: { id: release.id, key: release.key, version: release.version, digest: release.digest, jobType: release.jobType },
+        release: {
+          id: release.id,
+          key: release.key,
+          version: release.version,
+          digest: release.digest,
+          jobType: release.jobType
+        },
         approvalId: study.approval_id,
         study: { id: study.id },
-        inputs: { datasetId: input.datasetId, datasetSha256: input.datasetSha256, analysisObjectId: input.analysisObjectId, ...(sampleInputs?{samples:sampleInputs}:{}) },
+        inputs: {
+          datasetId: input.datasetId,
+          datasetSha256: input.datasetSha256,
+          analysisObjectId: input.analysisObjectId,
+          ...(sampleInputs ? { samples: sampleInputs } : {})
+        },
         choices,
         parameters,
-        ...(release.jobType==='condition.pseudobulk_de.v1'?{design:await require('../workflowTrust/design').pinDesign(client,actor.delegation.projectId,input.analysisObjectId,parameters.contrastId)}:{}),
+        // Any plan that names a contrast pins its sample snapshot by digest;
+        // the claim-time recheck refuses the run if the design changed.
+        ...(typeof parameters.contrastId === 'string'
+          ? {
+              design: await require('../workflowTrust/design').pinDesign(
+                client,
+                actor.delegation.projectId,
+                input.analysisObjectId,
+                parameters.contrastId
+              )
+            }
+          : {}),
         resources: release.definition.resources,
         executionTarget: study.execution_target || 'local',
         outputs: release.definition.outputs,
         validation: release.definition.validation,
-        trust: {...release.definition.trust,runtime:study.execution_target==='slurm'?release.definition.trust.slurmRuntime:release.definition.trust.runtime},
-        expiresAt,
+        trust: {
+          ...release.definition.trust,
+          runtime:
+            study.execution_target === 'slurm'
+              ? release.definition.trust.slurmRuntime
+              : release.definition.trust.runtime
+        },
+        expiresAt
       };
       const canonical = canonicalJson(spec);
       const digest = sha256(canonical);
@@ -374,7 +439,11 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         throw codedError('PLAN_STALE', 'The approved release changed after planning. Create a new plan.', 409);
       }
       const { dataset } = await pinnedInput(client, study, plan.inputs.datasetId, release);
-      for(const pinned of plan.inputs.samples||[]){const current=await pinnedInput(client,study,pinned.datasetId,release,{secondary:true});if(current.input.datasetSha256!==pinned.datasetSha256)throw codedError('INPUT_CHANGED','A multi-sample input changed.',409);}
+      for (const pinned of plan.inputs.samples || []) {
+        const current = await pinnedInput(client, study, pinned.datasetId, release, { secondary: true });
+        if (current.input.datasetSha256 !== pinned.datasetSha256)
+          throw codedError('INPUT_CHANGED', 'A multi-sample input changed.', 409);
+      }
 
       const executionTarget = plan.executionTarget || 'local';
       if (executionTarget === 'slurm' && !slurmConfig().enabled) {

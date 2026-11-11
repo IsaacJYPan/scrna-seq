@@ -26,6 +26,8 @@ function publicRelease(release, approval = null) {
     resources: release.definition.resources,
     inputs: release.definition.inputs,
     outputs: release.definition.outputs,
+    // Metrics a study may rank trials by; inferential ones are listed but not selectable.
+    selectableMetrics: release.definition.selectableMetrics || [],
     readableSource: release.readableSource || null,
     // Library methods: upstream source, citation, declared deviations, metrics.
     method: release.definition.method || null,

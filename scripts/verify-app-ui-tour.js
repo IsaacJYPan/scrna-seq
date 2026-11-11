@@ -666,12 +666,12 @@ async function pipelineLayoutTour(browser, theme, width) {
     await method.selectOption('LogNormalize');
     check(`${label}: LogNormalize scale factor retained`, await ui.getByLabel('Scale factor', { exact: true }).inputValue() === '12000');
     await click(ui.getByText('Reproducibility', { exact: true }));
-    await ui.getByLabel('Seed (optional)', { exact: true }).fill('42');
+    await ui.getByLabel('Seed (default 42)', { exact: true }).fill('42');
     await shot('edited-settings');
     await click(guided); await click(automatic);
     await navigate(page, 'qc'); await navigate(page, 'umap'); await navigate(page, 'pipeline-manager');
     check(`${label}: draft survives approach and page round trips`, await ui.getByLabel('Resolution', { exact: true }).inputValue() === '0.65'
-      && await ui.getByLabel('PCA components', { exact: true }).inputValue() === '35' && await ui.getByLabel('Seed (optional)', { exact: true }).inputValue() === '42');
+      && await ui.getByLabel('PCA components', { exact: true }).inputValue() === '35' && await ui.getByLabel('Seed (default 42)', { exact: true }).inputValue() === '42');
     for (const target of [automatic, guided, ui.getByRole('button', { name: 'Refresh input files', exact: true })]) {
       await target.scrollIntoViewIfNeeded(); await page.mouse.move(1, 1); await pause(200);
       const before = await target.boundingBox(); await target.hover();

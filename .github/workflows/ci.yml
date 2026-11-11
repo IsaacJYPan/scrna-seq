@@ -1,8 +1,12 @@
 name: CI Pipeline
 
 # Private-repo GitHub Actions minutes are limited, so the full CI suite runs
-# on pull requests plus manual dispatch.
+# on pull requests plus manual dispatch. Pushes to main run the fast preflight
+# so the head of main always has a recorded result.
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
@@ -72,6 +76,7 @@ jobs:
   browser-preflight:
     name: Browser release preflight
     needs: preflight
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -123,7 +128,7 @@ jobs:
 
   test:
     needs: browser-preflight
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 150
 
@@ -157,10 +162,18 @@ jobs:
 
       - name: Install PostgreSQL client tools
         # The real backup/restore drill uses pg_dump and pg_restore against the
-        # isolated CI service database.
-        run: >-
-          sudo apt-get update &&
-          sudo apt-get install -y --no-install-recommends postgresql-client
+        # isolated CI service database. The runner's own postgresql-client is
+        # newer than the PostgreSQL 16 server, and a newer pg_dump writes
+        # settings PostgreSQL 16 rejects on restore, so install the 16 client
+        # that production uses from the PostgreSQL apt repository.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          echo "PG_DUMP_PATH=/usr/lib/postgresql/16/bin/pg_dump" >> "$GITHUB_ENV"
+          echo "PG_RESTORE_PATH=/usr/lib/postgresql/16/bin/pg_restore" >> "$GITHUB_ENV"
+          /usr/lib/postgresql/16/bin/pg_dump --version
 
       - name: Validate and build deployable Node images
         run: |
@@ -201,6 +214,8 @@ jobs:
             any::org.Hs.eg.db
             any::org.Mm.eg.db
             any::GO.db
+            any::edgeR
+            any::limma
             any::BiocNeighbors
             any::NMF
             github::immunogenomics/presto@a24772a135c7895a8183b007376050556c60a05b
@@ -276,6 +291,15 @@ jobs:
       - name: Verify ordered live R execution provenance
         run: npm run test:r-execution-order
 
+      - name: Verify condition pseudobulk uses raw counts
+        run: npm run test:r-condition-pseudobulk
+
+      - name: Verify workbench condition DE uses the registered contrast
+        run: npm run test:r-condition-study-contrast
+
+      - name: Verify strict pipeline parameters and mitochondrial QC
+        run: npm run test:r-pipeline-parameters
+
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 
@@ -308,7 +332,7 @@ jobs:
   r-image-smoke:
     name: Build and boot production R image
     needs: browser-preflight
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

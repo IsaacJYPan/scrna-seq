@@ -55,6 +55,10 @@ function pipelineReceiptPayload({ checksumSha256, sizeBytes, seurat = false }) {
       used_seed: 42,
     },
     ...(seurat ? { warnings: [] } : {}),
+    // These jobs run with default parameters; the runtime reports them.
+    effective_parameters: seurat
+      ? require('./seuratPipeline').validateSeuratPipelineParams({}).params
+      : require('./pbmcPipeline').validatePbmcPipelineParams({}).params,
     checkpoint: {
       saved: true,
       checksum_sha256: checksumSha256,
