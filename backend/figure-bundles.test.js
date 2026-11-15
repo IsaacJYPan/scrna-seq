@@ -152,4 +152,35 @@ describe.skipIf(!CONFIGURED)('figure bundles', () => {
     const labelled = await make('labels');
     expect((await labelled('/figures')).data.figures[0].title).toBe('Private title');
   });
+
+  it('includes steps from the live R session journal, ordered by the session counter', async () => {
+    const { alice, project } = await setup();
+    const base = `/api/projects/${project.id}`;
+    const object = (await post(`${base}/analysis-objects`, alice.token, { objectType: 'seurat' })).data;
+    const generation = 'a'.repeat(64);
+    const live = async (order, operation, code) => db.query(
+      `INSERT INTO live_execution_records (id, project_id, owner_user_id, analysis_object_id, operation, kernel_generation,
+         kernel_order, live_revision, source_sha256, record_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9::jsonb, '2026-01-01T00:00:00Z')`,
+      [`lex_${String(order).padStart(24, '0')}`, project.id, alice.user.id, object.id, operation, generation, order,
+        'b'.repeat(64), JSON.stringify({ source: { language: 'R', code }, parameters: {}, environment: { rVersion: '4.5.1', packages: [] } })]
+    );
+    // Same timestamp: only the execution counter orders them.
+    await live(3, 'pca', 'obj <- RunPCA(obj)');
+    await live(5, 'quality-control', 'obj <- subset(obj, nFeature_RNA > 200)');
+    await live(1, 'load', 'obj <- CreateSeuratObject(Read10X("x"))');
+    await live(2, 'normalize', 'obj <- NormalizeData(obj)');
+    await live(4, 'deg', 'markers <- FindAllMarkers(obj)');
+    const fig = (await post(`${base}/figures`, alice.token, { analysisObjectId: object.id, plotType: 'FeaturePlot', params: { features: ['CD3E'] } })).data;
+    const res = await post(`${base}/figures/bundles`, alice.token, { figureIds: [fig.id] });
+    expect(res.status).toBe(200);
+    // A feature plot reads normalized data and a UMAP. No UMAP was recorded,
+    // so nothing it reads comes from PCA, and marker work is never read.
+    expect(res.data.steps.map((step) => [step.operation, step.source])).toEqual([
+      ['load', 'live-session'], ['normalize', 'live-session'], ['quality-control', 'live-session'],
+    ]);
+    expect(res.data.omittedSteps.map((step) => step.operation).sort()).toEqual(['deg', 'pca']);
+    expect(res.data.unresolved).toEqual([{ objectId: object.id, parts: ['umap'] }]);
+    expect(res.data.summary.project.steps).toBe(5);
+  });
 });

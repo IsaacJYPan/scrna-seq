@@ -67,7 +67,9 @@ function time(value) {
 }
 
 function compareChronological(a, b) {
-  return time(a.createdAt) - time(b.createdAt) || String(a.id).localeCompare(String(b.id));
+  return time(a.createdAt) - time(b.createdAt)
+    || (Number(a.sequence) || 0) - (Number(b.sequence) || 0)
+    || String(a.id).localeCompare(String(b.id));
 }
 
 const MAX_VISITS = 2000;
@@ -135,7 +137,7 @@ function planSelection(graph, seeds) {
       if (satisfied.length === 0) continue;
       addNode({
         id: record.id, kind: 'step', objectId, operation: record.operation,
-        createdAt: record.createdAt, conservative: Boolean(effects.conservative),
+        createdAt: record.createdAt, sequence: record.sequence, conservative: Boolean(effects.conservative),
       });
       addEdge(objectId, record.id);
       for (const part of satisfied) {
@@ -266,6 +268,7 @@ function topologicalOrder(nodes, edgePairs) {
     const right = byId.get(b);
     return (time(left.createdAt) - time(right.createdAt))
       || (KIND_RANK[left.kind] - KIND_RANK[right.kind])
+      || (Number(left.sequence) || 0) - (Number(right.sequence) || 0)
       || String(a).localeCompare(String(b));
   };
   const ready = nodes.filter((node) => indegree.get(node.id) === 0).map((node) => node.id).sort(compare);

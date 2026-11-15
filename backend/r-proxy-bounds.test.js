@@ -153,10 +153,11 @@ describe('bounded authenticated R proxy policy', () => {
     // Aborted during the ownership lookup: 'close' already fired.
     const gone = fakeResponse();
     gone.closed = true;
-    admission({ user: { id: 1 }, destroyed: true }, gone, next);
+    admission({ user: { id: 1 }, socket: { destroyed: true } }, gone, next);
     expect(next).not.toHaveBeenCalled();
+    // A parsed POST body leaves req.destroyed set while the client still waits.
     const following = fakeResponse();
-    admission({ user: { id: 1 } }, following, next);
+    admission({ user: { id: 1 }, destroyed: true, socket: { destroyed: false } }, following, next);
     expect(next).toHaveBeenCalledTimes(1);
     expect(following.statusCode).toBe(200);
   });

@@ -92,6 +92,11 @@ async function collectLineage(userId, projectId, seedObjectIds) {
   return { objects, edges };
 }
 
+// Recorded steps come from two places: project provenance records, and the
+// server-verified live execution journal that the interactive R session
+// writes for every step (its code, parameters and package versions). The
+// journal belongs to the person who ran the session, which is the analysis
+// object's owner; the object has already passed the caller's visibility check.
 async function collectRecords(projectId, objectIds) {
   if (objectIds.length === 0) return { byObject: new Map(), byId: new Map() };
   const { rows } = await db.query(
@@ -99,15 +104,35 @@ async function collectRecords(projectId, objectIds) {
       ORDER BY created_at, id`,
     [String(projectId), objectIds]
   );
+  const { rows: liveRows } = await db.query(
+    `SELECT live.* FROM live_execution_records live
+       JOIN analysis_objects object ON object.id = live.analysis_object_id
+      WHERE live.project_id = $1 AND live.analysis_object_id = ANY($2::text[])
+        AND live.owner_user_id = object.owner_user_id
+      ORDER BY live.created_at, live.kernel_order, live.id`,
+    [String(projectId), objectIds]
+  );
+  for (const row of liveRows) {
+    const record = typeof row.record_json === 'string' ? parseJson(row.record_json, {}) : (row.record_json || {});
+    rows.push({
+      id: row.id, analysis_object_id: row.analysis_object_id, operation: row.operation,
+      // Within one R session the execution counter breaks timestamp ties.
+      created_at: row.created_at, sequence: Number(row.kernel_order), parent_ids: '[]', language: record.source?.language || 'R',
+      language_version: record.environment?.rVersion || null,
+      packages: JSON.stringify(record.environment?.packages || []),
+      parameters: JSON.stringify(record.parameters || {}),
+      script: record.source?.code || '', job_id: null, live: true,
+    });
+  }
   const byObject = new Map();
   const byId = new Map();
   for (const row of rows) {
     const record = {
       id: row.id, objectId: row.analysis_object_id, operation: row.operation || 'unknown',
-      createdAt: row.created_at, parentIds: parseJson(row.parent_ids, []),
+      createdAt: row.created_at, sequence: row.sequence ?? null, parentIds: parseJson(row.parent_ids, []),
       language: row.language, languageVersion: row.language_version,
       packages: parseJson(row.packages, []), parameters: parseJson(row.parameters, {}),
-      script: row.script || '', jobId: row.job_id || null,
+      script: row.script || '', jobId: row.job_id || null, source: row.live ? 'live-session' : 'provenance',
     };
     byId.set(record.id, record);
     if (!byObject.has(record.objectId)) byObject.set(record.objectId, []);
@@ -158,12 +183,13 @@ async function countProject(projectId) {
   const [objects, jobs, records, figures] = await Promise.all([
     db.query('SELECT count(*)::int AS n FROM analysis_objects WHERE project_id = $1', [pid]),
     db.query(`SELECT count(*)::int AS n FROM jobs WHERE project_id = $1 AND status = 'succeeded'`, [pid]),
-    db.query('SELECT count(*)::int AS n FROM provenance WHERE project_id = $1', [pid]),
+    db.query(`SELECT (SELECT count(*) FROM provenance WHERE project_id = $1)
+                   + (SELECT count(*) FROM live_execution_records WHERE project_id = $1) AS n`, [pid]),
     db.query('SELECT count(*)::int AS n FROM figure_collection WHERE project_id = $1', [pid]),
   ]);
   return {
     objects: objects.rows[0].n, jobs: jobs.rows[0].n,
-    steps: records.rows[0].n, figures: figures.rows[0].n,
+    steps: Number(records.rows[0].n), figures: figures.rows[0].n,
   };
 }
 
@@ -249,6 +275,7 @@ function assembleScript(bundle) {
     `# Selection: ${[...bundle.selection.figureIds, ...bundle.selection.analysisObjectIds].join(', ')}`,
     `# Kept ${bundle.summary.kept.steps} of ${bundle.summary.project.steps} recorded steps and ${bundle.summary.kept.objects} of ${bundle.summary.project.objects} objects.`,
     '# Steps appear in dependency order; every step follows everything it reads.',
+    '# Paths shown as <...> are server-managed inputs: point them at your copy of the data.',
     '',
     'suppressPackageStartupMessages({ library(Seurat); library(ggplot2) })',
     '',
@@ -331,7 +358,7 @@ async function buildFigureBundle(userId, projectId, input = {}) {
   const steps = [...records.byId.values()].filter((record) => keptIds.has(record.id))
     .map((record) => ({
       id: record.id, objectId: record.objectId, operation: record.operation,
-      createdAt: record.createdAt, language: record.language, languageVersion: record.languageVersion,
+      createdAt: record.createdAt, source: record.source, language: record.language, languageVersion: record.languageVersion,
       packages: record.packages, parameters: record.parameters, script: record.script,
       scriptSha256: crypto.createHash('sha256').update(record.script, 'utf8').digest('hex'),
       reads: operationEffects(record.operation).reads, writes: operationEffects(record.operation).writes,

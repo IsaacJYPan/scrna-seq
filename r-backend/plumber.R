@@ -2469,7 +2469,12 @@ function(res, req) {
       removed_doublets = 0,
       median_mt = round(median(global_obj$percent.mt), 2)
     ),
-    script_text = paste0("obj <- subset(obj, subset = nFeature_RNA > ", feat_min, " & nFeature_RNA < ", feat_max, " & percent.mt < ", mt_limit, " & nCount_RNA > ", count_min, ")"),
+    # The filter reads percent.mt, so the recorded code must compute it the
+    # same way this handler does when the loaded object lacks it.
+    script_text = paste0(
+      "if (!\"percent.mt\" %in% colnames(obj[[]])) obj[[\"percent.mt\"]] <- PercentageFeatureSet(obj, pattern = \"^MT-\")\n",
+      "obj <- subset(obj, subset = nFeature_RNA > ", feat_min, " & nFeature_RNA < ", feat_max, " & percent.mt < ", mt_limit, " & nCount_RNA > ", count_min, ")"
+    ),
     operation = "quality-control",
     parameters = list(
       mt_threshold = mt_limit, 

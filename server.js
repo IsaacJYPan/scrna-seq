@@ -785,7 +785,9 @@ function createRProxyAdmission({ probeIdle = null } = {}) {
     // lookup) was still running. Its 'close' event has then already fired and
     // would never release a slot taken now, leaving the person's only R slot
     // held until the process restarts. Nothing can be sent anyway: stop here.
-    if (req.destroyed || req.aborted || res.destroyed || res.closed || res.writableEnded) {
+    // Check the response and socket only: a request whose body was fully
+    // parsed is already 'destroyed' while its client is still waiting.
+    if (res.destroyed || res.closed || res.writableEnded || req.socket?.destroyed) {
       return undefined;
     }
 

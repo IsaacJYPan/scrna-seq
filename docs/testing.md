@@ -88,3 +88,28 @@ scatter and heatmap graphics.
 responsive step rows, settings, and navigation. Tour outputs are in
 `playwright/report/ui-audit/`, with videos in `walkthrough/` and pipeline checks
 in `pipeline-layout/`.
+
+## PBMC3k tutorial through the app
+
+This check works through the Seurat PBMC3k guided clustering tutorial in the
+real app (a person's clicks in Chromium against the dev stack with real R), then
+replays the figure history the app exports and compares it, cell by cell, with
+Seurat run directly.
+
+```bash
+# 10x PBMC3k counts in data/pbmc3k/filtered_gene_bc_matrices/hg19 (see scripts/download_sample_data.js)
+Rscript scripts/pbmc3k_tutorial_reference.R data/pbmc3k/filtered_gene_bc_matrices/hg19 ref.json 42 0
+npm run dev    # in another shell
+node scripts/verify-pbmc3k-tutorial-ui.js out/   # CHROMIUM_PATH=... to use a system browser
+Rscript scripts/compare-pbmc3k-tutorial.R out/figure-bundle.R data/pbmc3k/filtered_gene_bc_matrices/hg19 ref.json
+```
+
+The app's defaults for this dataset are the tutorial's (QC 200–2,500 genes and
+< 5 % mitochondrial reads, LogNormalize, 2,000 variable genes, 10 PCs,
+resolution 0.5, PCA/UMAP seed 42, clustering seed 0). On R 4.3 with Seurat
+5.0.1 the run gives 2,700 → 2,638 cells and nine clusters of 684, 481, 476, 344,
+291, 162, 155, 32 and 13 cells, and the exported script reproduces the direct
+run exactly: identical cells and variable genes, PCA standard deviations within
+5e-7, the same cluster for every cell, and UMAP coordinates within the
+reference's 4-decimal rounding. Steps unrelated to the saved figure (the
+figure-export render) are left out of the exported history.
