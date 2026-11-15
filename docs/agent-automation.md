@@ -387,6 +387,52 @@ compute targets list (`GET …/compute-targets`, `traceomics targets list`) show
 configuration, not a proof of isolation: kernel and scheduler vulnerabilities,
 shared filesystems outside the run directory, and site policy still matter.
 
+### Remote folders on the cluster
+
+A person creating a cluster sandbox can pin up to five named folders on the
+cluster, for example `raw = /scratch/lab/pbmc_runs`. The agent can then work
+with the data that lives there without ever holding an SSH key or a shell:
+
+- `GET …/sandboxes/:id/remote/:root?path=` lists a folder (names, types, sizes;
+  at most 500 entries) and `GET …/sandboxes/:id/remote/:root/file?path=&offset=`
+  reads a file: text in pages of 256 KiB, PNG/SVG images up to 2 MiB, binary
+  files as metadata only.
+- `run_r_script` takes `remoteInputs: [{ root, path }]` (at most five). The
+  worker copies each file on the cluster into the run's read-only
+  `work/input/files/`, records its size and SHA-256 in
+  `agent_sandbox_remote_inputs`, and the script reads it with
+  `input_path("raw/filtered/matrix.h5")` or `read_input(...)`.
+
+Enforcement is on the server, below the MCP and CLI: paths are relative, use a
+fixed character set and contain no `.`/`..` parts; every path is resolved with
+`realpath -e` on the cluster and accepted only inside the folder's real path,
+so symbolic links cannot lead out; only `realpath`, `stat`, `find`, `dd`, `cp`,
+`chmod` and `sha256sum` are run, with every argument quoted; after a copy the
+source must still resolve to the same file. Agents see folder names, not their
+cluster paths. Each listing and read is an `automation_audit_events` row
+(`sandbox.remote-listed`, `sandbox.remote-read`), and a refused escape is
+recorded as `denied` with `REMOTE_PATH_OUTSIDE_ROOT`. The folders are fixed
+when the sandbox is created; close it and make another to change them. The
+MCP server also refuses absolute paths and `..` before sending anything.
+
+The boundary is TraceOmics' SSH account on the login node: it must be able to
+read the pinned folders, and anything that account can read inside them can be
+shown to the agent. Someone with write access to a pinned folder could swap a
+path component for a link between the check and the copy; the post-copy check
+narrows but does not close that window, so pin folders only that people you
+trust can write.
+
+### Review flags for custom code
+
+Every sandbox run shows its reviewer a list of lines to check before promoting
+(`reviewFlags` on the run, from `shared/scriptReviewFlags.mjs`): shell, native
+or dynamically built code; network or package-install attempts (which the
+sandbox blocks anyway); file deletion; writes outside the output helpers; and
+scientific changes that alter later results: removing cells or features,
+overwriting metadata or identities, and random steps before any `set.seed()`.
+Flags are guidance for the person, not a security control: isolation comes from
+the sandbox, and nothing is accepted until a person promotes it.
+
 ## Agent reports (phase 5)
 
 An agent with `report.write` can draft a report (for example a paper) section by
@@ -538,9 +584,20 @@ Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
 `get_plan`, `submit_run`, `get_run`, `get_run_results`, `cancel_run`,
 `create_proposal`, `list_proposals`, `get_proposal`, `list_sandboxes`,
 `get_sandbox`, `run_r_script`, `get_sandbox_run`, `read_sandbox_file`,
-`cancel_sandbox_run`, `create_report`, `list_reports`, `get_report`, and
-`write_report_section`. `read_sandbox_file` returns PNG figures as MCP image
-content, so a multimodal agent can look at its own plots. A refusal from the
+`cancel_sandbox_run`, `list_remote_files`, `read_remote_file`, `list_figures`,
+`view_figure`, `get_figure_history`, `create_report`, `list_reports`,
+`get_report`, and `write_report_section`. `read_sandbox_file`,
+`read_remote_file` and `view_figure` return PNG images as MCP image content, so
+a multimodal agent can look at its own plots, at figures people saved in the
+project gallery, and at plots in a pinned cluster folder. `get_figure_history`
+returns the dependency-ordered steps behind selected figures (see
+[analysis workflows](analysis-workflows.md#figure-gallery-and-history-export)).
+
+An agent can therefore work three ways, each enforced by the server: run
+certified pipelines and trusted methods inside studies (`create_plan`,
+`submit_run`); run its own R in a sandbox, where every run is flagged for and
+held until a person's review; and read the evidence (figures, results, pinned
+remote data) it needs to decide what to do next. A refusal from the
 server (for example `BUDGET_EXCEEDED`) comes back as a tool error with the
 server's JSON. Tools that create something derive their request id from the
 content, so a repeated call after a lost reply returns the original.

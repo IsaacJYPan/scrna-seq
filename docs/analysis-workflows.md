@@ -175,6 +175,45 @@ deadline expires, inspect the failed request, refresh the source folder, and sta
 a new import explicitly. Public demos disable this feature; a private deployment
 with no authorized data roots shows an empty picker until an operator grants one.
 
+## Figure gallery and history export
+
+**Save Figure** in any plot (UMAP, feature, dot, heatmap, violin) saves the
+figure to the current project's gallery, linked to the analysis it was drawn
+from, with its settings and a preview. This works even where server file
+export is off. Without a project, figures go to your private gallery as before.
+
+In **Figure Gallery** you can:
+
+- search titles, tags and captions, filter by plot type or collection, and see
+  figures grouped by collection (for example "Figure 2");
+- open a figure to see the full preview and its saved settings, and edit its
+  title, collection, tags and caption (owners and admins can edit any figure,
+  analysts the ones they saved; viewers can look and export);
+- choose **Edit figure** to reopen the figure editor with the saved settings on
+  the analysis it came from, and save a new version; the gallery shows the
+  latest version and lists earlier ones;
+- select figures and **Move** them into a collection, or **Export with
+  history**.
+
+**Export with history** keeps only what the selected figures depend on. Each
+recorded step reads and writes parts of the Seurat object (cells, counts,
+normalized data, variable features, scaled data, PCA, clusters, UMAP, markers).
+Working backwards from each figure, a step is kept only when it writes a part
+that the figure, or another kept step, reads: a UMAP keeps load, QC,
+normalization, PCA, clustering and UMAP, but not marker tables computed later
+or a clustering that was overwritten. Checkpoints and forks are followed into
+the parent analysis up to the moment they were taken; a server job that
+produced an analysis keeps everything before it. Steps recorded after a figure
+was saved are not used for it. Code whose effects are unknown (console or
+custom R) is kept, and marked, because it might have changed anything.
+
+The kept objects, jobs and steps are ordered so that each comes after
+everything it reads, and the export contains one R script (each recorded
+step's code in that order, then the plotting code for each figure) plus a JSON
+manifest listing what was kept, what was left out, and any state that has no
+recorded step. The same export is `POST /api/projects/:id/figures/bundles`
+(`format=r` for the script alone) and is recorded in the project audit log.
+
 ## Ranked Pathway Enrichment
 
 The Pathway Enrichment tab now launches `enrichment.gsea.v1` for one selected

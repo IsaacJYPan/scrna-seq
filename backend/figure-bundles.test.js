@@ -115,4 +115,41 @@ describe.skipIf(!CONFIGURED)('figure bundles', () => {
     expect((await api(server, `${base}/${aliceFig.id}`, { method: 'DELETE', token: alice.token })).status).toBe(204);
     expect((await api(server, `${base}/${aliceFig.id}`, { token: alice.token })).status).toBe(404);
   });
+
+  it('lets a delegated agent list, view and trace figures as its sponsor sees them', async () => {
+    const { alice, project } = await setup();
+    const base = `/api/projects/${project.id}`;
+    const object = (await post(`${base}/analysis-objects`, alice.token, { objectType: 'seurat' })).data;
+    await step(project.id, alice.token, object.id, 'load', 'obj <- Read10X_h5("x.h5")\n');
+    await step(project.id, alice.token, object.id, 'umap', 'obj <- RunUMAP(obj, dims = 1:10)\n');
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    const fig = (await post(`${base}/figures`, alice.token, {
+      analysisObjectId: object.id, plotType: 'UMAP', title: 'Private title', thumbnailB64: png,
+    })).data;
+    const make = async (disclosureProfile) => {
+      const delegation = await post(`${base}/agent-delegations`, alice.token, {
+        agentName: `Figure agent ${disclosureProfile}`, capabilities: ['metadata.read', 'results.read'], disclosureProfile,
+      });
+      expect(delegation.status, JSON.stringify(delegation.data)).toBe(201);
+      const token = delegation.data.credential.token;
+      return (path, options = {}) => api(server, `/api/automation/v1/projects/${project.id}${path}`, {
+        ...options, headers: { Authorization: `Bearer ${token}` },
+      });
+    };
+    const agent = await make('identifiers');
+    const listed = await agent('/figures');
+    expect(listed.status).toBe(200);
+    expect(listed.data.figures).toEqual([expect.objectContaining({ id: fig.id, plotType: 'UMAP', hasPreview: true })]);
+    expect(listed.data.figures[0].title).toBeUndefined();
+    const viewed = await agent(`/figures/${fig.id}`);
+    expect(viewed.data.figure.image).toEqual({ mimeType: 'image/png', base64: 'iVBORw0KGgo=' });
+    expect((await agent('/figures/fig_deadbeef')).status).toBe(404);
+    const bundle = await agent('/figures/bundles', { method: 'POST', body: { figureIds: [fig.id] } });
+    expect(bundle.status, JSON.stringify(bundle.data)).toBe(200);
+    expect(bundle.data.bundle.script).toContain('RunUMAP');
+    expect((await agent('/figures/bundles', { method: 'POST', body: {} })).status).toBe(400);
+
+    const labelled = await make('labels');
+    expect((await labelled('/figures')).data.figures[0].title).toBe('Private title');
+  });
 });

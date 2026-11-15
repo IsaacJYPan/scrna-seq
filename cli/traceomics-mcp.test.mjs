@@ -137,4 +137,37 @@ describe('traceomics MCP server', () => {
     for(const extra of [{limit:101},{offset:10001},{path:'/private'},{code:'system(1)'},{format:'html'}])expect((await server.callTool('preview_artifact',{...args,...extra})).result.isError).toBe(true);
     expect(calls).toHaveLength(0);
   });
+
+  it('reaches remote folders only by relative path and refuses traversal before any request', async () => {
+    const { calls, fetchImpl } = recordingFetch(200, { kind: 'text', text: 'a,b\n', root: 'raw', path: 'x.csv', offset: 0, truncated: false });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const sandboxId = `sbx_${'a'.repeat(24)}`;
+    for (const path of ['/etc/passwd', '../x', 'a/../../b', 'a/./b']) {
+      const reply = await server.callTool('read_remote_file', { projectId: 'proj_1', sandboxId, root: 'raw', path });
+      expect(reply.result.isError, path).toBe(true);
+    }
+    expect((await server.callTool('list_remote_files', { projectId: 'proj_1', sandboxId, root: '../etc' })).result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    const read = await server.callTool('read_remote_file', { projectId: 'proj_1', sandboxId, root: 'raw', path: 'meta/x.csv' });
+    expect(read.result.content[0].text).toBe('a,b\n');
+    expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/${sandboxId}/remote/raw/file?path=meta%2Fx.csv`);
+    await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1',
+      remoteInputs: [{ root: 'raw', path: 'filtered/matrix.h5' }] });
+    expect(JSON.parse(calls[1].init.body).remoteInputs).toEqual([{ root: 'raw', path: 'filtered/matrix.h5' }]);
+    expect((await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1',
+      remoteInputs: [{ root: 'raw', path: '/abs' }] })).result.isError).toBe(true);
+  });
+
+  it('shows saved figures as images and fetches their history', async () => {
+    const figure = { figure: { id: 'fig_1', plotType: 'UMAP', image: { mimeType: 'image/png', base64: 'iVBORw0KGgo=' } } };
+    const { calls, fetchImpl } = recordingFetch(200, figure);
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const viewed = await server.callTool('view_figure', { projectId: 'proj_1', figureId: 'fig_1' });
+    expect(viewed.result.content[0]).toEqual({ type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' });
+    expect(JSON.parse(viewed.result.content[1].text)).toEqual({ id: 'fig_1', plotType: 'UMAP' });
+    await server.callTool('get_figure_history', { projectId: 'proj_1', figureIds: ['fig_1', 'fig_2'] });
+    expect(calls[1]).toMatchObject({ url: 'http://127.0.0.1:9/api/automation/v1/projects/proj_1/figures/bundles' });
+    expect(JSON.parse(calls[1].init.body)).toEqual({ figureIds: ['fig_1', 'fig_2'] });
+    expect((await server.callTool('get_figure_history', { projectId: 'proj_1', figureIds: ['../x'] })).result.isError).toBe(true);
+  });
 });
