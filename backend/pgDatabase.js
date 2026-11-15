@@ -3622,6 +3622,7 @@ const MAX_FIGURE_TAG_CHARS = 40;
 const MAX_FIGURE_COLLECTION_CHARS = 80;
 const MAX_FIGURE_TITLE_CHARS = 200;
 const MAX_FIGURE_NOTES_CHARS = 4000;
+const MAX_FIGURE_THUMBNAIL_CHARS = 2 * 1024 * 1024;
 
 // Normalise the organisation fields a figure can carry.
 function normalizeFigureOrganization(input = {}) {
@@ -3757,6 +3758,11 @@ async function createProjectFigure(userId, projectId, input = {}) {
   assertPlainObject(params, 'INVALID_PARAMETERS', 'params must be a plain JSON object.');
   const plotType = input.plotType === undefined || input.plotType === null ? 'Unknown' : input.plotType;
   if (typeof plotType !== 'string' || plotType === '') throw codedError('INVALID_PLOT_TYPE', 'plotType must be a non-empty string.');
+  const thumbnail = input.thumbnailB64 != null ? String(input.thumbnailB64) : '';
+  if (thumbnail && (thumbnail.length > MAX_FIGURE_THUMBNAIL_CHARS
+      || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(thumbnail))) {
+    throw codedError('INVALID_FIGURE', 'Figure previews must be a PNG, JPEG or WebP data URL under 2 MB.');
+  }
   const refs = await resolveSameProjectRefs(pid, input, { allowProvenanceRef: true });
   const organization = normalizeFigureOrganization({
     collection: input.collection, tags: input.tags, notes: input.notes,
@@ -3775,7 +3781,7 @@ async function createProjectFigure(userId, projectId, input = {}) {
       input.title != null ? String(input.title) : '',
       JSON.stringify(params),
       input.fileFormat != null ? String(input.fileFormat) : 'png',
-      input.thumbnailB64 != null ? String(input.thumbnailB64) : '',
+      thumbnail,
       organization.collection || '',
       JSON.stringify(organization.tags || []),
       organization.notes || ''
