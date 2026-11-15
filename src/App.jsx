@@ -26,6 +26,7 @@ import { openWorkflowSnapshot } from './analyses/researchAnalysisApi';
 import { validateWorkflowRestoration } from './analyses/workflowSnapshotClient';
 import { buildProjectProvenancePayload } from './projectProvenance';
 import { FigureProjectProvider, FIGURE_WRITE_ROLES } from './figures/FigureProjectContext';
+import { carryTabParams } from './hooks/useTabParams';
 
 import {
   saveProvenance,
@@ -736,6 +737,8 @@ export default function App() {
       await refreshAnalysisObjects(projectId);
       if (checkpointSaveRequestRef.current !== requestId) return;
       checkpointSaveOpenedObjectRef.current = saved.resultAnalysisObjectId;
+      // The saved version continues this analysis: keep its step settings.
+      carryTabParams(user?.email, objectId, saved.resultAnalysisObjectId);
       handleSelectAnalysisObject(projectId, saved.resultAnalysisObjectId);
       handleLiveObjectAttached(projectId, saved.resultAnalysisObjectId);
       setUnsavedLiveChanges(false);

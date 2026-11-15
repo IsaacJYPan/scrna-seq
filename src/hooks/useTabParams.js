@@ -1,5 +1,39 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+function paramsKey(step, email, objectId) {
+  return email && objectId
+    ? `traceomics_params_${step}_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${objectId}`
+    : null;
+}
+
+/**
+ * Saving an analysis creates a new version with a new object id. Carry every
+ * step's settings to it, so pages keep showing the settings that were used
+ * (and any typed while the save ran) instead of falling back to defaults.
+ * Settings already stored for the new version are kept.
+ */
+export function carryTabParams(email, fromObjectId, toObjectId, storage = globalThis.localStorage) {
+  if (!email || !fromObjectId || !toObjectId || fromObjectId === toObjectId || !storage) return 0;
+  const prefix = 'traceomics_params_';
+  const suffix = `_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${fromObjectId}`;
+  let copied = 0;
+  try {
+    const keys = [];
+    for (let index = 0; index < storage.length; index += 1) keys.push(storage.key(index));
+    for (const key of keys) {
+      if (!key || !key.startsWith(prefix) || !key.endsWith(suffix)) continue;
+      const step = key.slice(prefix.length, key.length - suffix.length);
+      const target = paramsKey(step, email, toObjectId);
+      if (storage.getItem(target) !== null) continue;
+      storage.setItem(target, storage.getItem(key));
+      copied += 1;
+    }
+  } catch {
+    // Storage unavailable: pages fall back to their defaults.
+  }
+  return copied;
+}
+
 /**
  * Persist tab-level parameters in localStorage, scoped per user + object.
  *
@@ -10,9 +44,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
  * @returns [params, setParam] where setParam(key, value) updates one field
  */
 export function useTabParams(step, email, objectId, defaults) {
-  const storageKey = email && objectId
-    ? `traceomics_params_${step}_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${objectId}`
-    : null;
+  const storageKey = paramsKey(step, email, objectId);
 
   // Read saved params once on mount (merged with defaults so new fields always have a value)
   const [params, setParams] = useState(() => {

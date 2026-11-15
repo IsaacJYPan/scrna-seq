@@ -155,6 +155,31 @@ async function main() {
       await page.locator('button', { hasText: /^Save$/ }).first().click();
       await saved;
       await page.waitForFunction(() => !/Unsaved live changes/.test(document.body.innerText), null, { timeout: STEP_TIMEOUT });
+      await page.getByText('Analysis saved').first().waitFor({ timeout: STEP_TIMEOUT });
+    });
+    await step('find-markers', async () => {
+      await nav('Markers / DEG');
+      await page.getByRole('button', { name: 'Run marker analysis' }).waitFor({ timeout: 30000 });
+      // The tutorial: FindAllMarkers(only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25).
+      await page.getByLabel('min.pct').fill('0.25');
+      await page.waitForFunction(() => {
+        const button = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Run marker analysis'));
+        return button && !button.disabled;
+      }, null, { timeout: STEP_TIMEOUT });
+      const minPctBeforeRun = await page.getByLabel('min.pct').inputValue();
+      await page.getByRole('button', { name: 'Run marker analysis' }).click();
+      const deadline = Date.now() + STEP_TIMEOUT;
+      let text = '';
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(5000);
+        text = await page.locator('main').innerText();
+        if (/failed|unavailable/i.test(text) && !/Running|queued/i.test(text)) break;
+        if (/Marker analysis summary/.test(text) && /Outcome\s+Complete/.test(text)) break;
+        const refresh = page.getByRole('button', { name: 'Refresh' });
+        if (await refresh.isVisible().catch(() => false)) await refresh.click().catch(() => {});
+      }
+      fs.writeFileSync(path.join(OUT, 'markers-page.txt'), text);
+      return { minPctBeforeRun, excerpt: text.slice(0, 600) };
     });
   } catch (error) {
     report.error = String(error.message).slice(0, 1000);
