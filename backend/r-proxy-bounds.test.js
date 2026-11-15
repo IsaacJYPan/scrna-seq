@@ -104,6 +104,63 @@ describe('bounded authenticated R proxy policy', () => {
     expect(next).toHaveBeenCalledTimes(2);
   });
 
+  it('releases an abandoned slot as soon as the serial R process answers a queued probe', async () => {
+    vi.useFakeTimers();
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    process.env.R_PROXY_RATE_LIMIT_MAX = '20';
+    process.env.R_PROXY_TIMEOUT_MS = '100000';
+    let answer;
+    const probeIdle = vi.fn(() => new Promise((resolve) => { answer = resolve; }));
+    const admission = createRProxyAdmission({ probeIdle });
+    const next = vi.fn();
+    admission({ user: { id: 1 } }, fakeResponse(), next);
+    const abandoned = fakeResponse();
+    admission({ user: { id: 1 } }, abandoned, next);
+    expect(abandoned.statusCode).toBe(429);
+
+    const first = fakeResponse();
+    const admitted = createRProxyAdmission({ probeIdle });
+    admitted({ user: { id: 9 } }, first, next);
+    first.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(probeIdle).toHaveBeenCalled();
+    const whileRunning = fakeResponse();
+    admitted({ user: { id: 9 } }, whileRunning, next);
+    expect(whileRunning.statusCode).toBe(429);
+    answer(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const afterProbe = fakeResponse();
+    admitted({ user: { id: 9 } }, afterProbe, next);
+    expect(afterProbe.statusCode).toBe(200);
+
+    // With more R capacity a probe proves nothing: keep the deadline fence.
+    process.env.R_PROXY_MAX_CONCURRENT = '2';
+    const parallel = createRProxyAdmission({ probeIdle: vi.fn(async () => true) });
+    const held = fakeResponse();
+    parallel({ user: { id: 5 } }, held, next);
+    held.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    const blocked = fakeResponse();
+    parallel({ user: { id: 5 } }, blocked, next);
+    expect(blocked.statusCode).toBe(429);
+  });
+
+  it('does not take the R slot for a request whose browser already disconnected', () => {
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    process.env.R_PROXY_RATE_LIMIT_MAX = '20';
+    const admission = createRProxyAdmission();
+    const next = vi.fn();
+    // Aborted during the ownership lookup: 'close' already fired.
+    const gone = fakeResponse();
+    gone.closed = true;
+    admission({ user: { id: 1 }, destroyed: true }, gone, next);
+    expect(next).not.toHaveBeenCalled();
+    const following = fakeResponse();
+    admission({ user: { id: 1 } }, following, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(following.statusCode).toBe(200);
+  });
+
   it('admits only one shared-R request at a time and releases on response completion', () => {
     process.env.R_PROXY_MAX_CONCURRENT = '1';
     process.env.R_PROXY_RATE_LIMIT_MAX = '10';

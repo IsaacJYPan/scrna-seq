@@ -21,12 +21,15 @@ export function useRestoredReduction({ callApi, reduction, contextKey, enabled, 
       (async () => {
         try {
           let data;
-          for (let retry = 0; retry < 3; retry += 1) {
+          // A step started on the previous page can hold the single R slot for
+          // a few seconds; wait it out instead of showing an error at once.
+          const attempts = 6;
+          for (let retry = 0; retry < attempts; retry += 1) {
             data = await callbacks.current.callApi(`/reduction-results?reduction=${reduction}`,
               { signal: request.signal }, { useCache: false });
             if (generation.current !== token || request.signal.aborted) return;
-            if (!isTransientComputeBusy(data?.error) || retry === 2) break;
-            await new Promise(resolve => window.setTimeout(resolve, 300 * (retry + 1)));
+            if (!isTransientComputeBusy(data?.error) || retry === attempts - 1) break;
+            await new Promise(resolve => window.setTimeout(resolve, 400 * (retry + 1)));
           }
           if (generation.current !== token || request.signal.aborted) return;
           if (data?.error) throw new Error(data.error);

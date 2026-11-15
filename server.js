@@ -745,7 +745,13 @@ function markRProxyUpstreamError(req) {
   if (state) state.markProxyError();
 }
 
-function createRProxyAdmission() {
+// probeIdle (optional) resolves once R has finished the request that was
+// abandoned. The v1 R runtime is one process that serves requests in order, so
+// a /health request queued behind an abandoned handler answers only after that
+// handler returns. Without it the slot stays fenced until the full R deadline,
+// which locks a person out of every analysis step for up to two minutes after
+// they merely navigate away from a page whose request was still in flight.
+function createRProxyAdmission({ probeIdle = null } = {}) {
   const hits = new Map();
   const activeByUser = new Map();
   let activeTotal = 0;
@@ -773,6 +779,14 @@ function createRProxyAdmission() {
     if (String(req.method || '').toUpperCase() === 'GET'
         && R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS.has(normalizeRProxyPath(req.path))) {
       return next();
+    }
+
+    // The browser may abort while earlier async middleware (object ownership
+    // lookup) was still running. Its 'close' event has then already fired and
+    // would never release a slot taken now, leaving the person's only R slot
+    // held until the process restarts. Nothing can be sent anyway: stop here.
+    if (req.destroyed || req.aborted || res.destroyed || res.closed || res.writableEnded) {
+      return undefined;
     }
 
     const maxConcurrent = config.rProxyMaxConcurrent();
@@ -809,6 +823,11 @@ function createRProxyAdmission() {
       conservativeReleaseTimer = setTimeout(release, config.rProxyTimeoutMs());
       if (typeof conservativeReleaseTimer.unref === 'function') {
         conservativeReleaseTimer.unref();
+      }
+      // Only a single serial R process makes a queued probe a proof that the
+      // abandoned handler returned; with more capacity keep the deadline.
+      if (typeof probeIdle === 'function' && config.rProxyMaxConcurrent() === 1) {
+        Promise.resolve().then(() => probeIdle()).then((idle) => { if (idle === true) release(); }, () => {});
       }
     };
     activeTotal += 1;
@@ -1051,7 +1070,24 @@ function handleBoundedRProxyResponse(proxyRes, req, res) {
   });
 }
 
-const rProxyAdmission = createRProxyAdmission();
+// GET /health on the R service, answered only after any running handler.
+function probeRIdle() {
+  return new Promise((resolve) => {
+    const url = new URL('/health', R_RUNTIME_CONFIG.baseUrl);
+    const request = require(url.protocol === 'https:' ? 'https' : 'http').get(url, {
+      headers: { 'X-API-Token': API_TOKEN, Accept: 'application/json' },
+      timeout: config.rProxyTimeoutMs(),
+    }, (response) => {
+      response.resume();
+      response.once('end', () => resolve(response.statusCode >= 200 && response.statusCode < 500));
+      response.once('error', () => resolve(false));
+    });
+    request.once('timeout', () => { request.destroy(); resolve(false); });
+    request.once('error', () => resolve(false));
+  });
+}
+
+const rProxyAdmission = createRProxyAdmission({ probeIdle: probeRIdle });
 
 // ── R proxy path-field validation allowlist ─────────────────────────────────
 // Single source of truth for which request fields validateRProxyPaths treats as
