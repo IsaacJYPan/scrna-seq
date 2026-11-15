@@ -172,6 +172,12 @@ CREATE TABLE IF NOT EXISTS figure_collection (
 );
 CREATE INDEX IF NOT EXISTS idx_figures_user ON figure_collection(user_email);
 CREATE INDEX IF NOT EXISTS idx_figures_project ON figure_collection(project_id);
+-- Project figure organisation: a named collection (e.g. "Figure 2"), free-form
+-- tags, a caption/notes field and an edit timestamp. Metadata only.
+ALTER TABLE figure_collection ADD COLUMN IF NOT EXISTS collection_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE figure_collection ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE figure_collection ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+ALTER TABLE figure_collection ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 
 -- ── Organizations & Projects (membership + authorization foundation) ─────────
 CREATE TABLE IF NOT EXISTS organizations (

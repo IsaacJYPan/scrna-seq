@@ -69,6 +69,12 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_EXPERIMENTAL_DESIGN':
     case 'UNSUPPORTED_CONDITION_MODEL':
     case 'INVALID_AUDIT_CURSOR':
+    case 'EMPTY_SELECTION':
+    case 'SELECTION_TOO_LARGE':
+    case 'SELECTION_CYCLE':
+    case 'INVALID_FIGURE_ID':
+    case 'INVALID_ANALYSIS_OBJECT_ID':
+    case 'INVALID_FIGURE':
       return res.status(400).json({ error: e.message, ...(e.code === 'UNSUPPORTED_CONDITION_MODEL' ? { code: e.code } : {}) });
     default:
       console.error(`[${context}]`, e);
