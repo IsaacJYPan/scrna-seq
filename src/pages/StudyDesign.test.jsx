@@ -52,6 +52,69 @@ describe('StudyDesign', () => {
     expect(container.textContent).not.toMatch(/job_internal_1|contrast_internal_1|ao_private_1|Project History|immutable object|queued|canonical|checkpoint/i);
   });
 
+  it('shows the newest pseudobulk summary for a saved contrast', async () => {
+    window.electronAPI.listProjectJobs = vi.fn(async () => [
+      { id: 'job_old', parameters: { contrastId: 'contrast_internal_1' }, completedAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'job_new', parameters: { contrastId: 'contrast_internal_1' }, completedAt: '2026-01-02T00:00:00.000Z' },
+    ]);
+    window.electronAPI.listProjectJobArtifacts = vi.fn(async (_projectId, jobId) => [{
+      artifactType: 'condition_de_summary',
+      metadata: { summary: {
+        method: 'edgeR quasi-likelihood pseudobulk', sampleCount: 4, testedCellTypeCount: 2,
+        significantResultCount: jobId === 'job_new' ? 7 : 1, skippedCellTypes: ['pDC'],
+        topResults: [{ cellType: 'CD14 Mono', gene: 'IFIT3', logFc: 3.3, pValue: 3.3e-8, fdr: 2.27e-5 }],
+      } },
+    }]);
+    const { container } = render(
+      <StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />
+    );
+    const result = await screen.findByTestId('contrast-result');
+    expect(result).toHaveTextContent('7 gene–cell type results at FDR ≤ 0.05');
+    expect(result).toHaveTextContent('Skipped (too few cells or replicates): pDC');
+    expect(within(result).getByText('IFIT3')).toBeInTheDocument();
+    expect(within(result).getByText('2.27e-5')).toBeInTheDocument();
+    expect(window.electronAPI.listProjectJobs).toHaveBeenCalledWith('proj_private_1', { jobType: 'condition.pseudobulk_de.v1', status: 'completed' });
+    expect(container.textContent).not.toMatch(/job_new|job_old/);
+  });
+
+  it('registers and maps the samples recorded when a multi-condition analysis was prepared', async () => {
+    const conditions = [];
+    const samples = [];
+    const bindings = [];
+    Object.assign(window.electronAPI, {
+      listStudyConditions: vi.fn(async () => conditions.slice()),
+      listBiologicalSamples: vi.fn(async () => samples.slice()),
+      listAnalysisObjectSampleBindings: vi.fn(async () => bindings.slice()),
+      listConditionContrasts: vi.fn(async () => []),
+      createStudyCondition: vi.fn(async (_p, { name }) => { conditions.push({ id: `c_${name}`, name }); }),
+      createBiologicalSample: vi.fn(async (_p, body) => { samples.push({ id: `s_${body.name}`, ...body }); }),
+      bindSampleToAnalysisObject: vi.fn(async (_p, _o, body) => { bindings.push(body); }),
+    });
+    const ws = {
+      ...workspace,
+      objects: [
+        { id: 'ao_saved', projectId: 'proj_private_1', displayName: 'Saved', parentObjId: 'ao_prepared' },
+        { id: 'ao_prepared', projectId: 'proj_private_1', displayName: 'Prepared', metadata: {
+          sampleMetadataColumn: 'sample_id',
+          sampleDesign: [
+            { sampleName: 'd1', conditionName: 'ctrl', donorCode: 'D1' },
+            { sampleName: 'd2', conditionName: 'stim', donorCode: 'D2' },
+          ],
+        } },
+      ],
+    };
+    render(<StudyDesign currentWs={ws} datasetInfo={{ id: 'ao_saved', projectId: 'proj_private_1' }} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use recorded samples' }));
+    expect(await screen.findByText(/already registered and mapped/)).toBeInTheDocument();
+    expect(window.electronAPI.createBiologicalSample).toHaveBeenCalledWith('proj_private_1', expect.objectContaining({
+      name: 'd2', conditionId: 'c_stim', donorCode: 'D2', modality: 'scrna',
+    }));
+    expect(window.electronAPI.bindSampleToAnalysisObject).toHaveBeenCalledWith('proj_private_1', 'ao_saved', {
+      sampleId: 's_d1', cellMetadataColumn: 'sample_id', cellMetadataValue: 'd1',
+    });
+    expect(bindings).toHaveLength(2);
+  });
+
   it('replaces a hostile study-design error with researcher-safe recovery text', async () => {
     window.electronAPI.listStudyConditions.mockRejectedValueOnce(new Error(JSON.stringify({
       error: 'Rscript failed at C:\\private\\study-design.R https://worker.internal/api/job_unsafe_study',

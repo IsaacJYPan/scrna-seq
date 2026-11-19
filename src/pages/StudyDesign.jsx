@@ -10,6 +10,7 @@ import {
   ComparisonForm,
   SavedContrasts,
 } from '../components/StudyDesignForms';
+import { findRecordedSampleDesign, planIsEmpty, planRecordedSampleImport } from '../studyDesignImport';
 
 function errorMessage(error) {
   if (error?.code === 'UNSUPPORTED_CONDITION_MODEL') {
@@ -81,6 +82,48 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
   const [error, setError] = useState('');
   const [conditionComparisonStarted, setConditionComparisonStarted] = useState(false);
   const [singleSampleWarning, setSingleSampleWarning] = useState(null);
+  const [contrastResults, setContrastResults] = useState({});
+
+  // Newest completed pseudobulk summary per contrast, from the job's own
+  // summary artifact (the complete table stays an audited download).
+  const loadContrastResults = useCallback(async () => {
+    const api = window.electronAPI;
+    if (!projectId || !api?.listProjectJobs || !api?.listProjectJobArtifacts) return;
+    try {
+      const jobs = await api.listProjectJobs(projectId, { jobType: 'condition.pseudobulk_de.v1', status: 'completed' });
+      const newest = new Map();
+      for (const job of Array.isArray(jobs) ? jobs : []) {
+        const contrastId = job?.parameters?.contrastId;
+        if (!contrastId) continue;
+        const previous = newest.get(contrastId);
+        if (!previous || String(job.completedAt || job.createdAt) > String(previous.completedAt || previous.createdAt)) {
+          newest.set(contrastId, job);
+        }
+      }
+      const entries = await Promise.all([...newest.entries()].map(async ([contrastId, job]) => {
+        const artifacts = await api.listProjectJobArtifacts(projectId, job.id).catch(() => []);
+        const summaryArtifact = (Array.isArray(artifacts) ? artifacts : [])
+          .find((artifact) => artifact.artifactType === 'condition_de_summary');
+        const summary = summaryArtifact?.metadata?.summary;
+        return summary ? [contrastId, { jobId: job.id, completedAt: job.completedAt, summary }] : null;
+      }));
+      setContrastResults(Object.fromEntries(entries.filter(Boolean)));
+    } catch {
+      // Results are a convenience view; the design itself stays usable.
+    }
+  }, [projectId]);
+
+  useEffect(() => { void loadContrastResults(); }, [loadContrastResults, contrasts]);
+  useEffect(() => {
+    if (!conditionComparisonStarted) return undefined;
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls += 1;
+      void loadContrastResults();
+      if (polls >= 60) clearInterval(timer);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [conditionComparisonStarted, loadContrastResults]);
 
   const refresh = useCallback(async () => {
     if (!projectId || !window.electronAPI?.listStudyConditions) return;
@@ -171,6 +214,46 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
     } finally {
       setBusy('');
     }
+  };
+
+  const recordedDesign = useMemo(() => findRecordedSampleDesign(objects, objectId), [objects, objectId]);
+  const recordedPlan = useMemo(
+    () => (mappingsReady ? planRecordedSampleImport({ recorded: recordedDesign, conditions, samples, bindings }) : null),
+    [mappingsReady, recordedDesign, conditions, samples, bindings]
+  );
+
+  const importRecordedSamples = () => {
+    if (!recordedDesign || !recordedPlan || planIsEmpty(recordedPlan)) return;
+    void mutate('import-samples', async () => {
+      const api = window.electronAPI;
+      for (const name of recordedPlan.conditionsToCreate) {
+        await api.createStudyCondition(projectId, { name });
+      }
+      const currentConditions = await api.listStudyConditions(projectId);
+      const conditionIdByName = new Map(
+        (currentConditions || []).map((item) => [item.name.trim().toLocaleLowerCase('en-US'), item.id])
+      );
+      for (const row of recordedPlan.samplesToCreate) {
+        await api.createBiologicalSample(projectId, {
+          name: row.name,
+          conditionId: conditionIdByName.get(row.conditionName.toLocaleLowerCase('en-US')),
+          donorCode: row.donorCode,
+          batch: row.batch,
+          modality: 'scrna',
+        });
+      }
+      const currentSamples = await api.listBiologicalSamples(projectId);
+      const sampleIdByName = new Map(
+        (currentSamples || []).map((item) => [item.name.trim().toLocaleLowerCase('en-US'), item.id])
+      );
+      for (const row of recordedPlan.bindingsToCreate) {
+        await api.bindSampleToAnalysisObject(projectId, objectId, {
+          sampleId: sampleIdByName.get(row.sampleName.toLocaleLowerCase('en-US')),
+          cellMetadataColumn: row.cellMetadataColumn,
+          cellMetadataValue: row.cellMetadataValue,
+        });
+      }
+    });
   };
 
   const createCondition = (event) => {
@@ -302,6 +385,46 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           </select>
         </div>
 
+        {recordedDesign && recordedPlan && (
+          <section
+            className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm"
+            aria-labelledby={`${formId}-recorded-heading`}
+            data-testid="recorded-sample-import"
+          >
+            <h2 id={`${formId}-recorded-heading`} className="font-bold text-text">
+              Samples recorded when this analysis was prepared
+            </h2>
+            <p className="mt-1 text-textMuted">
+              {recordedDesign.samples.length} samples across{' '}
+              {new Set(recordedDesign.samples.map((row) => row.conditionName.toLocaleLowerCase('en-US'))).size}{' '}
+              conditions, identified by the <code>{recordedDesign.sampleColumn}</code> column.
+            </p>
+            {planIsEmpty(recordedPlan) ? (
+              <p className="mt-2 text-textMuted">These samples are already registered and mapped for this saved version.</p>
+            ) : (
+              <>
+                <p className="mt-2 text-textMuted">
+                  Adds {recordedPlan.conditionsToCreate.length} condition(s), {recordedPlan.samplesToCreate.length} sample(s)
+                  {' '}and {recordedPlan.bindingsToCreate.length} cell mapping(s). Existing entries are kept unchanged.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-primary mt-3 text-sm"
+                  onClick={importRecordedSamples}
+                  disabled={!canWriteStudyDesign || !!busy}
+                >
+                  {busy === 'import-samples' ? 'Adding samples…' : 'Use recorded samples'}
+                </button>
+              </>
+            )}
+            {recordedPlan.conflicts.length > 0 && (
+              <ul className="mt-2 list-disc pl-5 text-amber-700 dark:text-amber-300">
+                {recordedPlan.conflicts.map((message) => <li key={message}>{message}</li>)}
+              </ul>
+            )}
+          </section>
+        )}
+
         <fieldset disabled={!canWriteStudyDesign} className="space-y-4 min-w-0">
           <ConditionsForm
             conditions={conditions}
@@ -350,6 +473,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           canWriteStudyDesign={canWriteStudyDesign}
           busy={busy}
           runContrast={runContrast}
+          results={contrastResults}
         />
       </div>
     </div>

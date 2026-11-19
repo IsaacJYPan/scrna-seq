@@ -377,7 +377,64 @@ export function ComparisonForm({
   );
 }
 
-export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContrast }) {
+function formatStat(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'NA';
+  if (value !== 0 && Math.abs(value) < 0.001) return value.toExponential(2);
+  return Number.isInteger(value) ? String(value) : value.toFixed(3);
+}
+
+export function ContrastResult({ result }) {
+  const summary = result?.summary;
+  if (!summary) return null;
+  const rows = Array.isArray(summary.topResults) ? summary.topResults.slice(0, 15) : [];
+  return (
+    <div className="mt-3 rounded border border-border bg-background/60 p-3" data-testid="contrast-result">
+      <p className="text-xs font-semibold text-text">
+        Latest result{result.completedAt ? ` · ${new Date(result.completedAt).toLocaleString()}` : ''}
+      </p>
+      <p className="mt-1 text-xs text-textMuted">
+        {summary.method || 'Pseudobulk'} · {summary.sampleCount ?? 'NA'} samples · {summary.testedCellTypeCount ?? 0} cell
+        types tested · {summary.significantResultCount ?? 0} gene–cell type results at FDR ≤ 0.05
+      </p>
+      {Array.isArray(summary.skippedCellTypes) && summary.skippedCellTypes.length > 0 && (
+        <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+          Skipped (too few cells or replicates): {summary.skippedCellTypes.join(', ')}
+        </p>
+      )}
+      {rows.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full min-w-[480px] text-left text-xs">
+            <thead className="text-textMuted">
+              <tr>
+                <th className="py-1 pr-3">Cell type</th>
+                <th className="py-1 pr-3">Gene</th>
+                <th className="py-1 pr-3">log2FC</th>
+                <th className="py-1 pr-3">p</th>
+                <th className="py-1 pr-3">FDR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${row.cellType}-${row.gene}-${index}`} className="border-t border-border/40">
+                  <td className="py-1 pr-3">{row.cellType}</td>
+                  <td className="py-1 pr-3 font-semibold">{row.gene}</td>
+                  <td className="py-1 pr-3 font-mono">{formatStat(row.logFc)}</td>
+                  <td className="py-1 pr-3 font-mono">{formatStat(row.pValue)}</td>
+                  <td className="py-1 pr-3 font-mono">{formatStat(row.fdr)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="mt-2 text-xs text-textMuted">
+        Download the complete table from Runs &amp; Results (Condition comparison results).
+      </p>
+    </div>
+  );
+}
+
+export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContrast, results = {} }) {
   return (
     <div className="card p-4">
       <h3 className="font-semibold mb-3">Saved contrasts</h3>
@@ -423,6 +480,7 @@ export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContra
               >
                 Run edgeR pseudobulk
               </button>
+              <ContrastResult result={results[item.id]} />
             </div>
           ))}
         </div>
