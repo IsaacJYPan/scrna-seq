@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isTransientComputeBusy, publicErrorMessage } from '../publicError';
 
+const BUSY_RETRY_ATTEMPTS = 8;
+
 // A stored browser result cannot establish what exists in the active R object.
 // Read the current reduction without entering the analysis/provenance path.
 export function useRestoredReduction({ callApi, reduction, contextKey, enabled, onResult, onReset }) {
@@ -21,12 +23,16 @@ export function useRestoredReduction({ callApi, reduction, contextKey, enabled, 
       (async () => {
         try {
           let data;
-          for (let retry = 0; retry < 3; retry += 1) {
+          // A superseded read is aborted here, but R still finishes it and the
+          // server holds the shared R slot until R confirms it is idle. Allow
+          // several seconds of backoff so that brief fence does not surface as
+          // an error.
+          for (let retry = 0; retry < BUSY_RETRY_ATTEMPTS; retry += 1) {
             data = await callbacks.current.callApi(`/reduction-results?reduction=${reduction}`,
               { signal: request.signal }, { useCache: false });
             if (generation.current !== token || request.signal.aborted) return;
-            if (!isTransientComputeBusy(data?.error) || retry === 2) break;
-            await new Promise(resolve => window.setTimeout(resolve, 300 * (retry + 1)));
+            if (!isTransientComputeBusy(data?.error) || retry === BUSY_RETRY_ATTEMPTS - 1) break;
+            await new Promise(resolve => window.setTimeout(resolve, Math.min(300 * (retry + 1), 2000)));
           }
           if (generation.current !== token || request.signal.aborted) return;
           if (data?.error) throw new Error(data.error);

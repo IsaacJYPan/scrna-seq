@@ -745,7 +745,19 @@ function markRProxyUpstreamError(req) {
   if (state) state.markProxyError();
 }
 
-function createRProxyAdmission() {
+// After a browser abort the proxy destroys the upstream request, so admission
+// can no longer observe R finishing and must keep the slot fenced. The v1 R
+// service is one Plumber process that evaluates handlers sequentially (no
+// promises/future), so a later direct /health reply proves every earlier
+// handler has returned. `drainProbe` uses that to release the fence early;
+// without a probe (or when it keeps failing) the fence lasts until the R
+// deadline exactly as before.
+const R_PROXY_DRAIN_PROBE_INTERVAL_MS = 1000;
+
+function createRProxyAdmission(options = {}) {
+  const drainProbe = typeof options.drainProbe === 'function' ? options.drainProbe : null;
+  const drainProbeIntervalMs = Number.isInteger(options.drainProbeIntervalMs) && options.drainProbeIntervalMs > 0
+    ? options.drainProbeIntervalMs : R_PROXY_DRAIN_PROBE_INTERVAL_MS;
   const hits = new Map();
   const activeByUser = new Map();
   let activeTotal = 0;
@@ -803,6 +815,23 @@ function createRProxyAdmission() {
       if (remaining === 0) activeByUser.delete(userKey);
       else activeByUser.set(userKey, remaining);
     };
+    const startDrainProbe = () => {
+      // Only a single-process R service gives the sequential-handler guarantee.
+      if (!drainProbe || config.rProxyMaxConcurrent() !== 1) return;
+      const attempt = () => {
+        if (released) return;
+        Promise.resolve()
+          .then(() => drainProbe())
+          .then(() => { release(); }, () => {
+            if (released) return;
+            const retry = setTimeout(attempt, drainProbeIntervalMs);
+            if (typeof retry.unref === 'function') retry.unref();
+          });
+      };
+      // The first probe queues directly behind the aborted handler in R, so it
+      // answers as soon as that handler returns.
+      attempt();
+    };
     const scheduleConservativeRelease = () => {
       if (released || conservativeReleaseTimer) return;
       indeterminate = true;
@@ -810,6 +839,7 @@ function createRProxyAdmission() {
       if (typeof conservativeReleaseTimer.unref === 'function') {
         conservativeReleaseTimer.unref();
       }
+      startDrainProbe();
     };
     activeTotal += 1;
     activeByUser.set(userKey, userActive + 1);
@@ -1051,7 +1081,7 @@ function handleBoundedRProxyResponse(proxyRes, req, res) {
   });
 }
 
-const rProxyAdmission = createRProxyAdmission();
+const rProxyAdmission = createRProxyAdmission({ drainProbe: () => probeRHealth(config.rProxyTimeoutMs()) });
 
 // ── R proxy path-field validation allowlist ─────────────────────────────────
 // Single source of truth for which request fields validateRProxyPaths treats as

@@ -104,6 +104,66 @@ describe('bounded authenticated R proxy policy', () => {
     expect(next).toHaveBeenCalledTimes(2);
   });
 
+  it('releases the post-abort fence once a sequential R service answers a drain probe', async () => {
+    vi.useFakeTimers();
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    process.env.R_PROXY_RATE_LIMIT_MAX = '20';
+    process.env.R_PROXY_TIMEOUT_MS = '120000';
+    let answer;
+    const drainProbe = vi.fn(() => new Promise((resolve) => { answer = resolve; }));
+    const admission = createRProxyAdmission({ drainProbe, drainProbeIntervalMs: 10 });
+    const next = vi.fn();
+
+    const aborted = fakeResponse();
+    admission({ user: { id: 1 } }, aborted, next);
+    aborted.emit('close');
+    const whileRMayStillRun = fakeResponse();
+    admission({ user: { id: 1 } }, whileRMayStillRun, next);
+    expect(whileRMayStillRun.statusCode).toBe(429);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drainProbe).toHaveBeenCalledTimes(1);
+    const probePending = fakeResponse();
+    admission({ user: { id: 1 } }, probePending, next);
+    expect(probePending.statusCode).toBe(429);
+
+    answer();
+    await vi.advanceTimersByTimeAsync(0);
+    const afterDrain = fakeResponse();
+    admission({ user: { id: 1 } }, afterDrain, next);
+    expect(next).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the fence until the deadline when drain probes fail or R is multi-process', async () => {
+    vi.useFakeTimers();
+    process.env.R_PROXY_RATE_LIMIT_MAX = '50';
+    process.env.R_PROXY_TIMEOUT_MS = '100';
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    const failing = vi.fn(() => Promise.reject(new Error('unreachable')));
+    const admission = createRProxyAdmission({ drainProbe: failing, drainProbeIntervalMs: 10 });
+    const next = vi.fn();
+    const first = fakeResponse();
+    admission({ user: { id: 1 } }, first, next);
+    first.emit('close');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(failing.mock.calls.length).toBeGreaterThan(1);
+    const fenced = fakeResponse();
+    admission({ user: { id: 2 } }, fenced, next);
+    expect(fenced.statusCode).toBe(429);
+    await vi.advanceTimersByTimeAsync(50);
+    admission({ user: { id: 3 } }, fakeResponse(), next);
+    expect(next).toHaveBeenCalledTimes(2);
+
+    process.env.R_PROXY_MAX_CONCURRENT = '2';
+    const parallelProbe = vi.fn(() => Promise.resolve());
+    const multi = createRProxyAdmission({ drainProbe: parallelProbe, drainProbeIntervalMs: 10 });
+    const aborted = fakeResponse();
+    multi({ user: { id: 9 } }, aborted, vi.fn());
+    aborted.emit('close');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(parallelProbe).not.toHaveBeenCalled();
+  });
+
   it('admits only one shared-R request at a time and releases on response completion', () => {
     process.env.R_PROXY_MAX_CONCURRENT = '1';
     process.env.R_PROXY_RATE_LIMIT_MAX = '10';
