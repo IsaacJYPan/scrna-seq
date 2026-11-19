@@ -6,11 +6,50 @@ import { publicErrorMessage } from '../publicError';
 import RefreshButton from './RefreshButton';
 import { displayRunStatus, formatDate, parseErrorMessage, researcherRunNote } from './analysisRunDisplay';
 
+// Visium ZIPs are inspected when uploaded, so they must reach `valid`. 10x HDF5
+// contents are validated by the R worker when the run starts; the server
+// leaves them `pending` and admits them unless they were marked invalid (see
+// backend/seuratPipeline.js). Gate the UI on the same rule.
+function datasetReadyForWorkflow(dataset) {
+  if (dataset?.uploadStatus !== 'uploaded') return false;
+  if (dataset?.fileType === 'visium_zip') return dataset?.validationStatus === 'valid';
+  return dataset?.validationStatus !== 'invalid';
+}
+
 function datasetResearchStatus(dataset) {
   if (dataset?.uploadStatus === 'failed' || dataset?.validationStatus === 'invalid') return 'Needs attention';
   if (dataset?.uploadStatus === 'uploaded' && dataset?.validationStatus === 'valid') return 'Ready for analysis';
+  if (datasetReadyForWorkflow(dataset)) return 'Ready for analysis · contents are checked when the run starts';
   if (dataset?.uploadStatus === 'uploaded') return 'Checking data';
   return 'Preparing data';
+}
+
+const SUMMARY_LABELS = {
+  completedStage: 'Completed stage',
+  nCells: 'Cells',
+  nFeatures: 'Genes',
+  preFilterCells: 'Cells before QC',
+  postFilterCells: 'Cells after QC',
+  nSamples: 'Samples',
+  nConditions: 'Conditions',
+  cells: 'Cells',
+  features: 'Genes',
+  reductions: 'Reductions',
+};
+
+// Run summaries can contain nested diagnostics objects; show only readable
+// scalar values (or short lists of scalars) with researcher-facing labels.
+export function summaryDisplayEntries(summary) {
+  if (!summary || typeof summary !== 'object') return [];
+  const scalar = value => ['string', 'number', 'boolean'].includes(typeof value);
+  return Object.entries(summary).flatMap(([key, value]) => {
+    let text = null;
+    if (scalar(value)) text = typeof value === 'number' ? value.toLocaleString() : String(value);
+    else if (Array.isArray(value) && value.length && value.every(scalar)) text = value.join(', ');
+    if (text === null) return [];
+    const label = SUMMARY_LABELS[key] || key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase());
+    return [[key, label, text]];
+  });
 }
 
 const CLASSIC_VISIUM_REQUIRED_FILES = [
@@ -203,10 +242,8 @@ export function SeuratPipelinePanel({
   const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
   const selectedMultiDatasets = multiSampleRows.map(row => datasets.find(dataset => dataset.id === row.datasetId));
   const activeDatasetReady = multiSampleMode
-    ? selectedMultiDatasets.length >= 2 && selectedMultiDatasets.every(dataset => (
-      dataset?.uploadStatus === 'uploaded' && dataset?.validationStatus === 'valid'
-    ))
-    : activeDataset?.uploadStatus === 'uploaded' && activeDataset?.validationStatus === 'valid';
+    ? selectedMultiDatasets.length >= 2 && selectedMultiDatasets.every(datasetReadyForWorkflow)
+    : datasetReadyForWorkflow(activeDataset);
   const multiSampleConditionCounts = multiSampleRows.reduce((counts, row) => {
     const condition = String(row.conditionName || '').trim().toLocaleLowerCase('en-US');
     if (condition) counts.set(condition, (counts.get(condition) || 0) + 1);
@@ -876,10 +913,10 @@ export function SeuratPipelinePanel({
               <h4 className="mb-3 flex items-center gap-2 font-bold text-text">Continue this analysis</h4>
               {safeSummary ? (
                 <div className="grid grid-cols-2 gap-2 text-xs">
-                  {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
+                  {summaryDisplayEntries(safeSummary).slice(0, 6).map(([key, label, value]) => (
                     <div key={key} className="rounded border border-border bg-surface p-2">
-                      <div className="font-medium text-textMuted">{key}</div>
-                      <div className="mt-1 truncate text-text">{Array.isArray(value) ? value.join(', ') : String(value)}</div>
+                      <div className="font-medium text-textMuted">{label}</div>
+                      <div className="mt-1 truncate text-text">{value}</div>
                     </div>
                   ))}
                 </div>

@@ -2,6 +2,7 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PipelineManager from './PipelineManager';
+import { summaryDisplayEntries } from '../components/SeuratPipelinePanel';
 import { DEFAULT_PIPELINE_ID, getDefaultPipelineManifest } from '../pipelines/pipelineRegistry';
 
 const currentWs = {
@@ -589,7 +590,7 @@ describe('PipelineManager', () => {
     });
 
     expect(await screen.findByText('filtered_feature_bc_matrix.h5')).toBeInTheDocument();
-    expect(screen.getByTestId('seurat-pipeline-panel')).toHaveTextContent(/10x HDF5 · Checking data/i);
+    expect(screen.getByTestId('seurat-pipeline-panel')).toHaveTextContent(/10x HDF5 · Ready for analysis · contents are checked when the run starts/i);
     expect(screen.getByTestId('seurat-pipeline-panel')).not.toHaveTextContent(/ds_abc123|tenx_h5|uploaded \/ pending/i);
     expect(window.electronAPI.uploadDataset).toHaveBeenCalledWith(
       'proj_1',
@@ -678,7 +679,7 @@ describe('PipelineManager', () => {
         fileType: 'tenx_h5',
         originalFilename: file.name,
         uploadStatus: 'uploaded',
-        validationStatus: 'valid',
+        validationStatus: 'pending', // the server leaves 10x HDF5 pending until the worker reads it
       };
     });
     window.electronAPI.createProjectAnalysisObject = vi.fn(async (_projectId, payload) => ({
@@ -763,5 +764,18 @@ describe('PipelineManager', () => {
         })
       );
     });
+  });
+});
+
+describe('summaryDisplayEntries', () => {
+  it('labels scalar run-summary values and drops nested diagnostics', () => {
+    expect(summaryDisplayEntries({
+      completedStage: 'umap', diagnostics: { qc: { kept: 1 } }, nCells: 2638, reductions: ['pca', 'umap'], warnings: [{ a: 1 }],
+    })).toEqual([
+      ['completedStage', 'Completed stage', 'umap'],
+      ['nCells', 'Cells', '2,638'],
+      ['reductions', 'Reductions', 'pca, umap'],
+    ]);
+    expect(summaryDisplayEntries(null)).toEqual([]);
   });
 });
