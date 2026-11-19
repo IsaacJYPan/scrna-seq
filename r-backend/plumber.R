@@ -2186,7 +2186,21 @@ function(res, req) {
       mapping, public_scalar_text, character(1), name = "mapping value"
     )
     names(safe_values) <- safe_names
-    list(source_col = source_col, new_col = new_col, mapping = safe_values)
+    # Optional: make the mapped labels the object's active identities so
+    # identity-aware views and jobs (UMAP, markers "Current identities",
+    # enrichment, CellChat) use them. Requires a complete mapping and a column
+    # name that downstream design fields accept.
+    set_identity <- isTRUE(body$set_identity)
+    if (!is.null(body$set_identity) && !is.logical(body$set_identity)) {
+      stop("set_identity must be true or false.")
+    }
+    if (new_col %in% PROTECTED_MAPPING_COLUMNS) {
+      stop(paste0("Choose a new column name; '", new_col, "' holds computed values."))
+    }
+    if (set_identity && !grepl("^[A-Za-z][A-Za-z0-9_.-]{0,63}$", new_col)) {
+      stop("Choose a column name that starts with a letter and uses only letters, numbers, '.', '_' or '-' (64 characters at most).")
+    }
+    list(source_col = source_col, new_col = new_col, mapping = safe_values, set_identity = set_identity)
   }, error = identity)
   if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
 
@@ -2194,15 +2208,36 @@ function(res, req) {
   new_col <- parsed$new_col
   mapping <- parsed$mapping
 
+  if (parsed$set_identity) {
+    source_vals <- as.character(global_obj@meta.data[[source_col]])
+    unmapped <- setdiff(unique(source_vals[!is.na(source_vals)]), names(mapping))
+    if (any(is.na(source_vals)) || length(unmapped) > 0) {
+      return(public_validation_response(res, simpleError(paste0(
+        "Add a label for every ", source_col, " value before making it the active identity. Missing: ",
+        paste(head(bounded_public_labels(unmapped), 10L), collapse = ", ")
+      ))))
+    }
+  }
+
   tryCatch({
     source_vals <- as.character(global_obj@meta.data[[source_col]])
     mapped_vals <- unname(mapping[match(source_vals, names(mapping))])
     mark_live_session_changed()
     global_obj[[new_col]] <<- mapped_vals
+    identity_levels <- NULL
+    if (parsed$set_identity) {
+      # Keep the researcher's label order (first appearance in the mapping).
+      identity_levels <- unique(unname(mapping[names(mapping) %in% source_vals]))
+      identities <- factor(mapped_vals, levels = identity_levels)
+      names(identities) <- colnames(global_obj)
+      Idents(global_obj) <<- identities
+    }
 
     list(
       message = paste0("Successfully added new metadata column: ", new_col),
       mapped_cells = sum(!is.na(mapped_vals)),
+      active_identity = if (parsed$set_identity) new_col else NULL,
+      identity_levels = if (is.null(identity_levels)) NULL else as.list(bounded_public_labels(identity_levels)),
       live_state = live_session_revision_state()
     )
   }, error = function(e) { res$status <- 500; list(error = paste("Add meta mapping failed:", e$message)) })

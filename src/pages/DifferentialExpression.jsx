@@ -13,6 +13,7 @@ import { useTabParams } from '../hooks/useTabParams';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 import useProjectAnalysisJob from '../hooks/useProjectAnalysisJob';
+import ClusterAnnotationPanel from '../components/ClusterAnnotationPanel';
 import { EmptyNotice, JobLogs, StatusBadge, displayRunStatus, formatDate } from '../components/analysisRunDisplay';
 
 const DEG_JOB_TYPE = 'deg.find_markers.v1';
@@ -129,6 +130,7 @@ function TopMarkersTable({ markers }) {
 }
 
 export default function DifferentialExpression({
+  callApi,
   datasetInfo,
   pipelineState,
   currentWs,
@@ -570,6 +572,17 @@ export default function DifferentialExpression({
             </div>
           )}
         </section>
+
+        {pipelineState?.cluster && (
+          <ClusterAnnotationPanel
+            callApi={callApi}
+            liveObjectAttached={liveObjectAttached && ownsPrivateLiveObject}
+            markers={summary?.groupBy === 'seurat_clusters' || !summary?.groupBy ? summary?.topMarkers : null}
+            unsavedLiveChanges={unsavedLiveChanges}
+            onSaveCurrentAnalysis={onSaveCurrentAnalysis}
+            checkpointSaveBusy={checkpointSaveBusy}
+          />
+        )}
 
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
           <div className="mb-1 flex items-center gap-2 font-bold text-text">

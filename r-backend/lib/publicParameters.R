@@ -21,6 +21,9 @@ MAX_PUBLIC_BATCHES <- 100L
 MAX_PUBLIC_METADATA_COLUMNS <- 64L
 MAX_PUBLIC_METADATA_VALUES <- 1000L
 MAX_PUBLIC_MAPPING_ENTRIES <- 1000L
+# Computed columns (clusters and QC metrics). A metadata mapping creates a new
+# label column; it must not overwrite values that Seurat computed.
+PROTECTED_MAPPING_COLUMNS <- c("seurat_clusters", "nCount_RNA", "nFeature_RNA", "percent.mt")
 MAX_PUBLIC_OBJECT_BYTES <- 512 * 1024 * 1024
 MAX_PUBLIC_DENSE_VALUES <- 50000000
 
