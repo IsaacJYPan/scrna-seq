@@ -41,6 +41,7 @@ Choose the check that covers the change:
 | `npm run test:plots` | SVG/WebGL charts, updates, resizing, and PNG/SVG exports in Chromium |
 | `npm run test:deployment:browser` | Built frontend, real Express and PostgreSQL, deterministic R test service |
 | `npm run test:demo-browser` | Guided demo against `PUBLIC_DEMO_ORIGIN`, including real Seurat stages |
+| `npm run test:researcher-workflow -- <fixture-dir>` | Full multi-condition workflow in a running `npm run dev` stack with real R (see below) |
 
 Run `npm run build` before `test:workbench-ui`. For `test:ui-interactions` against
 the production build, build first and append `-- --production`. The visual,
@@ -88,3 +89,22 @@ scatter and heatmap graphics.
 responsive step rows, settings, and navigation. Tour outputs are in
 `playwright/report/ui-audit/`, with videos in `walkthrough/` and pipeline checks
 in `pipeline-layout/`.
+
+## Researcher workflow check
+
+`test:researcher-workflow` signs up a new account in a running `npm run dev`
+stack and walks the whole multi-condition path: upload, Seurat preparation,
+UMAP, markers, cluster annotation, saving, Study Design sample import, edgeR
+pseudobulk, and the result download. It needs R with Seurat, hdf5r, edgeR, and
+limma. Build its four-donor fixture from the PBMC3k HDF5 file first:
+
+```powershell
+Rscript scripts/make_pbmc3k_h5.R
+Rscript scripts/make_condition_fixture.R data/pbmc3k/pbmc3k_filtered.h5 condition-fixture
+npm run test:researcher-workflow -- condition-fixture
+```
+
+The fixture adds a known interferon signal to the two `stim` donors; the check
+expects those genes among the top pseudobulk results. Screenshots and the
+downloaded table are written to `playwright/report/researcher-workflow/`. Set
+`CHROMIUM_EXECUTABLE` to use an already installed Chromium.

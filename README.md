@@ -38,14 +38,18 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
 - Seurat preprocessing for single-sample and multi-sample 10x data, plus classic
   Space Ranger Visium data.
 - QC, PCA, UMAP, gene expression, heatmaps, and marker finding.
+- Manual cluster annotation: name clusters from their markers and use the labels
+  as cell types in UMAP, markers, pseudobulk, and CellChat.
 - Ranked pathway enrichment, replicate-aware pseudobulk comparisons, and
   single-context CellChat candidate analysis.
 - [Shared pipelines](docs/pipelines.md), [custom workflow steps](docs/workflow-pipelines.md),
   and a private R console on installations with the isolated R runtime configured.
 
-Cell annotation, cross-condition CellChat, and publication report generation
-are not yet available. See [analysis workflows](docs/analysis-workflows.md) for
-the supported methods and their interpretation.
+Automated (reference-based) cell annotation, cross-condition CellChat, and
+publication report generation are not yet available. See
+[analysis workflows](docs/analysis-workflows.md) for the supported methods, the
+[end-to-end walkthrough](docs/analysis-workflows.md#from-raw-counts-to-a-condition-comparison),
+and their interpretation.
 
 ## AI agents
 

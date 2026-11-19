@@ -1,5 +1,40 @@
 # Analysis workflows
 
+## From raw counts to a condition comparison
+
+This is the standard path for a study with several samples in two or more
+conditions. Each step runs Seurat on your private analysis; queued steps run on
+the saved version.
+
+1. **Create a project**, then choose **Add dataset → 10X H5 analysis workflow →
+   Multiple conditions**. Upload one Cell Ranger `filtered_feature_bc_matrix.h5`
+   per biological sample. Enter each sample's condition, and its donor code and
+   batch if known. The files are checked when the run starts.
+2. Set QC, normalization, PCA, clustering, and UMAP settings and choose
+   **Prepare multi-condition analysis**. When it completes, choose
+   **Open saved version**.
+3. Inspect **Quality control**, **PCA**, **Cluster**, and **UMAP**. Re-run a step
+   with different settings if needed.
+4. Open **Markers / DEG** and choose **Run marker analysis**.
+5. In **Annotate clusters** on the same page, name every cluster from its top
+   markers. Several clusters can share a label. Keep **Use these labels as the
+   current identities** selected and choose **Apply**. This adds a metadata column
+   (default `cell_type`) and leaves `seurat_clusters` unchanged. Then choose
+   **Save analysis**; queued runs only see saved changes.
+6. UMAP, dot plots, and analyses run with **Group by → Current identities**
+   (markers, pathway enrichment, CellChat) now use the cell-type labels.
+7. Open **Study design**. Under **Samples recorded when this analysis was
+   prepared**, choose **Use recorded samples** to register the conditions and
+   samples you entered at upload and map their cells by `sample_id`.
+8. Add a comparison: numerator and denominator conditions, **Cell type column**
+   `cell_type`, and the replication unit. Save it and choose **Run edgeR
+   pseudobulk**. The newest result appears under the saved contrast. Download
+   the complete table from **Runs & Results → Condition comparison results**.
+
+Cluster labels are your interpretation of marker genes, not an automated or
+reference-validated annotation. Cell types with too few cells or replicates per
+sample are skipped and listed with the result.
+
 ## Recover an accepted analysis submission
 
 Analysis jobs and recipe steps retain a small submission identifier on this
