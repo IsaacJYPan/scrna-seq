@@ -370,7 +370,8 @@ describe.skipIf(!CONFIGURED)('agent CLI journey', () => {
   });
 });
 
-describe.skipIf(!CONFIGURED)('Slurm target routing', () => {
+// The fake cluster is POSIX-only (see _fakeSlurm.js).
+describe.skipIf(!CONFIGURED || !require('./_fakeSlurm').FAKE_SLURM_SUPPORTED)('Slurm target routing', () => {
   it('routes an agent run in a Slurm study to the cluster target and reports targets', async () => {
     const { installFakeSlurm } = require('./_fakeSlurm');
     const fake = installFakeSlurm();

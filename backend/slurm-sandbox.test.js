@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./pgDatabase');
 const storage = require('./storage');
-const { installFakeSlurm } = require('./_fakeSlurm');
+const { installFakeSlurm, FAKE_SLURM_SUPPORTED } = require('./_fakeSlurm');
 const { createJobWorker } = require('./jobWorker');
 const { createSlurmExecutor } = require('./executors/slurm');
 const { qualifySlurmTarget, sandboxReadiness } = require('./executors/slurmQualification');
@@ -95,7 +95,7 @@ function drain() {
   return createJobWorker({ db, logger: silentLogger(), storageProvider: provider, slurmExecutor: createSlurmExecutor({ db }) }).runOnce();
 }
 
-describe.skipIf(!CONFIGURED)('Slurm qualification', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('Slurm qualification', () => {
   it('passes on a target that isolates the sandbox, and records the evidence', async () => {
     const result = await qualify();
     expect(result.checks.filter((c) => !c.passed)).toEqual([]);
@@ -134,7 +134,7 @@ describe.skipIf(!CONFIGURED)('Slurm qualification', () => {
   });
 });
 
-describe.skipIf(!CONFIGURED)('agent sandbox runs on Slurm', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('agent sandbox runs on Slurm', () => {
   it('runs the agent script on the cluster with the sandbox reservation and returns validated draft outputs', async () => {
     await qualify();
     const ctx = await setup();

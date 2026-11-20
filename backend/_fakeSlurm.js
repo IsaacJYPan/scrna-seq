@@ -75,6 +75,11 @@ echo "normal* up 4"; echo "gpu up 2"
 `,
 };
 
+// The fake commands are bash scripts found through a ':'-separated PATH, and
+// the Slurm executor accepts only a POSIX remote root, so the fake cluster can
+// only exist on POSIX hosts. Tests that need it skip elsewhere (e.g. Windows).
+const FAKE_SLURM_SUPPORTED = process.platform !== 'win32';
+
 function installFakeSlurm() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-slurm-'));
   const bin = path.join(base, 'bin');
@@ -102,4 +107,4 @@ function installFakeSlurm() {
   };
 }
 
-module.exports = { installFakeSlurm };
+module.exports = { installFakeSlurm, FAKE_SLURM_SUPPORTED };
