@@ -176,6 +176,22 @@ function scrubEmptyParams(params) {
   return out;
 }
 
+// A multi-sample run is described by its samples, not by the first file,
+// which the job records only as an internal anchor.
+export function runInputLabel({ job, multiSampleMode, multiSampleRows = [], activeDataset }) {
+  const recorded = Array.isArray(job?.parameters?.samples) ? job.parameters.samples : null;
+  const samples = recorded || (multiSampleMode ? multiSampleRows : []);
+  if (samples.length >= 2 || (multiSampleMode && samples.length)) {
+    const conditions = new Set(samples
+      .map(sample => String(sample?.conditionName || '').trim().toLocaleLowerCase('en-US'))
+      .filter(Boolean));
+    const sampleText = `${samples.length} ${samples.length === 1 ? 'sample' : 'samples'}`;
+    const conditionText = conditions.size ? ` across ${conditions.size} ${conditions.size === 1 ? 'condition' : 'conditions'}` : '';
+    return { label: 'Input', value: `${sampleText}${conditionText}` };
+  }
+  return { label: 'Dataset', value: activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset' };
+}
+
 export function SeuratPipelinePanel({
   activeProjectId,
   selectedObject,
@@ -240,6 +256,7 @@ export function SeuratPipelinePanel({
   };
 
   const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
+  const runInput = runInputLabel({ job, multiSampleMode, multiSampleRows, activeDataset });
   const selectedMultiDatasets = multiSampleRows.map(row => datasets.find(dataset => dataset.id === row.datasetId));
   const activeDatasetReady = multiSampleMode
     ? selectedMultiDatasets.length >= 2 && selectedMultiDatasets.every(datasetReadyForWorkflow)
@@ -919,7 +936,7 @@ export function SeuratPipelinePanel({
                   </div>
                   <div className="text-xs text-textMuted">Created: {formatDate(job.createdAt)}</div>
                   <div className="grid grid-cols-1 gap-2 text-xs">
-                    <div>{multiSampleMode ? 'Primary dataset' : 'Dataset'}: <span className="text-text">{activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset'}</span></div>
+                    <div>{runInput.label}: <span className="text-text">{runInput.value}</span></div>
                     <div>Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || selectedObject?.displayName || selectedObject?.name || 'Selected analysis'}</span></div>
                     <div>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Dataset is ready' : 'Preparing dataset')}</span></div>
                   </div>
