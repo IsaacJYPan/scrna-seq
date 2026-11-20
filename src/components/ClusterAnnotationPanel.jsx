@@ -50,6 +50,20 @@ export function validateAnnotation({ columnName, labels, clusters }) {
   return null;
 }
 
+export const CLUSTERS_MISSING_MESSAGE = 'This analysis has no clusters yet. Run clustering, then refresh clusters.';
+export const CLUSTERS_BUSY_MESSAGE = 'R is still busy with this analysis, for example loading a large saved version. Wait a moment, then select Refresh clusters.';
+
+// Only a missing cluster column means clustering has not run. While R is
+// loading or busy with a large object, the request is refused, times out or
+// finds no object yet; saying "run clustering" then sends the researcher the
+// wrong way.
+export function clusterLoadErrorMessage(loadError) {
+  const raw = String(loadError?.message || loadError || '');
+  if (/was not found in object metadata/i.test(raw)) return CLUSTERS_MISSING_MESSAGE;
+  if (/^no object loaded$/i.test(raw.trim()) || isTransientComputeBusy(loadError)) return CLUSTERS_BUSY_MESSAGE;
+  return publicErrorMessage(loadError, CLUSTERS_BUSY_MESSAGE);
+}
+
 export default function ClusterAnnotationPanel({
   callApi,
   liveObjectAttached,
@@ -88,7 +102,7 @@ export default function ClusterAnnotationPanel({
       setLabels(current => Object.fromEntries(values.map(row => [row.value, current[row.value] || ''])));
       if (data?.truncated) setError('This object has more clusters than can be labeled here. Use the Inspect step to map them.');
     } catch (loadError) {
-      setError(publicErrorMessage(loadError, 'Cluster labels could not be loaded. Run clustering first.'));
+      setError(clusterLoadErrorMessage(loadError));
     } finally {
       setLoading(false);
     }
@@ -154,7 +168,9 @@ export default function ClusterAnnotationPanel({
       ) : loading && !clusters.length ? (
         <p className="flex items-center gap-2 text-sm text-textMuted"><Loader2 size={14} className="animate-spin" /> Loading clusters…</p>
       ) : clusters.length === 0 ? (
-        <p className="text-sm text-textMuted">No clusters found. Run clustering, then refresh.</p>
+        error
+          ? <p className="text-sm text-amber-700 dark:text-amber-300" role="alert">{error}</p>
+          : <p className="text-sm text-textMuted">No clusters found. Run clustering, then refresh.</p>
       ) : (
         <div className="space-y-4">
           <div className="overflow-x-auto rounded-lg border border-border">

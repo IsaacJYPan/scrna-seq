@@ -1,7 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import ClusterAnnotationPanel, { topGenesByGroup, validateAnnotation } from './ClusterAnnotationPanel';
+import ClusterAnnotationPanel, { CLUSTERS_BUSY_MESSAGE, CLUSTERS_MISSING_MESSAGE, clusterLoadErrorMessage, topGenesByGroup, validateAnnotation } from './ClusterAnnotationPanel';
 
 const clusterValues = { values: [{ value: '1', count: 20 }, { value: '0', count: 30 }, { value: '10', count: 5 }] };
 
@@ -82,6 +82,19 @@ describe('ClusterAnnotationPanel', () => {
     expect(callApi).toHaveBeenCalledTimes(2);
   });
 
+  it('says R is busy, not that clustering is missing, while a large object is still loading', async () => {
+    const callApi = vi.fn(async () => { throw new Error('Request timed out'); });
+    renderPanel({ callApi });
+    expect(await screen.findByRole('alert')).toHaveTextContent(CLUSTERS_BUSY_MESSAGE);
+    expect(screen.queryByText(/Run clustering/)).not.toBeInTheDocument();
+  });
+
+  it('asks for clustering only when the cluster column is missing', async () => {
+    const callApi = vi.fn(async () => ({ error: 'column was not found in object metadata.' }));
+    renderPanel({ callApi });
+    expect(await screen.findByRole('alert')).toHaveTextContent(CLUSTERS_MISSING_MESSAGE);
+  });
+
   it('does not contact R until the private analysis is open', () => {
     const callApi = vi.fn();
     render(<ClusterAnnotationPanel callApi={callApi} liveObjectAttached={false} />);
@@ -91,6 +104,13 @@ describe('ClusterAnnotationPanel', () => {
 });
 
 describe('cluster annotation helpers', () => {
+  it('classifies cluster loading failures', () => {
+    expect(clusterLoadErrorMessage(new Error('column was not found in object metadata.'))).toBe(CLUSTERS_MISSING_MESSAGE);
+    expect(clusterLoadErrorMessage(new Error('No object loaded'))).toBe(CLUSTERS_BUSY_MESSAGE);
+    expect(clusterLoadErrorMessage(new Error('R service is busy. Please retry shortly.'))).toBe(CLUSTERS_BUSY_MESSAGE);
+    expect(clusterLoadErrorMessage(new Error('Failed to fetch at C:\secret\path'))).toBe(CLUSTERS_BUSY_MESSAGE);
+  });
+
   it('keeps the first marker genes per group', () => {
     const map = topGenesByGroup([
       { group: 0, gene: 'A' }, { group: 0, gene: 'B' }, { group: 0, gene: 'C' }, { group: 0, gene: 'D' }, { group: '1', gene: 'E' },
