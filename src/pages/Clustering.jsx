@@ -1,7 +1,7 @@
 import './analysisUi.css';
 import PageHeader from '../components/PageHeader';
 import React from 'react';
-import { Network, AlertTriangle, FileText, ChevronRight, SlidersHorizontal } from 'lucide-react';
+import { Network, AlertTriangle, FileText, ChevronRight } from 'lucide-react';
 import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';

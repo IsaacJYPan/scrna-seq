@@ -108,7 +108,7 @@ describe('cluster annotation helpers', () => {
     expect(clusterLoadErrorMessage(new Error('column was not found in object metadata.'))).toBe(CLUSTERS_MISSING_MESSAGE);
     expect(clusterLoadErrorMessage(new Error('No object loaded'))).toBe(CLUSTERS_BUSY_MESSAGE);
     expect(clusterLoadErrorMessage(new Error('R service is busy. Please retry shortly.'))).toBe(CLUSTERS_BUSY_MESSAGE);
-    expect(clusterLoadErrorMessage(new Error('Failed to fetch at C:\secret\path'))).toBe(CLUSTERS_BUSY_MESSAGE);
+    expect(clusterLoadErrorMessage(new Error('Failed to read /vault/secret/path'))).toBe(CLUSTERS_BUSY_MESSAGE);
   });
 
   it('keeps the first marker genes per group', () => {
