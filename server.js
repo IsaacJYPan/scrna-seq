@@ -724,6 +724,9 @@ const passwordChangeRateLimiter = createRateLimiter();
 // while the first one was still consuming the single shared R process.
 const R_PROXY_ADMISSION_STATE = Symbol('rProxyAdmissionState');
 const R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS = new Set(['/health', '/session-id']);
+// Constant-size, read-only state reads that pages repeat on every navigation.
+// They count against their own budget, not the analysis request budget.
+const R_PROXY_STATE_POLL_GET_PATHS = new Set(['/health', '/session-id', '/pipeline-state']);
 
 function markRProxyAdmissionIndeterminate(req) {
   const state = req && req[R_PROXY_ADMISSION_STATE];
@@ -773,11 +776,14 @@ function createRProxyAdmission(options = {}) {
     const userKey = String(req.user?.id || 'unknown');
     const now = Date.now();
     const windowMs = config.rProxyRateLimitWindowMs();
-    const maxRequests = config.rProxyRateLimitMax();
-    let entry = hits.get(userKey);
+    const statePoll = String(req.method || '').toUpperCase() === 'GET'
+      && R_PROXY_STATE_POLL_GET_PATHS.has(normalizeRProxyPath(req.path));
+    const maxRequests = statePoll ? config.rProxyStatePollRateLimitMax() : config.rProxyRateLimitMax();
+    const bucketKey = statePoll ? `${userKey}:state` : userKey;
+    let entry = hits.get(bucketKey);
     if (!entry || now >= entry.resetAt) {
       entry = { count: 0, resetAt: now + windowMs };
-      hits.set(userKey, entry);
+      hits.set(bucketKey, entry);
     }
     entry.count += 1;
     if (entry.count > maxRequests) {

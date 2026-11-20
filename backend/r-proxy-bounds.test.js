@@ -12,7 +12,7 @@ const {
 
 const SAVED = {};
 const ENV_KEYS = [
-  'R_PROXY_MAX_CONCURRENT', 'R_PROXY_RATE_LIMIT_MAX',
+  'R_PROXY_MAX_CONCURRENT', 'R_PROXY_RATE_LIMIT_MAX', 'R_PROXY_STATE_POLL_RATE_LIMIT_MAX',
   'R_PROXY_RATE_LIMIT_WINDOW_MS', 'R_PROXY_MAX_RESPONSE_BYTES',
   'R_PROXY_TIMEOUT_MS',
 ];
@@ -221,6 +221,28 @@ describe('bounded authenticated R proxy policy', () => {
 
     expect(next).toHaveBeenCalledTimes(3);
     expect(heavy.statusCode).toBe(200);
+  });
+
+  it('counts read-only state polls against their own budget, not the analysis budget', () => {
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    process.env.R_PROXY_RATE_LIMIT_MAX = '2';
+    process.env.R_PROXY_STATE_POLL_RATE_LIMIT_MAX = '5';
+    const admission = createRProxyAdmission();
+    const admitted = vi.fn();
+    const send = (path) => {
+      const res = fakeResponse();
+      admission({ method: 'GET', path, user: { id: 11 } }, res, admitted);
+      res.emit('finish');
+      return res;
+    };
+
+    for (let index = 0; index < 5; index += 1) expect(send('/pipeline-state').statusCode).toBe(200);
+    expect(send('/pipeline-state').statusCode).toBe(429);
+    // Fast navigation spent the poll budget, but analysis requests still have theirs.
+    expect(send('/meta-values').statusCode).toBe(200);
+    expect(send('/meta-values').statusCode).toBe(200);
+    expect(send('/meta-values').statusCode).toBe(429);
+    expect(admitted).toHaveBeenCalledTimes(7);
   });
 
   it('rate-limits by authenticated user without echoing request data', () => {

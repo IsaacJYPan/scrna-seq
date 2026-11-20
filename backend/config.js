@@ -446,6 +446,13 @@ function rProxyRateLimitMax() {
   return positiveIntFromEnv(process.env.R_PROXY_RATE_LIMIT_MAX, 60);
 }
 
+// Read-only state polls (pipeline state, health, session id) have their own,
+// larger budget so that moving quickly between pages, which re-reads the
+// pipeline state each time, does not spend the budget for analysis requests.
+function rProxyStatePollRateLimitMax() {
+  return positiveIntFromEnv(process.env.R_PROXY_STATE_POLL_RATE_LIMIT_MAX, 300);
+}
+
 function rProxyMaxConcurrent() {
   return positiveIntFromEnv(process.env.R_PROXY_MAX_CONCURRENT, 1);
 }
@@ -738,6 +745,7 @@ module.exports = {
   rProxyMaxResponseBytes,
   rProxyRateLimitWindowMs,
   rProxyRateLimitMax,
+  rProxyStatePollRateLimitMax,
   rProxyMaxConcurrent,
   supportedRTarget,
   summary,
