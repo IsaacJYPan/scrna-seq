@@ -24,6 +24,13 @@ function researcherLabel(value) {
   return value;
 }
 
+// Integration rewrites the open analysis outside a recorded run, which this
+// installation's policy turns off. Say so, and what the researcher already has,
+// rather than leaving the step greyed out without a reason.
+export const INTEGRATION_UNAVAILABLE_REASON = 'Batch integration changes the open analysis outside a recorded run, so this installation turns it off. '
+  + 'Multi-condition preparation merges samples without batch correction and keeps sample_id, condition and batch for each cell; '
+  + 'Study Design pseudobulk tests use each donor as the unit.';
+
 function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }) {
   const Icon = item.icon;
   const isActive = activeTab === item.id;
@@ -321,7 +328,7 @@ export default function Sidebar({
                 const blockedExpertR = (deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled')
                   && item.id === 'expert-r';
                 const visibleItem = blockedLegacyMutation
-                  ? { ...item, status: 'Unavailable in this workspace' }
+                  ? { ...item, status: 'Unavailable in this workspace', lockReason: INTEGRATION_UNAVAILABLE_REASON }
                   : blockedExpertR
                     ? { ...item, status: 'Not configured' }
                     : item;
