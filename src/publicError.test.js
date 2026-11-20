@@ -9,6 +9,15 @@ describe('publicErrorMessage', () => {
     expect(publicErrorMessage('Invalid email or password. Internal server diagnostic')).toBe(DEFAULT_PUBLIC_ERROR);
     expect(publicErrorMessage('Account ui-review@example.invalid was not found')).not.toContain('ui-review@example.invalid');
   });
+  it('tells the person which sign-up field the server rejected', () => {
+    for (const message of [
+      'Password must not contain your name or email username.',
+      'Password must be at least 15 characters.',
+      'Display name must be between 1 and 200 characters.',
+      'A valid email is required.',
+      'An account with this email already exists.',
+    ]) expect(publicErrorMessage(JSON.stringify({ error: message }))).toBe(message);
+  });
   it('preserves only the fixed safe submission-recovery instructions', () => {
     for (const message of Object.values(SUBMISSION_RECOVERY_MESSAGES)) expect(publicErrorMessage(new Error(message))).toBe(message);
     expect(publicErrorMessage('An earlier submission has not been confirmed: /__private_vault__/source.R')).toBe(DEFAULT_PUBLIC_ERROR);

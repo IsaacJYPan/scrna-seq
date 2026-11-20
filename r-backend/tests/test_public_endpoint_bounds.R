@@ -96,6 +96,8 @@ stopifnot(inherits(
   "try-error"
 ))
 stopifnot(identical(active_sessions[["user-1:obj-c"]], prior_replacement))
+capacity_error <- tryCatch(store_active_session("user-1:obj-c", list(value = 1:10), NULL), error = function(e) e)
+stopifnot(inherits(capacity_error, "live_session_capacity_error"))
 stopifnot(identical(ls(envir = active_sessions, all.names = TRUE), before_empty))
 stopifnot(inherits(
   try(store_active_session("user-3:obj-too-large", list(value = 1:10), NULL), silent = TRUE),

@@ -8,10 +8,18 @@ import {
   displayRunStatus,
   formatDate,
   parseErrorMessage,
+  parseServerTime,
   researcherRunNote,
 } from './analysisRunDisplay';
 
 describe('analysis run display helpers', () => {
+  it('reads the server canonical timestamp as UTC, not local time', () => {
+    expect(parseServerTime('2026-11-20 02:44:14').toISOString()).toBe('2026-11-20T02:44:14.000Z');
+    expect(parseServerTime('2026-11-20T02:44:14.000Z').toISOString()).toBe('2026-11-20T02:44:14.000Z');
+    expect(parseServerTime('not a date')).toBeNull();
+    expect(formatDate('2026-11-20 02:44:14')).toBe(new Date('2026-11-20T02:44:14Z').toLocaleString());
+  });
+
   it('formats dates and keeps unparseable values visible', () => {
     expect(formatDate(null)).toBe('Unknown');
     expect(formatDate('not a date')).toBe('not a date');

@@ -754,6 +754,13 @@ function markRProxyUpstreamError(req) {
 // deadline exactly as before.
 const R_PROXY_DRAIN_PROBE_INTERVAL_MS = 1000;
 
+// True once the client connection has gone away. `req.destroyed` alone is not
+// enough: Node also marks a request destroyed after its body has been read,
+// which is the normal state of every proxied POST.
+function rProxyClientGone(req, res) {
+  return Boolean(req.aborted || req.socket?.destroyed || res.destroyed || res.writableEnded);
+}
+
 function createRProxyAdmission(options = {}) {
   const drainProbe = typeof options.drainProbe === 'function' ? options.drainProbe : null;
   const drainProbeIntervalMs = Number.isInteger(options.drainProbeIntervalMs) && options.drainProbeIntervalMs > 0
@@ -786,6 +793,12 @@ function createRProxyAdmission(options = {}) {
         && R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS.has(normalizeRProxyPath(req.path))) {
       return next();
     }
+
+    // The browser can abandon a request (a page re-render or navigation aborts
+    // it) while earlier asynchronous checks run. Its 'close' event has then
+    // already fired, so a slot taken now would never be released. Nothing has
+    // been sent to R, so there is nothing to wait for.
+    if (rProxyClientGone(req, res)) return undefined;
 
     const maxConcurrent = config.rProxyMaxConcurrent();
     const userActive = activeByUser.get(userKey) || 0;
@@ -3326,6 +3339,12 @@ rProxyTransport.on('error', handleRProxyTransportError);
 // Express removes the /api/r mount prefix. No pattern matcher is needed for
 // this single, authenticated upstream; admission owns the exact path policy.
 app.use('/api/r', (req, res) => {
+  // An abandoned incoming request never ends, so the forwarded request would
+  // never be completed and R would never answer it. Nothing reached R.
+  if (rProxyClientGone(req, res)) {
+    markRProxyAdmissionSettled(req);
+    return;
+  }
   rProxyTransport.web(req, res).catch((error) => handleRProxyTransportError(error, req, res));
 });
 

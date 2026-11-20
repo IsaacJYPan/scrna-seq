@@ -84,7 +84,8 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     readOnly: false,
     // A checkpoint load reads + deserializes an RDS bundle and rebuilds the live object;
     // explicit but bounded so a hung load can never wedge a worker indefinitely.
-    defaultTimeoutMs: 120000,
+    // Reading back a multi-gigabyte study can exceed two minutes.
+    defaultTimeoutMs: 600000,
   }),
   // DEG / marker finding: run the existing FindAllMarkers path over ONE existing live
   // analysis object (the OWNER's, addressed by a SERVER-DERIVED X-Object-ID) and write the
@@ -137,7 +138,8 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     carriesCheckpointSave: true,
     mutating: true,
     readOnly: false,
-    defaultTimeoutMs: 120000,
+    // Writing a typical 50,000-100,000-cell study takes minutes, not seconds.
+    defaultTimeoutMs: 600000,
   }),
   // Idempotent job-scoped hydration for isolated compute runtimes. Unlike the
   // user-visible checkpoint-load job, this auxiliary operation does not publish

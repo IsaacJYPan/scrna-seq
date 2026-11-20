@@ -257,6 +257,13 @@ check("bounded pathway extraction retains only the requested preview rows",
       identical(dense_pathways$candidate_count, dense_pathway_total) &&
         nrow(dense_pathways$rows) == params$top_pathways &&
         nrow(dense_pathways$rows) < dense_pathways$candidate_count)
+dense_preview <- plumber_env$cellchat_inference_diverse_pathway_rows(
+  dense_pathways, params$top_pathways
+)
+check("the pathway preview names each distinct pathway before repeating one",
+      nrow(dense_preview) == params$top_pathways &&
+        all(unique(dense_metadata$pathway_name) %in% dense_preview$pathway_name) &&
+        !anyDuplicated(paste(dense_preview$source, dense_preview$target, dense_preview$pathway_name)))
 
 # Exercise a real CellChat object as well as the deterministic array fixture.
 # This is intentionally a small subset of the same synthetic Seurat source so

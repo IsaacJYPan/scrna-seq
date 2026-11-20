@@ -104,6 +104,30 @@ describe('bounded authenticated R proxy policy', () => {
     expect(next).toHaveBeenCalledTimes(2);
   });
 
+  it('does not hold the R slot for a request the browser abandoned before admission', () => {
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    process.env.R_PROXY_RATE_LIMIT_MAX = '20';
+    const admission = createRProxyAdmission();
+    const next = vi.fn();
+    // The browser aborted while earlier asynchronous checks ran: 'close' has
+    // already fired and will not fire again.
+    const abandoned = fakeResponse();
+    admission({ user: { id: 1 }, aborted: true, socket: { destroyed: true } }, abandoned, next);
+    expect(next).not.toHaveBeenCalled();
+
+    // A POST whose JSON body was already read is also `destroyed` in Node, but
+    // its client is still waiting and it must be admitted.
+    const readPost = fakeResponse();
+    admission({ user: { id: 2 }, method: 'POST', destroyed: true, socket: { destroyed: false } }, readPost, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    readPost.json({});
+
+    const following = fakeResponse();
+    admission({ user: { id: 1 } }, following, next);
+    expect(following.statusCode).toBe(200);
+    expect(next).toHaveBeenCalledTimes(2);
+  });
+
   it('releases the post-abort fence once a sequential R service answers a drain probe', async () => {
     vi.useFakeTimers();
     process.env.R_PROXY_MAX_CONCURRENT = '1';

@@ -55,7 +55,16 @@ run_condition_pseudobulk_de <- function(input_obj, design) {
     design$cell_type_column,
     vapply(design$samples, `[[`, character(1), "cell_metadata_column")
   ))
-  if (any(!required_columns %in% colnames(metadata))) stop("Required sample or cell-type metadata is absent.")
+  if (any(!required_columns %in% colnames(metadata))) {
+    # A definite input problem (often the contrast points at a saved version
+    # made before the labels were added), raised before any output is written.
+    stop(structure(
+      class = c("condition_metadata_absent", "error", "condition"),
+      list(message = paste0("Required sample or cell-type metadata is absent: ",
+                            paste(setdiff(required_columns, colnames(metadata)), collapse = ", ")),
+           call = NULL)
+    ))
+  }
 
   assigned_sample <- rep(NA_character_, nrow(metadata))
   names(assigned_sample) <- rownames(metadata)

@@ -765,6 +765,38 @@ describe('PipelineManager', () => {
       );
     });
   });
+
+  it('does not count a re-uploaded file as a second sample', async () => {
+    let uploadIndex = 0;
+    window.electronAPI.uploadDataset = vi.fn(async (_projectId, file) => {
+      uploadIndex += 1;
+      return {
+        id: `ds_dup${uploadIndex}`,
+        fileType: 'tenx_h5',
+        originalFilename: file.name,
+        sha256: `sha_${file.name}`,
+        uploadStatus: 'uploaded',
+        validationStatus: 'pending',
+      };
+    });
+    renderPipelineManager({ currentWs: { ...currentWs, objects: [], selectedObjectIds: [] }, datasetInfo: null });
+    fireEvent.click(await screen.findByRole('button', { name: 'Multiple conditions' }));
+    const upload = screen.getByTestId('seurat-pipeline-upload');
+    fireEvent.change(upload, { target: { files: [new File(['a'], 'a.h5'), new File(['b'], 'b.h5')] } });
+    expect(await screen.findByLabelText('Condition for b.h5')).toBeInTheDocument();
+    fireEvent.change(upload, { target: { files: [new File(['a'], 'a.h5')] } });
+    await waitFor(() => expect(window.electronAPI.uploadDataset).toHaveBeenCalledTimes(3));
+    // The second copy is listed but not selected, so the design still has two samples.
+    await waitFor(() => expect(screen.getAllByText('a.h5')).toHaveLength(2));
+    expect(screen.getAllByRole('textbox', { name: /^Condition for a\.h5$/ })).toHaveLength(1);
+    expect(screen.getByText(/2 selected samples/)).toBeInTheDocument();
+
+    // Selecting it by hand is caught before the run can start.
+    const boxes = screen.getAllByRole('checkbox', { name: /a\.h5/ });
+    fireEvent.click(boxes.find(box => !box.checked));
+    expect(await screen.findByText(/identical contents: a\.h5, a\.h5/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Prepare multi-condition analysis/i })).toBeDisabled();
+  });
 });
 
 describe('summaryDisplayEntries', () => {

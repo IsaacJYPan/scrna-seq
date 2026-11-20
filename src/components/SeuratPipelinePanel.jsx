@@ -249,7 +249,20 @@ export function SeuratPipelinePanel({
     if (condition) counts.set(condition, (counts.get(condition) || 0) + 1);
     return counts;
   }, new Map());
-  const multiSampleDesignValid = multiSampleRows.length >= 2
+  // The same file selected twice would count one biological sample as two
+  // replicates. Uploads carry a content checksum, so identical files are caught
+  // even when they have different names.
+  const duplicateMultiSampleFiles = (() => {
+    const byChecksum = new Map();
+    for (const dataset of selectedMultiDatasets) {
+      if (!dataset?.sha256) continue;
+      byChecksum.set(dataset.sha256, [...(byChecksum.get(dataset.sha256) || []), dataset]);
+    }
+    return [...byChecksum.values()].filter(group => group.length > 1)
+      .map(group => group.map(dataset => dataset.originalFilename || dataset.name || 'dataset'));
+  })();
+  const multiSampleDesignValid = duplicateMultiSampleFiles.length === 0
+    && multiSampleRows.length >= 2
     && multiSampleRows.length <= MAX_MULTI_SAMPLE_INPUTS
     && multiSampleRows.every(row => (
       isValidMultiSampleLabel(row.sampleName)
@@ -439,14 +452,19 @@ export function SeuratPipelinePanel({
     }
     setDatasetStatus({ loading: false, uploading: true, error: null });
     try {
+      const knownDatasets = [...datasets];
       for (const file of selectedFiles) {
         const created = await api.uploadDataset(activeProjectId, file, {
           supportedWorkflow: workflow.jobType,
           supportedFormat: workflow.formatLabel,
         }, workflow.datasetFileType);
         setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
+        knownDatasets.push(created);
         if (multiSampleMode) {
-          setMultiSampleRows(prev => prev.some(row => row.datasetId === created.id) ? prev : [...prev, {
+          setMultiSampleRows(prev => prev.some(row => (
+            row.datasetId === created.id
+            || (created.sha256 && knownDatasets.find(dataset => dataset.id === row.datasetId)?.sha256 === created.sha256)
+          )) ? prev : [...prev, {
             datasetId: created.id,
             sampleName: defaultSampleName(created),
             conditionName: '',
@@ -782,7 +800,12 @@ export function SeuratPipelinePanel({
                   <p className="mt-1">
                     {multiSampleRows.length} selected sample{multiSampleRows.length === 1 ? '' : 's'} across {multiSampleConditionCounts.size} condition{multiSampleConditionCounts.size === 1 ? '' : 's'}.
                   </p>
-                  {!multiSampleDesignValid && (
+                  {duplicateMultiSampleFiles.map(names => (
+                    <p key={names.join('|')} className="mt-2 text-danger">
+                      These files have identical contents: {names.join(', ')}. Keep one selected so the sample is not counted twice.
+                    </p>
+                  ))}
+                  {!multiSampleDesignValid && duplicateMultiSampleFiles.length === 0 && (
                     <p className="mt-2 text-amber-800 dark:text-amber-200">
                       Select 2-{MAX_MULTI_SAMPLE_INPUTS} datasets, enter unique sample names, and assign at least two conditions. Labels must be 1-80 characters and use letters, numbers, spaces, periods, underscores, or hyphens.
                     </p>

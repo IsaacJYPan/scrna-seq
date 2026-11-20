@@ -285,7 +285,15 @@ function formatGroupBy(value) {
   return GROUP_BY_OPTIONS.find(([candidate]) => candidate === value)?.[1] || 'Not recorded';
 }
 
-function InteractionTable({ interactions }) {
+// Owner-local labels shown next to the opaque group, only when the private
+// mapping for this run is loaded in the owner's workspace.
+function GroupCell({ group, labels }) {
+  const label = group && labels?.get(group);
+  if (!label) return group || 'NA';
+  return <>{group}<span className="block font-normal text-textMuted">{label}</span></>;
+}
+
+function InteractionTable({ interactions, labels }) {
   if (!interactions.length) {
     return <EmptyNotice title="No retained interactions in the safe preview">The private result table may contain no retained candidates for the configured thresholds.</EmptyNotice>;
   }
@@ -305,8 +313,8 @@ function InteractionTable({ interactions }) {
         <tbody className="divide-y divide-border/40 bg-surface/70">
           {interactions.map(row => (
             <tr key={row.key}>
-              <td className="p-3 font-bold text-text">{row.source}</td>
-              <td className="p-3 font-bold text-text">{row.target}</td>
+              <td className="p-3 font-bold text-text"><GroupCell group={row.source} labels={labels} /></td>
+              <td className="p-3 font-bold text-text"><GroupCell group={row.target} labels={labels} /></td>
               <td className="p-3 text-textMuted">{row.interaction}</td>
               <td className="p-3 text-textMuted">{row.pathway || 'NA'}</td>
               <td className="p-3 font-mono text-textMuted">{formatNumber(row.probability)}</td>
@@ -319,7 +327,7 @@ function InteractionTable({ interactions }) {
   );
 }
 
-function PathwayTable({ pathways }) {
+function PathwayTable({ pathways, labels }) {
   if (!pathways.length) {
     return <EmptyNotice title="No pathway preview returned">No pathway-level candidate rows were retained in the bounded public summary.</EmptyNotice>;
   }
@@ -339,8 +347,8 @@ function PathwayTable({ pathways }) {
           {pathways.map(row => (
             <tr key={row.key}>
               <td className="p-3 font-bold text-text">{row.name}</td>
-              <td className="p-3 text-textMuted">{row.source || 'NA'}</td>
-              <td className="p-3 text-textMuted">{row.target || 'NA'}</td>
+              <td className="p-3 text-textMuted"><GroupCell group={row.source} labels={labels} /></td>
+              <td className="p-3 text-textMuted"><GroupCell group={row.target} labels={labels} /></td>
               <td className="p-3 font-mono text-textMuted">{formatNumber(row.probability)}</td>
               <td className="p-3 font-mono text-textMuted">{formatNumber(row.pValue)}</td>
             </tr>
@@ -439,6 +447,9 @@ export default function CellChat({
       : {}),
   };
   const groupKeyGroupBy = summary?.groupBy || resolvedParams.groupBy || '';
+  const ownerGroupLabels = ownerGroupKey?.groups?.length
+    ? new Map(ownerGroupKey.groups.map(row => [row.group, row.label]))
+    : null;
 
   useEffect(() => {
     let canceled = false;
@@ -806,12 +817,12 @@ export default function CellChat({
               <div>
                 <h4 className="mb-2 text-sm font-bold text-text">Top candidate interactions</h4>
                 <p className="mb-3 text-xs text-textMuted">These are database-guided ligand–receptor predictions, not observations of direct physical contact or causal signaling.</p>
-                <InteractionTable interactions={summary.topInteractions} />
+                <InteractionTable interactions={summary.topInteractions} labels={ownerGroupLabels} />
               </div>
 
               <div>
                 <h4 className="mb-2 text-sm font-bold text-text">Top candidate signaling pathways</h4>
-                <PathwayTable pathways={summary.topPathways} />
+                <PathwayTable pathways={summary.topPathways} labels={ownerGroupLabels} />
               </div>
 
               <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">

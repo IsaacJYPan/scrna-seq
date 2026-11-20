@@ -94,9 +94,19 @@ describe('cluster annotation helpers', () => {
   it('keeps the first marker genes per group', () => {
     const map = topGenesByGroup([
       { group: 0, gene: 'A' }, { group: 0, gene: 'B' }, { group: 0, gene: 'C' }, { group: 0, gene: 'D' }, { group: '1', gene: 'E' },
-    ]);
+    ], 3);
     expect(map.get('0')).toEqual(['A', 'B', 'C']);
     expect(map.get('1')).toEqual(['E']);
+  });
+
+  it('lists widely detected markers before rare high-fold-change genes', () => {
+    const map = topGenesByGroup([
+      { group: '1', gene: 'LINC01827', pct1: 0.05 },
+      { group: '1', gene: 'IGF1', pct1: 0.12 },
+      { group: '1', gene: 'MARCO', pct1: 0.81 },
+      { group: '1', gene: 'FABP4', pct1: 0.9 },
+    ], 3);
+    expect(map.get('1')).toEqual(['MARCO', 'FABP4', 'LINC01827']);
   });
 
   it('rejects unsafe or computed column names', () => {

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
+import { formatDate, parseServerTime } from './analysisRunDisplay';
 
 export function ConditionsForm({ conditions, conditionName, setConditionName, busy, onSubmit }) {
   return (
@@ -384,13 +385,20 @@ function formatStat(value) {
 }
 
 export function ContrastResult({ result }) {
+  if (result?.failure) {
+    return (
+      <p role="alert" className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-700 dark:text-red-300">
+        Latest run did not finish{result.completedAt ? ` (${formatDate(result.completedAt)})` : ''}: {result.failure}
+      </p>
+    );
+  }
   const summary = result?.summary;
   if (!summary) return null;
   const rows = Array.isArray(summary.topResults) ? summary.topResults.slice(0, 15) : [];
   return (
     <div className="mt-3 rounded border border-border bg-background/60 p-3" data-testid="contrast-result">
       <p className="text-xs font-semibold text-text">
-        Latest result{result.completedAt ? ` · ${new Date(result.completedAt).toLocaleString()}` : ''}
+        Latest result{result.completedAt ? ` · ${formatDate(result.completedAt)}` : ''}
       </p>
       <p className="mt-1 text-xs text-textMuted">
         {summary.method || 'Pseudobulk'} · {summary.sampleCount ?? 'NA'} samples · {summary.testedCellTypeCount ?? 0} cell
@@ -434,7 +442,14 @@ export function ContrastResult({ result }) {
   );
 }
 
-export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContrast, results = {} }) {
+// A run started from this page is pending until a result completed after it.
+function runIsPending(queuedAt, result) {
+  if (!queuedAt) return false;
+  const finished = parseServerTime(result?.completedAt);
+  return !(finished && finished.getTime() >= new Date(queuedAt).getTime() - 1000);
+}
+
+export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContrast, results = {}, pendingRuns = {}, versionNames = {} }) {
   return (
     <div className="card p-4">
       <h3 className="font-semibold mb-3">Saved contrasts</h3>
@@ -456,6 +471,9 @@ export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContra
                 {item.numeratorConditionName} vs {item.denominatorConditionName} ·{' '}
                 {item.unitOfReplication}-level · {item.cellTypeColumn}
               </p>
+              {versionNames[item.analysisObjectId] && (
+                <p className="mt-1 text-xs text-textMuted">Saved version: {versionNames[item.analysisObjectId]}</p>
+              )}
               <p className="mt-1 text-xs text-textMuted">
                 Model:{' '}
                 <code>
@@ -475,11 +493,16 @@ export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContra
               <button
                 type="button"
                 className="btn btn-secondary text-xs mt-2"
-                disabled={!canWriteStudyDesign || item.status === 'invalid' || !!busy}
+                disabled={!canWriteStudyDesign || item.status === 'invalid' || !!busy || runIsPending(pendingRuns[item.id], results[item.id])}
                 onClick={() => runContrast(item)}
               >
                 Run edgeR pseudobulk
               </button>
+              {runIsPending(pendingRuns[item.id], results[item.id]) && (
+                <p role="status" className="mt-2 text-xs text-textMuted">
+                  Run started at {new Date(pendingRuns[item.id]).toLocaleTimeString()}. The result appears here when it finishes; progress is in Runs &amp; Results.
+                </p>
+              )}
               <ContrastResult result={results[item.id]} />
             </div>
           ))}

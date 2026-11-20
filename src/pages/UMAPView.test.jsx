@@ -290,6 +290,19 @@ describe('UMAPView', () => {
     expect(screen.queryByText(/Showing a previous calculation/)).not.toBeInTheDocument();
   });
 
+  it('colours a saved embedding by a metadata column such as sample', async () => {
+    const callApi = vi.fn(async path => ({ result: { exists: true, restored: true, n_components: 2,
+      group_by_options: ['sample_id', 'condition'],
+      trace_data: path.includes('group_by=sample_id')
+        ? [{ name: 'C141', x: [1], y: [1] }, { name: 'C51', x: [2], y: [2] }]
+        : [{ name: 'Cluster 0', x: [1, 2], y: [3, 4] }] } }));
+    render(<UMAPView {...baseProps({ callApi })} />);
+    const colourBy = await screen.findByRole('combobox', { name: 'Colour by' });
+    fireEvent.change(colourBy, { target: { value: 'sample_id' } });
+    await waitFor(() => expect(callApi).toHaveBeenCalledWith('/reduction-results?reduction=umap&group_by=sample_id', expect.any(Object), { useCache: false }));
+    expect(await screen.findByText('C51')).toBeInTheDocument();
+  });
+
   it('reports a missing reduction without computing a replacement', async () => {
     const callApi = vi.fn(async () => ({ result: { exists: false } }));
     render(<UMAPView {...baseProps({ callApi })} />);

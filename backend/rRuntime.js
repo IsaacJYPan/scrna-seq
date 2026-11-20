@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 
 const DEFAULT_R_PORT = 8000;
@@ -133,6 +134,16 @@ const R_SESSION_LIMIT_ENV_NAMES = Object.freeze([
   'R_MAX_ACTIVE_SESSION_BYTES',
   'R_MAX_ACTIVE_SESSION_BYTES_PER_USER',
   'R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION',
+  'R_MAX_PUBLIC_OBJECT_BYTES',
+]);
+
+const GIB = 1024 ** 3;
+const OWNED_R_MEMORY_SHARES = Object.freeze([
+  ['R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION', 0.4, GIB],
+  ['R_MAX_ACTIVE_SESSION_BYTES_PER_USER', 0.5, 2 * GIB],
+  ['R_MAX_ACTIVE_SESSION_BYTES', 0.6, 4 * GIB],
+  // Interactive views of one analysis; the same share as one live session.
+  ['R_MAX_PUBLIC_OBJECT_BYTES', 0.4, 512 * 1024 ** 2],
 ]);
 
 function buildRChildEnv(env = process.env, options = {}) {
@@ -153,6 +164,15 @@ function buildRChildEnv(env = process.env, options = {}) {
       throw new Error(`${name} must be a positive safe integer when set.`);
     }
     child[name] = value;
+  }
+  // The R service's fixed fallbacks (1 GiB per analysis) suit a shared server,
+  // but a 75,000-cell study is several GiB in memory and could not be opened on
+  // a researcher's own computer. When this process owns R and no byte limit was
+  // configured, size the limits from the machine's memory instead.
+  const totalMemoryBytes = Number(options.totalMemoryBytes) > 0 ? Number(options.totalMemoryBytes) : os.totalmem();
+  for (const [name, share, floor] of OWNED_R_MEMORY_SHARES) {
+    if (child[name]) continue;
+    child[name] = String(Math.max(floor, Math.floor(totalMemoryBytes * share)));
   }
   if (env.ENABLE_R_TEST_DIAGNOSTICS === 'true' && child.NODE_ENV !== 'production') {
     child.ENABLE_R_TEST_DIAGNOSTICS = 'true';

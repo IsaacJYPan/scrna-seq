@@ -16,6 +16,7 @@ import {
   pipelineProbeAction,
   pipelineProbeRetryDelay,
   reconcileRestoredSession,
+  recordedQcThresholds,
   serverUnsavedLiveChanges,
 } from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
@@ -1273,6 +1274,7 @@ export default function App() {
       setPipelineState(prev => ({
         ...prev,
         qc: Boolean(state.has_qc),
+        qcThresholds: recordedQcThresholds(state.qc_thresholds),
         normalize: Boolean(state.has_normalized),
         integrate: Boolean(state.has_integrated),
         pca: Boolean(state.has_pca),

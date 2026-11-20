@@ -103,6 +103,13 @@ run_seurat_pipeline_core <- function(p, read_gene_expression, output_path,
       obj$percent.mt <= max_percent_mt & obj$nCount_RNA >= as_int(p$minCountsFilter,0,0,10000000)
     if (sum(keep) < 3) stop("QC filtering would leave fewer than 3 cells.")
     obj <- subset(obj, cells = colnames(obj)[keep])
+    # Recorded so the QC page shows the thresholds this analysis actually used.
+    if (is.null(obj@misc$traceomics_pipeline)) obj@misc$traceomics_pipeline <- list()
+    obj@misc$traceomics_pipeline$qc <- TRUE
+    obj@misc$traceomics_pipeline$qc_thresholds <- list(
+      maxPercentMt = max_percent_mt, minFeatures = min_features_filter,
+      maxFeatures = max_features_filter, minCounts = as_int(p$minCountsFilter, 0, 0, 10000000)
+    )
   }
   post_filter_cells <- ncol(obj)
   invisible(gc())

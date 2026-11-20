@@ -5,10 +5,21 @@ import { publicErrorMessage } from '../publicError';
 // expression, pathway enrichment, CellChat, workspace runs). Keep these free of
 // page-specific copy so every page describes runs the same way.
 
+// The server's canonical timestamps are UTC written as "YYYY-MM-DD HH:MM:SS"
+// with no zone marker, which browsers would otherwise read as local time.
+const CANONICAL_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+export function parseServerTime(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value);
+  const date = new Date(CANONICAL_UTC.test(text) ? `${text.replace(' ', 'T')}Z` : text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 export function formatDate(value) {
   if (!value) return 'Unknown';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  const date = parseServerTime(value);
+  return date ? date.toLocaleString() : String(value);
 }
 
 const RUN_STATUS_LABELS = {

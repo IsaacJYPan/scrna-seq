@@ -45,18 +45,32 @@ describe('StudyDesign', () => {
     expect(screen.getByText('Saved version', { selector: 'label' })).toBeInTheDocument();
     expect(screen.getByText('Saved contrasts')).toBeInTheDocument();
     expect(screen.getAllByText('~ condition', { exact: true }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('Saved version: PBMC cohort')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /run edgeR pseudobulk/i }));
     expect(await screen.findByText(/Condition comparison started/i)).toBeInTheDocument();
     await waitFor(() => expect(window.electronAPI.createProjectJob).toHaveBeenCalled());
+    // Status appears beside the button, and a second click cannot start a duplicate.
+    expect(await screen.findByText(/Run started at .*The result appears here when it finishes/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /run edgeR pseudobulk/i })).toBeDisabled();
 
     expect(container.textContent).not.toMatch(/job_internal_1|contrast_internal_1|ao_private_1|Project History|immutable object|queued|canonical|checkpoint/i);
   });
 
+  it('reports a newer failed run beside its contrast with the reason', async () => {
+    window.electronAPI.listProjectJobs = vi.fn(async (_projectId, { status }) => (status === 'failed' ? [{
+      id: 'job_failed', status: 'failed', parameters: { contrastId: 'contrast_internal_1' }, completedAt: '2026-01-03T00:00:00.000Z',
+      error: { code: 'CONDITION_METADATA_ABSENT', message: 'Choose the saved version that contains the "cell_type" column and the sample column; this saved version does not have them.' },
+    }] : []));
+    window.electronAPI.listProjectJobArtifacts = vi.fn(async () => []);
+    render(<StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
+    expect(await screen.findByText(/Latest run did not finish.*Choose the saved version that contains the "cell_type" column/)).toBeInTheDocument();
+  });
+
   it('shows the newest pseudobulk summary for a saved contrast', async () => {
-    window.electronAPI.listProjectJobs = vi.fn(async () => [
+    window.electronAPI.listProjectJobs = vi.fn(async (_projectId, { status }) => (status !== 'completed' ? [] : [
       { id: 'job_old', parameters: { contrastId: 'contrast_internal_1' }, completedAt: '2026-01-01T00:00:00.000Z' },
       { id: 'job_new', parameters: { contrastId: 'contrast_internal_1' }, completedAt: '2026-01-02T00:00:00.000Z' },
-    ]);
+    ]));
     window.electronAPI.listProjectJobArtifacts = vi.fn(async (_projectId, jobId) => [{
       artifactType: 'condition_de_summary',
       metadata: { summary: {

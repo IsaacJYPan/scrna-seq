@@ -4,6 +4,22 @@
 # its R unit tests. They accept no function names, code, paths, metadata columns, or gene
 # set sources from the browser. The only supported v1 collection is local Gene Ontology
 # Biological Process data shipped in the mandatory Bioconductor packages.
+# The preview is capped, and adjusted p-values often tie at the permutation
+# floor, so a plain p-value order can fill the preview with one direction only.
+# Take the strongest pathways from each direction (filling from the other when
+# one side runs short) so researchers see what is higher and lower in the target.
+enrichment_gsea_balanced_preview_rows <- function(result_table, limit) {
+  n <- nrow(result_table)
+  if (n == 0L || limit <= 0L) return(integer())
+  nes <- as.numeric(result_table$normalized_enrichment_score)
+  up <- which(is.finite(nes) & nes > 0)
+  down <- which(!(seq_len(n) %in% up))
+  limit <- min(n, limit)
+  up_take <- min(length(up), max(ceiling(limit / 2), limit - length(down)))
+  down_take <- min(length(down), limit - up_take)
+  c(up[seq_len(up_take)], down[seq_len(down_take)])
+}
+
 enrichment_gsea_safe_summary_string <- function(value, max_chars = 240L) {
   if (!is.character(value) || length(value) != 1L || is.na(value)) return("")
   clean <- gsub("[[:cntrl:]]", " ", enc2utf8(value), perl = TRUE)
@@ -366,8 +382,8 @@ run_enrichment_gsea_analysis <- function(input_obj, p) {
   ))
   safe_warnings <- as.list(safe_warnings[nzchar(safe_warnings)])
 
-  top_count <- min(nrow(result_table), p$top_pathways)
-  top_pathways <- if (top_count == 0L) list() else lapply(seq_len(top_count), function(i) {
+  top_rows <- enrichment_gsea_balanced_preview_rows(result_table, p$top_pathways)
+  top_pathways <- if (length(top_rows) == 0L) list() else lapply(top_rows, function(i) {
     nes <- as.numeric(result_table$normalized_enrichment_score[i])
     list(
       pathway_id = enrichment_gsea_safe_summary_string(result_table$pathway_id[i], 80L),

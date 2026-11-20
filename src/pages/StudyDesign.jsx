@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { FlaskConical, RefreshCw } from 'lucide-react';
+import { FlaskConical } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 import RefreshButton from '../components/RefreshButton';
@@ -83,6 +83,9 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
   const [conditionComparisonStarted, setConditionComparisonStarted] = useState(false);
   const [singleSampleWarning, setSingleSampleWarning] = useState(null);
   const [contrastResults, setContrastResults] = useState({});
+  // Contrast id -> time its latest run was queued from this page, so the status
+  // is shown beside the button that started it.
+  const [pendingRuns, setPendingRuns] = useState({});
 
   // Newest completed pseudobulk summary per contrast, from the job's own
   // summary artifact (the complete table stays an audited download).
@@ -90,9 +93,13 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
     const api = window.electronAPI;
     if (!projectId || !api?.listProjectJobs || !api?.listProjectJobArtifacts) return;
     try {
-      const jobs = await api.listProjectJobs(projectId, { jobType: 'condition.pseudobulk_de.v1', status: 'completed' });
+      const [completedJobs, failedJobs] = await Promise.all([
+        api.listProjectJobs(projectId, { jobType: 'condition.pseudobulk_de.v1', status: 'completed' }),
+        api.listProjectJobs(projectId, { jobType: 'condition.pseudobulk_de.v1', status: 'failed' }).catch(() => []),
+      ]);
+      const jobs = [...(Array.isArray(completedJobs) ? completedJobs : []), ...(Array.isArray(failedJobs) ? failedJobs : [])];
       const newest = new Map();
-      for (const job of Array.isArray(jobs) ? jobs : []) {
+      for (const job of jobs) {
         const contrastId = job?.parameters?.contrastId;
         if (!contrastId) continue;
         const previous = newest.get(contrastId);
@@ -101,6 +108,11 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
         }
       }
       const entries = await Promise.all([...newest.entries()].map(async ([contrastId, job]) => {
+        // A newer failed run is reported beside its contrast, with the reason.
+        if (job.status === 'failed') {
+          return [contrastId, { jobId: job.id, completedAt: job.completedAt || job.updatedAt || job.createdAt,
+            failure: publicErrorMessage(job.error, 'The latest run did not finish. Open Runs & Results for details.') }];
+        }
         const artifacts = await api.listProjectJobArtifacts(projectId, job.id).catch(() => []);
         const summaryArtifact = (Array.isArray(artifacts) ? artifacts : [])
           .find((artifact) => artifact.artifactType === 'condition_de_summary');
@@ -323,6 +335,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
         analysisObjectId: item.analysisObjectId,
         parameters: { contrastId: item.id },
       });
+      setPendingRuns((previous) => ({ ...previous, [item.id]: new Date().toISOString() }));
       setConditionComparisonStarted(true);
     });
 
@@ -474,6 +487,8 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           busy={busy}
           runContrast={runContrast}
           results={contrastResults}
+          pendingRuns={pendingRuns}
+          versionNames={Object.fromEntries(objects.map((object) => [object.id, object.displayName || object.name || '']))}
         />
       </div>
     </div>

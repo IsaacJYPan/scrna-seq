@@ -140,6 +140,25 @@ describe('exploratory analysis validation and sanitization', () => {
     expect(safe.panels[0].rows[0]).toEqual({ feature: 'CD3D', group: '0', average: 2.4 });
     expect(JSON.stringify(safe)).not.toMatch(/raw_matrix|checkpoint|system|barcode|raw_counts/i);
   });
+
+  it('accepts a group composition split by a sample column and keeps its fractions', () => {
+    expect(validateExploratoryAnalysisParams({
+      recipe: 'group_composition', metadataField: 'sample_id', groupBy: 'ident',
+    }).params).toEqual({
+      recipe: 'group_composition', metadataField: 'sample_id', groupBy: 'ident', maxGroups: 24, histogramBins: 24,
+    });
+    expect(() => validateExploratoryAnalysisParams({ recipe: 'group_composition', metadataField: 'sample_id', groupBy: 'donor' }))
+      .toThrowError(/groupBy must be/i);
+    const safe = sanitizeExplorationSummary({
+      ...explorationBody(),
+      recipe: 'group_composition',
+      panels: [{ type: 'composition', title: 'Group composition by sample_id', field: 'sample_id', rows: [
+        { label: 'C141', group: 'FCN1+ macrophages', condition: 'mild', count: 40, fraction: 0.4, barcode: 'AAAC' },
+      ] }],
+    });
+    expect(safe.recipe).toBe('group_composition');
+    expect(safe.panels[0].rows[0]).toEqual({ label: 'C141', group: 'FCN1+ macrophages', condition: 'mild', count: 40, fraction: 0.4 });
+  });
 });
 
 describe.skipIf(!CONFIGURED)('explore.summarize.v1 worker contract', () => {

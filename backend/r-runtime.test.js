@@ -196,6 +196,15 @@ describe('owned R child environment isolation', () => {
       R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: '1073741824',
     });
     expect(JSON.stringify(child)).not.toContain('must-not-cross');
+    const sized = buildRChildEnv({}, { ...options, totalMemoryBytes: 32 * 1024 ** 3 });
+    expect(sized).toMatchObject({
+      R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: String(Math.floor(32 * 1024 ** 3 * 0.4)),
+      R_MAX_ACTIVE_SESSION_BYTES_PER_USER: String(16 * 1024 ** 3),
+      R_MAX_ACTIVE_SESSION_BYTES: String(Math.floor(32 * 1024 ** 3 * 0.6)),
+      R_MAX_PUBLIC_OBJECT_BYTES: String(Math.floor(32 * 1024 ** 3 * 0.4)),
+    });
+    const small = buildRChildEnv({}, { ...options, totalMemoryBytes: 2 * 1024 ** 3 });
+    expect(small.R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION).toBe(String(1024 ** 3));
     for (const value of ['0', '-1', '1.5', 'not-a-number', '9999999999999999']) {
       expect(() => buildRChildEnv({ R_MAX_ACTIVE_SESSIONS: value }, options))
         .toThrow(/positive safe integer/i);

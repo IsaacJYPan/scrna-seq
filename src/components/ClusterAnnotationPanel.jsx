@@ -14,14 +14,23 @@ function clusterSortKey(value) {
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
 }
 
-export function topGenesByGroup(markers, perGroup = 3) {
-  const byGroup = new Map();
+// Genes detected in few of a cluster's cells can top a fold-change ranking
+// while saying little about what the cluster is. Within each cluster's preview
+// (already in rank order), list widely detected markers first.
+const WIDELY_DETECTED = 0.25;
+
+export function topGenesByGroup(markers, perGroup = 5) {
+  const rowsByGroup = new Map();
   for (const marker of Array.isArray(markers) ? markers : []) {
     const group = marker?.group === undefined || marker?.group === null ? null : String(marker.group);
     if (group === null || typeof marker.gene !== 'string') continue;
-    const genes = byGroup.get(group) || [];
-    if (genes.length < perGroup) genes.push(marker.gene);
-    byGroup.set(group, genes);
+    rowsByGroup.set(group, [...(rowsByGroup.get(group) || []), marker]);
+  }
+  const byGroup = new Map();
+  for (const [group, rows] of rowsByGroup) {
+    const wide = rows.filter(row => !(Number(row.pct1) < WIDELY_DETECTED));
+    const narrow = rows.filter(row => Number(row.pct1) < WIDELY_DETECTED);
+    byGroup.set(group, [...wide, ...narrow].slice(0, perGroup).map(row => row.gene));
   }
   return byGroup;
 }
