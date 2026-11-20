@@ -740,11 +740,29 @@ async function acquireStandaloneWorkerLock(options = {}) {
   });
 }
 
+// A database is disposable when its name marks it as one (scrna_test, ci_db,
+// ...), matching scripts/require-test-database.js, or when the caller opts in
+// explicitly for a throwaway database with another name.
+const TEST_DATABASE_NAME = /(?:^|[_-])(test|ci)(?:$|[_-])/i;
+
+function isDisposableTestDatabase(databaseName, env = process.env) {
+  return TEST_DATABASE_NAME.test(String(databaseName || '')) || env.TRACEOMICS_ALLOW_SCHEMA_RESET === '1';
+}
+
 // TEST-ONLY: drop the app tables so a contract run starts from a clean schema.
-// Guarded so it can never run against a production database.
+// Guarded so it can never run against a production or development database.
 async function resetSchemaForTests() {
   if (config.isProduction()) {
     throw new Error('resetSchemaForTests must not run in production.');
+  }
+  const { rows: current } = await query('SELECT current_database() AS name');
+  const databaseName = current[0]?.name;
+  if (!isDisposableTestDatabase(databaseName)) {
+    throw new Error(
+      `resetSchemaForTests refuses to drop tables in "${databaseName}". `
+      + 'Point DATABASE_URL at a test database (for example scrna_test), '
+      + 'or set TRACEOMICS_ALLOW_SCHEMA_RESET=1 for a disposable one.',
+    );
   }
   await query(`
     DROP TABLE IF EXISTS
@@ -6983,6 +7001,7 @@ async function getAgentRunTrustForJob(jobId) {
 }
 
 module.exports = {
+  isDisposableTestDatabase,
   getAgentRunTrustForJob,
   // lifecycle
   isConfigured,
