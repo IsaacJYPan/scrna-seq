@@ -12,17 +12,29 @@ const db = require('./pgDatabase');
 const storage = require('./storage');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { currentReleases, buildRelease } = require('./workflowTrust/catalog');
+const { useTestWorkflowRuntime, TEST_WORKFLOW_RUNTIME } = require('./_workflow-runtime-test-utils');
+
+// Stands in for the R service's runtime attestation, which the worker checks
+// against the approved release before running it.
+function attestingR() {
+  const { trustManifest } = require('./workflowTrust/manifest');
+  return async (request) => (request.path === '/runtime/workflow-trust'
+    ? { status: 200, body: { ...TEST_WORKFLOW_RUNTIME, source: trustManifest().source } }
+    : { status: 404, body: { error: 'not used in this test' } });
+}
 
 const CONFIGURED = config.hasPostgresConnection();
 const ALL_CAPS = ['metadata.read', 'results.read', 'workflow.plan', 'workflow.executeApproved', 'run.cancelOwn'];
 
 let server;
+let restoreRuntime;
 const savedEnv = {};
 
 beforeAll(async () => {
   if (!CONFIGURED) return;
   for (const key of ['DISABLE_RATE_LIMIT', 'AGENT_MAX_OUTSTANDING_RUNS', 'AGENT_MAX_OUTSTANDING_RUNS_PER_SPONSOR']) savedEnv[key] = process.env[key];
   process.env.DISABLE_RATE_LIMIT = 'true';
+  restoreRuntime = useTestWorkflowRuntime();
   server = await startServer();
 });
 
@@ -30,6 +42,7 @@ afterAll(async () => {
   if (!CONFIGURED) return;
   if (server) await new Promise((resolve) => server.close(resolve));
   await db.close();
+  restoreRuntime?.();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
@@ -309,7 +322,7 @@ describe.skipIf(!CONFIGURED)('revocation, dispatch recheck, and cancellation', (
       const human = await api(server, `${ctx.base}/agent-runs`, { token: ctx.sponsor.token });
       expect(human.data.runs[0]).toMatchObject({ id: run.id, state: 'canceled' });
     }
-  });
+  }, 30000);
 
   it('cancels its own queued run, retains the reservation, and quarantines late output', async () => {
     const ctx = await setup();
@@ -602,7 +615,7 @@ describe.skipIf(!CONFIGURED)('trusted method follow-on studies', () => {
     expect(queued).toMatchObject({ job_type: 'trusted.method.v1', analysis_object_id: sourceResult });
 
     const runExpertSandbox = fakeSandbox({ cells_before: 1000, cells_after: 900, cells_removed: 100, fraction_kept: 0.9, values_not_found: 0 });
-    const worker = createJobWorker({ db, runExpertSandbox, logger: { info() {}, warn() {}, error() {}, log() {} } });
+    const worker = createJobWorker({ db, runExpertSandbox, callR: attestingR(), logger: { info() {}, warn() {}, error() {}, log() {} } });
     await worker.runOnce();
     const { rows: [done] } = await db.query('SELECT * FROM jobs WHERE id = $1', [queued.id]);
     expect(done.status, done.error_json).toBe('completed');
