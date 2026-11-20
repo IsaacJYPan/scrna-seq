@@ -36,7 +36,8 @@ describe('analysis run display helpers', () => {
   it('summarizes worker log entries without echoing their text', () => {
     expect(researcherRunNote({ level: 'error', message: 'Traceback at /vault/x' })).toBe('This analysis needs attention.');
     expect(researcherRunNote({ message: 'Job completed' })).toBe('Analysis finished.');
-    expect(researcherRunNote({ message: 'Claimed by worker' })).toBe('Compute started.');
+    expect(researcherRunNote({ message: 'Claimed by worker' })).toBe('Picked up by compute.');
+    expect(researcherRunNote({ message: 'Handler started.' })).toBe('Compute started.');
     expect(researcherRunNote({ level: 'warn', message: 'slow' })).toBe('Analysis warning recorded.');
     expect(researcherRunNote(null)).toBe('Analysis update recorded.');
   });
@@ -54,10 +55,21 @@ describe('analysis run display helpers', () => {
   });
 
   it('lists run notes as bounded researcher summaries, never raw worker text', () => {
-    const logs = Array.from({ length: 120 }, (_, index) => ({ level: 'info', ts: null, message: `claimed /srv/vault/${index}` }));
+    const logs = Array.from({ length: 120 }, (_, index) => ({ level: 'info', ts: null, message: `started /srv/vault/${index}` }));
     const { container } = render(<JobLogs logs={logs} />);
     expect(screen.getAllByText('Compute started.')).toHaveLength(100);
     expect(container.textContent).not.toMatch(/vault/);
+  });
+
+  it('gives the worker claim and the handler start different notes', () => {
+    render(<JobLogs logs={[
+      { level: 'info', ts: null, message: 'Claimed by worker (type=enrichment.gsea.v1).' },
+      { level: 'info', ts: null, message: 'Handler started.' },
+      { level: 'info', ts: null, message: 'Handler completed.' },
+    ]} />);
+    expect(screen.getAllByText('Compute started.')).toHaveLength(1);
+    expect(screen.getByText('Picked up by compute.')).toBeInTheDocument();
+    expect(screen.getByText('Analysis finished.')).toBeInTheDocument();
   });
 
   it('shows an empty notice before any run notes exist', () => {

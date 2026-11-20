@@ -39,7 +39,10 @@ export function researcherRunNote(entry) {
   if (entry?.level === 'error') return 'This analysis needs attention.';
   const message = String(entry?.message || '');
   if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
-  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
+  // The worker logs the claim, then the handler start; they are two steps and
+  // must not both read "Compute started."
+  if (/claim/i.test(message)) return 'Picked up by compute.';
+  if (/start|running|comput/i.test(message)) return 'Compute started.';
   if (entry?.level === 'warn') return 'Analysis warning recorded.';
   return 'Analysis update recorded.';
 }
