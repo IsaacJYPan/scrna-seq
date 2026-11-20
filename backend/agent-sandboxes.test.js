@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const { localTarCommand } = require('./localTar');
 const config = require('./config');
 const db = require('./pgDatabase');
 const storage = require('./storage');
@@ -121,7 +122,8 @@ async function completeSandboxJob(ctx, jobId, files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbx-'));
   for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
   const archive = path.join(dir, '..', `${path.basename(dir)}.tar.gz`);
-  execFileSync('tar', ['-czf', archive, '-C', dir, '.']);
+  const tar = localTarCommand('create', archive, dir);
+  execFileSync('tar', tar.args, { cwd: tar.cwd });
   const key = allocateExpertRBundleStorageKey(ctx.project.id, jobId);
   const stored = await provider.putFileFromPath(archive, key);
   const listed = Object.entries(files).map(([name, content]) => ({
