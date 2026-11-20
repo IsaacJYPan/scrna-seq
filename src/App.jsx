@@ -49,6 +49,7 @@ import {
   reconcileAnalysisObjectMetadata,
 } from './backendWorkspaceModel';
 import { APP_NAME } from './brand';
+import { onProjectJobSettled } from './projectJobEvents';
 
 const Workspace = React.lazy(() => import('./pages/Workspace'));
 const ResearchAnalyses = React.lazy(() => import('./pages/ResearchAnalyses'));
@@ -475,6 +476,27 @@ export default function App() {
       return { objects: [], selectedObjectId: null, error: err };
     }
   }, [patchActiveWorkspace, user]);
+
+  // A finished job can add or change saved versions (a pipeline run, a save,
+  // a restore). Refresh the selected project's objects when one settles, so
+  // the version list is current without a page reload. Jobs settling together
+  // share one refresh.
+  const selectedProjectIdRef = React.useRef(currentWs.selectedProjectId);
+  selectedProjectIdRef.current = currentWs.selectedProjectId;
+  useEffect(() => {
+    let timer = null;
+    const unsubscribe = onProjectJobSettled(({ projectId }) => {
+      if (projectId !== selectedProjectIdRef.current) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (projectId === selectedProjectIdRef.current) refreshAnalysisObjects(projectId);
+      }, 250);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [refreshAnalysisObjects]);
 
   const refreshProjects = useCallback(async () => {
     if (!user?.email) return;
