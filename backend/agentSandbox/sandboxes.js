@@ -24,6 +24,8 @@ const RUN_ID = /^sbr_[0-9a-f]{24}$/;
 const OBJECT_ID = /^[A-Za-z0-9_-]{1,80}$/;
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
 const MAX_INPUTS = 10;
+const MIN_REASON_CHARS = 20;
+const MAX_REASON_CHARS = 1000;
 // The Expert R container's default limits: 2 CPUs for at most 15 minutes.
 const RUN_CPU_SECONDS = 2 * 900;
 const NON_TERMINAL = ['created', 'queued', 'running', 'waiting_for_user'];
@@ -113,6 +115,10 @@ function publicRun(row, { includeScript = true } = {}) {
     runNumber: row.run_number,
     title: row.title,
     agent: { principalId: row.agent_principal_id, displayName: row.agent_display_name },
+    // Everything a sandbox run produces is AI-written code until a person
+    // reviews it; reviewState below says whether that has happened.
+    authorship: 'ai_written',
+    reason: row.agent_reason || null,
     sponsorUserId: Number(row.sponsor_user_id),
     delegationId: row.delegation_id,
     requestId: row.request_id,
@@ -402,12 +408,20 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
   }
 
   async function submitRun(actor, sandboxId, body = {}) {
-    rejectUnknown(body, ['requestId', 'title', 'script', 'inputAnalysisObjectId']);
+    rejectUnknown(body, ['requestId', 'title', 'script', 'inputAnalysisObjectId', 'reason']);
     if (!REQUEST_ID.test(String(body.requestId))) {
       throw codedError('INVALID_REQUEST_ID', 'requestId must be 8-80 letters, digits, "-" or "_".', 400);
     }
     const title = typeof body.title === 'string' ? body.title.trim() : '';
     if (!title || title.length > 200) throw codedError('INVALID_INPUT', 'title must be 1-200 characters.', 400);
+    // Verified code first: an agent writing its own R says why no reviewed
+    // workflow or library method covers the step. The reviewer sees it.
+    // eslint-disable-next-line no-control-regex -- deliberately strips control characters
+    const reason = typeof body.reason === 'string' ? body.reason.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '';
+    if (reason.length < MIN_REASON_CHARS || reason.length > MAX_REASON_CHARS) {
+      throw codedError('REASON_REQUIRED',
+        `reason must be ${MIN_REASON_CHARS}-${MAX_REASON_CHARS} characters: name the verified workflows or methods you checked (list_verified_code) and why none fits.`, 400);
+    }
     let validated;
     try {
       validated = validateExpertRParams({ profileId: EXPERT_R_PROFILE.id, script: body.script, inputIds: [] });
@@ -538,10 +552,10 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
       await client.query(
         `INSERT INTO agent_sandbox_runs (id, project_id, sandbox_id, delegation_id, agent_principal_id, sponsor_user_id,
            credential_id, request_id, request_sha256, job_id, run_number, title, script_sha256, input_analysis_object_id,
-           reserved_cpu_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+           reserved_cpu_seconds, agent_reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
         [runId, sandbox.project_id, sandbox.id, actor.delegation.id, actor.principalId, actor.sponsorUserId,
           actor.credentialId, body.requestId, requestSha256, jobId, counts.sandbox_runs + 1, title,
-          stored.scriptSha256, input.analysisObjectId, cpuPerRun]);
+          stored.scriptSha256, input.analysisObjectId, cpuPerRun, reason]);
       await recordAutomationEvent(client, {
         projectId: sandbox.project_id, actor, action: 'sandbox-run.admitted', decision: 'allowed',
         targetType: 'sandbox_run', targetId: runId, requestId: body.requestId,

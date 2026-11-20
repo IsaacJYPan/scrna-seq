@@ -2409,7 +2409,36 @@ function rowToAnalysisObject(row) {
     objectHash: row.object_hash,
     metadata: JSON.parse(row.metadata_json || '{}'),
     createdByProvenanceId: row.created_by_provenance_id,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    // Present only on reads that join it (AI_AUTHORSHIP_SELECT).
+    ...(row.ai_authorship ? { aiAuthorship: aiAuthorshipFromRow(row.ai_authorship) } : {}),
+  };
+}
+
+// An object produced by an agent's own sandbox script is the output of
+// AI-written code. The flag travels with the object, with the run's current
+// review state, so every view can show that a person must (or did) review it.
+const AI_AUTHORSHIP_SELECT = `(
+  SELECT jsonb_build_object('sandboxRunId', sr.id, 'sandboxId', sr.sandbox_id, 'agentName', ap.display_name,
+           'reviewState', sr.review_state, 'reviewedAt', sr.reviewed_at, 'reason', sr.agent_reason,
+           'scriptSha256', sr.script_sha256)
+    FROM agent_sandbox_runs sr
+    JOIN jobs j ON j.id = sr.job_id
+    JOIN agent_principals ap ON ap.id = sr.agent_principal_id
+   WHERE j.result_analysis_object_id = ao.id
+   ORDER BY sr.created_at DESC LIMIT 1) AS ai_authorship`;
+
+function aiAuthorshipFromRow(value) {
+  const data = typeof value === 'string' ? JSON.parse(value) : value;
+  return {
+    kind: 'ai_written_code',
+    sandboxRunId: data.sandboxRunId,
+    sandboxId: data.sandboxId,
+    agentName: data.agentName,
+    reviewState: data.reviewState,
+    reviewedAt: data.reviewedAt || null,
+    reason: data.reason || null,
+    scriptSha256: data.scriptSha256,
   };
 }
 
@@ -2688,7 +2717,7 @@ async function listProjectAnalysisObjects(userId, projectId, filters = {}) {
     if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
   }
   const { rows } = await query(
-    `SELECT ao.* FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
+    `SELECT ao.*, ${AI_AUTHORSHIP_SELECT} FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
     params
   );
   return rows.map(rowToAnalysisObject);
@@ -2698,7 +2727,7 @@ async function getProjectAnalysisObject(userId, projectId, objectId) {
   const membership = await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
   if (typeof objectId !== 'string' || objectId === '') return null;
   const { rows } = await query(
-    `SELECT ao.* FROM analysis_objects ao
+    `SELECT ao.*, ${AI_AUTHORSHIP_SELECT} FROM analysis_objects ao
       WHERE ao.id = $1 AND ao.project_id = $2
         AND ${expertRAnalysisObjectVisibilitySql('ao', '$3')}`,
     [objectId, String(projectId), Number(membership.userId)]

@@ -1,6 +1,7 @@
 import React from 'react';
 import DetailsPopover from './DetailsPopover';
 import { Info } from 'lucide-react';
+import AiAuthorshipBadge from './AiAuthorshipBadge';
 
 const PHASE_LABEL = {
   saving: 'Saving live analysis…', opening: 'Opening dataset…',
@@ -17,7 +18,10 @@ export default function AnalysisStatusBar({ datasetInfo, unsavedLiveChanges, che
   return <section aria-label="Analysis status" className={`shrink-0 h-16 border-b border-border px-4 flex items-center justify-between gap-3 ${attention ? 'bg-amber-500/10' : 'bg-surface'}`}>
     <div className="min-w-0 flex-1">
       <p role="status" className="truncate text-sm font-semibold text-text" title={status}>{status}</p>
-      <p className="truncate text-xs text-textMuted" title={datasetInfo.displayName || datasetInfo.name}>{datasetInfo.displayName || datasetInfo.name || 'Selected analysis'}</p>
+      <div className="flex min-w-0 items-center gap-2">
+        <p className="truncate text-xs text-textMuted" title={datasetInfo.displayName || datasetInfo.name}>{datasetInfo.displayName || datasetInfo.name || 'Selected analysis'}</p>
+        <AiAuthorshipBadge authorship={datasetInfo.aiAuthorship} className="shrink-0" />
+      </div>
     </div>
     <div className="shrink-0 flex items-center gap-2">
       <DetailsPopover label={<><Info size={16} aria-hidden="true" /><span className="sr-only sm:not-sr-only">Status details</span></>}>

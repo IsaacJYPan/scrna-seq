@@ -280,6 +280,30 @@ Slurm; agent sandbox runs can also use it once the target is qualified (see
 Slurm and container configuration for isolation. Remote commands are built from
 validated tokens and single-quoted; no caller text reaches the remote shell.
 
+## Verified code first
+
+Agents are steered to reviewed code before they write their own:
+
+- `GET …/projects/:projectId/verified-code` (`metadata.read`, MCP
+  `list_verified_code`) lists every built-in workflow release and trusted
+  library method, whether this project approved it, its upstream source,
+  declared deviations and parameter roles, and the reviewed multi-step chains in
+  `trusted-methods/workflows.json`. It returns no handler files or paths.
+- The MCP server's instructions tell agents to call `list_verified_code`
+  first, run what fits through a study, ask a person or `create_proposal` when
+  an entry fits but is not approved, and write their own R only as a last
+  resort. `run_r_script` is described as the last resort.
+- An agent's own script must carry a `reason` (20-1000 characters) naming
+  the verified entries it checked and why none fits; without it the run is
+  refused with `REASON_REQUIRED`. The reviewer sees the reason on the run.
+- Everything an agent's own script produces is flagged as AI-written code.
+  Sandbox runs report `authorship: "ai_written"`. The result analysis object
+  carries `aiAuthorship` (agent, sandbox run, reason, script digest and the
+  run's current review state) on every project object read, and the app shows
+  an "AI-written code · Needs review" badge on the run, in the saved-version
+  list, and in the status bar of every analysis page while that result is
+  open. The badge stays after promotion, reading "Reviewed and promoted".
+
 ## Isolated development (phase 4)
 
 An agent with `development.executeCandidate` can write and run its own R
@@ -293,7 +317,7 @@ active runs, and a CPU-second budget. Content is immutable; a sandbox can only
 be closed. An agent sees only open sandboxes its sponsor created.
 
 **Runs.** `POST …/sandboxes/:sandboxId/runs` with `{ requestId, title, script,
-inputAnalysisObjectId? }` runs the script once as an ordinary Expert R job owned
+reason, inputAnalysisObjectId? }` runs the script once as an ordinary Expert R job owned
 by the sponsor. In the local target that is the ephemeral Expert R container:
 no network, a read-only copy of the pinned checkpoint available as `obj`, no
 project storage mount, 2 CPUs, 8 GiB, 15 minutes, and at most 50 output files
@@ -445,6 +469,7 @@ Errors use `{ error, code, retry, correlationId }`; `retry` is `never`,
 | Completed project runs, or `?scope=mine` for this agent's runs | `GET /api/automation/v1/projects/:projectId/runs` | `results.read` |
 | Submit a proposal | `POST /api/automation/v1/projects/:projectId/proposals` | `proposal.create` |
 | This agent's proposals | `GET /api/automation/v1/projects/:projectId/proposals[/:proposalId]` | `proposal.create` |
+| Verified code: every reviewed release and library method, approved here or not | `GET …/projects/:projectId/verified-code` | `metadata.read` |
 | Approved releases | `GET …/projects/:projectId/workflows` | `workflow.plan` |
 | Sponsor's open studies, with full trial history | `GET …/projects/:projectId/studies[/:studyId]` | `workflow.plan` |
 | Create or read a plan | `POST …/plans`, `GET …/plans/:planId` | `workflow.plan` |
@@ -534,7 +559,7 @@ from `TRACEOMICS_AGENT_TOKEN` or `TRACEOMICS_AGENT_TOKEN_FILE`; tools never take
 a credential argument.
 
 Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
-`list_workflows`, `list_targets`, `list_studies`, `get_study`, `create_plan`,
+`list_verified_code`, `list_workflows`, `list_targets`, `list_studies`, `get_study`, `create_plan`,
 `get_plan`, `submit_run`, `get_run`, `get_run_results`, `cancel_run`,
 `create_proposal`, `list_proposals`, `get_proposal`, `list_sandboxes`,
 `get_sandbox`, `run_r_script`, `get_sandbox_run`, `read_sandbox_file`,

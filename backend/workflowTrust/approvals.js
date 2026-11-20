@@ -140,7 +140,15 @@ function createApprovalService({ db, withTransaction }) {
     });
   }
 
-  return { ensureCatalog, listForHuman, listApprovedForProject, approve, revoke };
+  // Every current release, marked with whether this project approved it, for
+  // agents deciding what verified code exists before writing their own.
+  async function listCatalogForProject(projectId) {
+    const releases = await ensureCatalog();
+    const approvals = await activeApprovals(db, projectId);
+    return releases.map((r) => ({ release: r, approved: approvals.has(r.id) }));
+  }
+
+  return { ensureCatalog, listForHuman, listApprovedForProject, listCatalogForProject, approve, revoke };
 }
 
 module.exports = { createApprovalService, publicRelease };

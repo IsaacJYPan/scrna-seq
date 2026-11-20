@@ -12,6 +12,7 @@ const run = {
   steps: [{ number: 1, title: 'Cluster', code: 'stopifnot(TRUE)\nobj <- FindClusters(obj)\nsave_figure(p, "umap.png")', readable: 'obj <- FindClusters(obj)', hiddenLines: 1 }],
   files: [{ name: 'umap.png', kind: 'image', sizeBytes: 10 }, { name: 'markers.csv', kind: 'text', sizeBytes: 20 }],
   console: [], review: { state: 'draft' }, resultAnalysisObjectId: 'obj_2',
+  reason: 'No verified method draws per-donor dot plots; checked gene-figures.',
 };
 
 describe('AgentSandboxes', () => {
@@ -46,6 +47,9 @@ describe('AgentSandboxes', () => {
     render(<AgentSandboxes projectId="proj_1" role="owner" userId={7} />);
     fireEvent.click(await screen.findByRole('button', { name: /markers/i }));
     const article = await screen.findByRole('article', { name: 'Run 1' });
+    // Agent-written code is flagged for review, with the agent's reason.
+    expect(within(article).getByTestId('ai-authorship-badge')).toHaveTextContent('AI-written code · Needs review');
+    expect(article).toHaveTextContent('Why not verified code: No verified method draws per-donor dot plots');
     const notebook = within(article).getByLabelText('Notebook for run 1');
     expect(within(notebook).getByRole('region', { name: 'Markdown cell 1' })).toHaveTextContent('1. Cluster');
     const code = within(notebook).getByRole('region', { name: 'R cell 2' });

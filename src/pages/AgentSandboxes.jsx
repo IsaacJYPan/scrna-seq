@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Boxes, CheckCircle2, Download, Loader2, XCircle } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import AgentRunNotebook from '../components/AgentRunNotebook';
+import AiAuthorshipBadge from '../components/AiAuthorshipBadge';
 
 // Human side of isolated agent development (docs/spec.md phase 4). A person
 // picks which of their saved analyses an agent may read and how many runs it
@@ -234,6 +235,11 @@ export default function AgentSandboxes({ projectId, role, userId, theme, onChang
                         <p className="font-bold text-text">Run {run.runNumber}: {run.title} <span className="font-normal text-textMuted">by {run.agent.displayName}</span></p>
                         <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[run.state] || 'border-border text-textMuted'}`}>{STATE_LABEL[run.state] || run.state}</span>
                       </div>
+                      <AiAuthorshipBadge authorship={{ agentName: run.agent.displayName, reviewState: run.review.state, reason: run.reason }} />
+                      <p className="text-xs text-textMuted">
+                        <span className="font-semibold text-text">Why not verified code: </span>
+                        {run.reason || 'No reason was recorded (run submitted before reasons were required).'}
+                      </p>
                       {run.error && <p className="text-xs text-danger">{run.error.message}</p>}
                       {run.steps && <AgentRunNotebook run={{ ...run, sandboxName: detail.name }} projectId={projectId} theme={theme} canSave={canWrite}
                         fileUrl={(name, options) => api.agentSandboxFileUrl?.(projectId, run.id, name, options)}

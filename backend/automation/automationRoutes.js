@@ -174,6 +174,12 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
     schema: 'traceomics.automation.workflows.v1',
     releases: await approvals.listApprovedForProject(actor.delegation.projectId),
   })));
+  // Verified code first: every reviewed workflow and library method, approved
+  // here or not, so an agent checks it before writing its own R.
+  router.get('/projects/:projectId/verified-code', route('metadata.read', async (req, actor) => ({
+    schema: 'traceomics.automation.verified-code.v1',
+    ...(await require('./verifiedCode').listVerifiedCode(approvals, actor.delegation.projectId)),
+  })));
   router.get('/projects/:projectId/targets', route('metadata.read', () => targets.list()));
   router.get('/projects/:projectId/studies', route('workflow.plan', async (req, actor) => ({
     schema: 'traceomics.automation.studies.v1',

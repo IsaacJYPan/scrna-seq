@@ -15,6 +15,19 @@ import { pathToFileURL } from 'node:url';
 import { defaultRequestId, readToken, sendRequest } from './traceomics.mjs';
 
 const SERVER_INFO = { name: 'traceomics', version: '1.0.0' };
+
+// Verified code first. Every script an agent writes needs a person to review
+// it, while reviewed workflows and library methods do not, so the server tells
+// agents to look for verified code before writing their own.
+export const MCP_INSTRUCTIONS = [
+  'TraceOmics delegated-agent tools. Start with get_context to see what you may do.',
+  'Prefer verified code. Call list_verified_code before any analysis: it lists every reviewed workflow and trusted library method, whether this project approved it, and reviewed multi-step chains.',
+  'Run verified code through a study: list_studies, create_plan, submit_run, get_run, get_run_results.',
+  'If a verified entry fits but is not approved or has no study, ask a person or use create_proposal rather than re-implementing it.',
+  'Write your own R only when nothing verified covers the step: list_sandboxes, run_r_script (with its reason), get_sandbox_run, read_sandbox_file. That code is flagged as AI-written; inputs are read-only and outputs stay drafts until a person reviews and promotes them. Keep scripts short and close to standard Seurat and Bioconductor calls so they are quick to review.',
+  "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise.",
+  'Ask a person (or create_proposal) for anything outside what you were given.',
+].join(' ');
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 const ID = {
@@ -71,6 +84,8 @@ export const TOOLS = [
       const q = [a.mine === true ? 'scope=mine' : '', optionalLimit(a)].filter(Boolean).join('&');
       return { method: 'GET', path: `${project(a)}/runs${q ? `?${q}` : ''}` };
     }),
+  tool('list_verified_code', 'Every reviewed workflow and trusted library method (QC, doublets, integration, annotation, markers, pathways, CellChat, pseudobulk DE, composition, trajectories, spatial), whether this project approved it, and reviewed multi-step chains. Check this before writing any R: verified code needs no new review, your own code does.',
+    projectProp, ['projectId'], (a) => ({ method: 'GET', path: `${project(a)}/verified-code` })),
   tool('list_workflows', 'Workflow releases approved for this project, with parameter schemas.', projectProp, ['projectId'],
     (a) => ({ method: 'GET', path: `${project(a)}/workflows` })),
   tool('list_targets', 'Compute targets (local, Slurm) and whether they are available.', projectProp, ['projectId'],
@@ -140,15 +155,16 @@ export const TOOLS = [
     projectProp, ['projectId'], (a) => ({ method: 'GET', path: `${project(a)}/sandboxes` })),
   tool('get_sandbox', 'One sandbox with this agent\'s runs in it.', { ...projectProp, sandboxId: { type: 'string' } }, ['projectId', 'sandboxId'],
     (a) => ({ method: 'GET', path: `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}` })),
-  tool('run_r_script', 'Run your own R script once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
+  tool('run_r_script', 'Last resort: use only when list_verified_code has nothing that covers this step. Your script is flagged as AI-written code for a person to review. Give `reason`: which verified entries you checked and why none fits. Runs once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
     { ...projectProp, sandboxId: { type: 'string' }, title: { type: 'string', description: 'What this run does, in a few words.' },
       script: { type: 'string', description: 'R source, at most 32 KiB.' },
+      reason: { type: 'string', description: 'Why verified code does not cover this, naming the list_verified_code entries you checked (20-1000 characters). Shown to the reviewer.' },
       inputAnalysisObjectId: { type: 'string', description: 'One of the sandbox inputs; defaults to the first.' },
       requestId: { type: 'string' } },
-    ['projectId', 'sandboxId', 'title', 'script'],
+    ['projectId', 'sandboxId', 'title', 'script', 'reason'],
     (a) => {
       const base = `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/runs`;
-      const body = { title: str(a, 'title'), script: str(a, 'script') };
+      const body = { title: str(a, 'title'), script: str(a, 'script'), reason: str(a, 'reason') };
       if (a.inputAnalysisObjectId !== undefined) body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
       body.requestId = a.requestId === undefined
         ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? ''])
@@ -260,7 +276,7 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
         protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
-        instructions: 'TraceOmics delegated-agent tools. Start with get_context to see what you may do. Approved workflows: list_studies, create_plan, submit_run, get_run, get_run_results. Your own analysis code: list_sandboxes, run_r_script, get_sandbox_run, read_sandbox_file (inputs are read-only and outputs stay drafts until a person promotes them). Writing up: create_report, write_report_section, get_report to read reviewers\' comments and revise. Ask a person (or create_proposal) for anything outside what you were given.',
+        instructions: MCP_INSTRUCTIONS,
       } };
     } else if (method === 'ping') {
       outcome = { result: {} };

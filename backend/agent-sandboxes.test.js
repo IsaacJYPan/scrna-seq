@@ -109,9 +109,11 @@ async function setup({ caps = CAPS, limits = { maxOutstandingRuns: 2 }, sandbox 
   return { sponsor, project, object, base, sandbox: created.data.sandbox, agent, delegation: delegation.data.delegation };
 }
 
+const REASON = 'No verified entry covers this step: checked seurat-markers and gene-figures.';
+
 function submit(ctx, requestId = 'req-sandbox-0001', extra = {}) {
   return ctx.agent(`/sandboxes/${ctx.sandbox.id}/runs`, {
-    method: 'POST', body: { requestId, title: 'Cluster and plot', script: SCRIPT, ...extra },
+    method: 'POST', body: { requestId, title: 'Cluster and plot', script: SCRIPT, reason: REASON, ...extra },
   });
 }
 
@@ -170,8 +172,15 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     expect(listed.status).toBe(200);
     expect(listed.data.sandboxes[0]).toMatchObject({ id: ctx.sandbox.id, runtime: { network: 'none' } });
 
+    // Own R needs a reason naming the verified code that was checked.
+    const noReason = await submit(ctx, 'req-sandbox-0000', { reason: undefined });
+    expect(noReason.status).toBe(400);
+    expect(noReason.data.code).toBe('REASON_REQUIRED');
+    expect((await submit(ctx, 'req-sandbox-000a', { reason: 'too short' })).data.code).toBe('REASON_REQUIRED');
+
     const first = await submit(ctx);
     expect(first.status, JSON.stringify(first.data)).toBe(201);
+    expect(first.data.run).toMatchObject({ authorship: 'ai_written', reason: REASON });
     expect(first.data.run).toMatchObject({ state: 'queued', runNumber: 1, inputAnalysisObjectId: ctx.object.id });
     expect(first.data.run.steps.map((s) => s.title)).toEqual(['Load', 'Cluster']);
     expect(first.data.run.steps[1].readable).toBe(
@@ -195,6 +204,14 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     expect(run.data.run).toMatchObject({ state: 'draft_ready', review: { state: 'draft' }, resultAnalysisObjectId: completion.resultObject.id });
     expect(run.data.run.files.map((f) => [f.name, f.kind])).toEqual([['clusters.csv', 'text'], ['umap.png', 'image']]);
 
+    // The result object itself carries the AI-written flag and its review state.
+    const flagged = await api(server, `${ctx.base}/analysis-objects/${completion.resultObject.id}`, { token: ctx.sponsor.token });
+    expect(flagged.data.aiAuthorship).toMatchObject({
+      kind: 'ai_written_code', sandboxRunId: first.data.run.id, reviewState: 'draft', reason: REASON,
+    });
+    const plain = await api(server, `${ctx.base}/analysis-objects/${ctx.object.id}`, { token: ctx.sponsor.token });
+    expect(plain.data.aiAuthorship).toBeUndefined();
+
     const table = await ctx.agent(`/sandbox-runs/${first.data.run.id}/files/clusters.csv`);
     expect(table.data).toMatchObject({ kind: 'text', text: 'cluster\n1\n2\n' });
     const image = await ctx.agent(`/sandbox-runs/${first.data.run.id}/files/umap.png`);
@@ -217,6 +234,8 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     });
     expect(review.status, JSON.stringify(review.data)).toBe(200);
     expect(review.data.run.review).toMatchObject({ state: 'promoted', branchId: expect.stringMatching(/^br_/) });
+    const projectObjects = await api(server, `${ctx.base}/analysis-objects`, { token: collaborator.token });
+    expect(projectObjects.data.find((o) => o.id === completion.resultObject.id).aiAuthorship).toMatchObject({ reviewState: 'promoted' });
     expect(await db.getProjectAnalysisObject(collaborator.user.id, ctx.project.id, completion.resultObject.id)).toBeTruthy();
     const again = await api(server, `${ctx.base}/agent-sandbox-runs/${first.data.run.id}/review`, {
       method: 'POST', token: ctx.sponsor.token, body: { decision: 'discarded' },
@@ -225,6 +244,22 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
 
     const audit = await db.query('SELECT action, actor_kind FROM automation_audit_events ORDER BY created_at, id');
     expect(audit.rows.map((r) => r.action)).toEqual(expect.arrayContaining(['sandbox.created', 'sandbox-run.admitted', 'sandbox-run.promoted']));
+  });
+
+  it('lists verified code for the agent before it writes its own', async () => {
+    const ctx = await setup();
+    const verified = await ctx.agent('/verified-code');
+    expect(verified.status, JSON.stringify(verified.data)).toBe(200);
+    expect(verified.data.schema).toBe('traceomics.automation.verified-code.v1');
+    expect(verified.data.guidance).toMatch(/Use verified code first/);
+    const keys = verified.data.entries.map((e) => e.key);
+    expect(keys).toEqual(expect.arrayContaining(['seurat-qc-cluster', 'seurat-markers', 'doublets-scdblfinder', 'pseudobulk-de']));
+    const doublets = verified.data.entries.find((e) => e.key === 'doublets-scdblfinder');
+    expect(doublets).toMatchObject({ kind: 'trusted-method', approvedForProject: false, upstream: { url: expect.stringMatching(/^https:/) } });
+    expect(doublets.parameters.find((p) => p.key === 'sample-column')).toMatchObject({ role: 'design' });
+    expect(verified.data.entries.find((e) => e.key === 'seurat-qc-cluster').kind).toBe('built-in-workflow');
+    expect(verified.data.workflows.length).toBeGreaterThan(0);
+    expect(JSON.stringify(verified.data)).not.toMatch(/handlerFiles|r-backend[\\/]/);
   });
 
   it('enforces capability, sandbox budgets, and input pinning', async () => {
@@ -283,7 +318,7 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     const token = delegation.data.credential.token;
     return {
       submit: (requestId) => api(server, `/api/automation/v1/projects/${ctx.project.id}/sandboxes/${sandbox.data.sandbox.id}/runs`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: { requestId, title: requestId, script: SCRIPT },
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: { requestId, title: requestId, script: SCRIPT, reason: REASON },
       }),
     };
   }

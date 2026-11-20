@@ -2429,6 +2429,10 @@ CREATE TABLE IF NOT EXISTS agent_sandbox_runs (
   UNIQUE (sandbox_id, run_number),
   CHECK ((review_state = 'draft') = (reviewed_at IS NULL))
 );
+-- Why the agent wrote its own R instead of using verified code. Required for
+-- new runs (sandboxes.submitRun); NULL only on runs recorded before it existed.
+ALTER TABLE agent_sandbox_runs ADD COLUMN IF NOT EXISTS agent_reason TEXT
+  CHECK (agent_reason IS NULL OR char_length(agent_reason) BETWEEN 1 AND 1000);
 CREATE INDEX IF NOT EXISTS idx_agent_sandbox_runs_sandbox ON agent_sandbox_runs(sandbox_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_sandbox_runs_delegation ON agent_sandbox_runs(delegation_id, created_at DESC);
 

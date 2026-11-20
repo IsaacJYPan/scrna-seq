@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'node:stream';
-import { createMcpServer, serveStdio, TOOLS } from './traceomics-mcp.mjs';
+import { createMcpServer, serveStdio, TOOLS, MCP_INSTRUCTIONS } from './traceomics-mcp.mjs';
 
 const TOKEN = `tro_agent_${'A'.repeat(43)}`;
 const ENV = { TRACEOMICS_AGENT_TOKEN: TOKEN, TRACEOMICS_URL: 'http://127.0.0.1:9' };
@@ -62,15 +62,37 @@ describe('traceomics MCP server', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('steers agents to verified code before their own R, and requires a reason for their own R', async () => {
+    const init = await createMcpServer({ env: ENV, fetchImpl: recordingFetch().fetchImpl })
+      .handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
+    expect(init.result.instructions).toBe(MCP_INSTRUCTIONS);
+    expect(MCP_INSTRUCTIONS).toMatch(/Prefer verified code. Call list_verified_code before any analysis/);
+    expect(MCP_INSTRUCTIONS.indexOf('list_verified_code')).toBeLessThan(MCP_INSTRUCTIONS.indexOf('run_r_script'));
+    expect(MCP_INSTRUCTIONS).toMatch(/flagged as AI-written/);
+
+    const rScript = TOOLS.find((t) => t.name === 'run_r_script');
+    expect(rScript.description).toMatch(/^Last resort/);
+    expect(rScript.inputSchema.required).toContain('reason');
+
+    const { calls, fetchImpl } = recordingFetch(200, { schema: 'x', entries: [] });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    await server.callTool('list_verified_code', { projectId: 'proj_1' });
+    expect(calls[0].url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/verified-code');
+    const missing = await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 't', script: 'print(1)' });
+    expect(missing.result.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
   it('runs an R script in a sandbox with a stable request id and returns figures as images', async () => {
     const { calls, fetchImpl } = recordingFetch(201, { schema: 'x', run: { id: 'sbr_1' } });
     const server = createMcpServer({ env: ENV, fetchImpl });
-    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)' };
+    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)',
+      reason: 'No verified entry plots per-donor marker dot plots; checked seurat-markers and gene-figures.' };
     await server.callTool('run_r_script', args);
     await server.callTool('run_r_script', args);
     expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/sbx_${'a'.repeat(24)}/runs`);
     const [a, b] = calls.map((c) => JSON.parse(c.init.body));
-    expect(a).toEqual({ title: 'Markers', script: 'print(1)', requestId: expect.any(String) });
+    expect(a).toEqual({ title: 'Markers', script: 'print(1)', reason: args.reason, requestId: expect.any(String) });
     expect(a.requestId).toBe(b.requestId);
     expect(TOOLS.find((t) => t.name === 'run_r_script').annotations.readOnlyHint).toBe(false);
 
