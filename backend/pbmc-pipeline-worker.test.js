@@ -651,11 +651,11 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
     expect(await listProjectArtifacts(alice.id, proj.id, { jobId: job.id })).toHaveLength(0);
   }
 
-  it('an R failure (non-200) remains indeterminate and creates NO successful output', async () => {
+  it('an R-returned failure with no receipt fails at once and creates NO successful output', async () => {
     const { job, alice, proj, obj } = await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'boom /vault/x.rds' } });
     const res = await drainPipeline(failCaller);
-    expect(res.status).toBe('indeterminate');
+    expect(res.status).toBe('failed');
     await expectNoSuccessRecords(job, alice, proj);
     expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
   });
@@ -724,7 +724,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
     await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'R Error: cannot open /vault/u/secret.rds at line 7' } });
     const res = await drainPipeline(failCaller);
-    expect(res.status).toBe('indeterminate');
+    expect(res.status).toBe('failed');
     const blob = JSON.stringify(res.error || {});
     for (const f of ['/vault', 'secret.rds', 'line 7']) {
       expect(blob, f).not.toContain(f);

@@ -1,5 +1,7 @@
 // Error classification for worker handlers and job recovery. Only marked messages may reach job logs.
 
+const { codedError } = require('../codedError');
+
 const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   WORKFLOW_SOURCE_CHANGED: 'Approved analysis source changed. An operator must restart and reapprove before retrying.',
   WORKFLOW_RUNTIME_UNAVAILABLE: 'Analysis runtime attestation is unavailable. Ask the operator to check and restart the runtime.',
@@ -67,6 +69,19 @@ function isIndeterminateRExecutionFailure(error) {
   );
 }
 
+// A side-effect-possible R failure becomes definite once R's handler is known
+// to have returned (rHandlerReturned) and no completion receipt exists: R writes
+// the receipt as the last step of a successful run, so nothing can adopt it.
+// Returns a copy without the recovery flag, keeping the public code and R codes.
+function definiteRFailureFrom(error) {
+  const definite = error.publicSafeHandlerError === true
+    ? codedHandlerError(error.code, error.message)
+    : codedError(error.code, error.message);
+  if (error.rStatus !== undefined) definite.rStatus = error.rStatus;
+  if (error.rCode !== undefined) definite.rCode = error.rCode;
+  return definite;
+}
+
 function publicationIndeterminateError(error) {
   if (error && (error.code === 'CLAIM_LOST' || error.code === 'JOB_NOT_FOUND')) return error;
   return codedHandlerError(
@@ -81,5 +96,6 @@ module.exports = {
   codedHandlerError,
   safeDiagnosticCode,
   isIndeterminateRExecutionFailure,
+  definiteRFailureFrom,
   publicationIndeterminateError,
 };

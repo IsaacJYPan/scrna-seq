@@ -554,14 +554,14 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — failure / cancel / claim-lo
   beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
 
-  it('an R load failure (non-200) remains indeterminate with NO checkpoint_load artifact', async () => {
+  it('an R-returned load failure with no receipt fails at once with NO checkpoint_load artifact', async () => {
     const { alice, proj, resultObjectId } = await seedLoadableCheckpoint();
     const ljob = await seedLoadJob(alice.id, proj.id, resultObjectId);
     const res = await drain(pipelineThenLoadCaller([], { status: 500, body: { error: 'boom' } }), T0);
-    expect(res.status).toBe('indeterminate');
+    expect(res.status).toBe('failed');
     const arts = await getJobArtifactsByJobId(ljob.id);
     expect(arts.filter((a) => a.artifactType === 'checkpoint_load')).toHaveLength(0);
-    expect((await getProjectJob(alice.id, proj.id, ljob.id)).status).toBe('running');
+    expect((await getProjectJob(alice.id, proj.id, ljob.id)).status).toBe('failed');
   });
 
   it('an R "loaded:false" response fails the job and records NO checkpoint_load artifact', async () => {

@@ -723,6 +723,11 @@ async function runRBridgeOperation(args = {}) {
     const err = codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
     err.rStatus = rStatus;
     err.rCode = rCode;
+    // R's own error handler answered (a JSON error body with status 500), so the
+    // synchronous R handler has returned and cannot write a receipt later. The
+    // worker may settle this at once by checking the receipt instead of waiting
+    // out the recovery grace. A gateway 5xx or a non-JSON body proves nothing.
+    err.rHandlerReturned = rStatus === 500 && isPlainObject(response && response.body);
     const preWriteInputRejection = rStatus === 400;
     throw completionReceipt && !preWriteInputRejection ? markRSideEffectsPossible(err) : err;
   }
