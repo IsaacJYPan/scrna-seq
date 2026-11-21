@@ -86,7 +86,8 @@ function Section({ api, projectId, report, section, canWrite, busy, onReview }) 
 export default function AgentReports({ projectId, role }) {
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  // Set on every mount: StrictMode mounts, unmounts and remounts in development.
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [reports, setReports] = useState([]);
   const [openId, setOpenId] = useState(null);
   const [report, setReport] = useState(null);

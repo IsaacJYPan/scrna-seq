@@ -29,6 +29,11 @@ describe('AgentWorkflows', () => {
   });
   afterEach(() => { delete window.electronAPI; vi.restoreAllMocks(); });
 
+  it('finishes loading under StrictMode, which mounts components twice in development', async () => {
+    render(<React.StrictMode><AgentWorkflows projectId="proj_1" role="owner" /></React.StrictMode>);
+    expect(await screen.findByRole('button', { name: /approve this exact release/i })).toBeInTheDocument();
+  });
+
   it('approves the exact reviewed digest', async () => {
     render(<AgentWorkflows projectId="proj_1" role="owner" />);
     fireEvent.click(await screen.findByRole('button', { name: /approve this exact release/i }));

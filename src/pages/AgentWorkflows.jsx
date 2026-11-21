@@ -84,7 +84,8 @@ function parseValues(text, spec) {
 export default function AgentWorkflows({ projectId, role, onChanged, onOpenResult }) {
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  // Set on every mount: StrictMode mounts, unmounts and remounts in development.
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [releases, setReleases] = useState([]);
   const [canApprove, setCanApprove] = useState(false);
   const [studies, setStudies] = useState([]);

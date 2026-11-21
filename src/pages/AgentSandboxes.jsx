@@ -73,7 +73,8 @@ function RunOutputs({ api, projectId, run }) {
 export default function AgentSandboxes({ projectId, role, userId, theme, onChanged, onOpenResult }) {
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  // Set on every mount: StrictMode mounts, unmounts and remounts in development.
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [sandboxes, setSandboxes] = useState([]);
   const [objects, setObjects] = useState([]);
   const [openId, setOpenId] = useState(null);

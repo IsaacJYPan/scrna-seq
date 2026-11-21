@@ -21,6 +21,7 @@ const NO_API = Object.freeze({});
 const CAPABILITY_LABELS = {
   'metadata.read': 'Read project and dataset metadata',
   'results.read': 'Read completed run summaries',
+  'results.inspect': 'Inspect result tables, diagnostics and figure previews of its own runs',
   'proposal.create': 'Submit code or method proposals (inert)',
   'workflow.plan': 'Plan runs of approved workflows in your studies',
   'workflow.executeApproved': 'Run approved workflows within study budgets',
@@ -55,7 +56,8 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
   const project = currentWs?.projects?.find(p => p.id === projectId) || null;
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  // Set on every mount: StrictMode mounts, unmounts and remounts in development.
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const [data, setData] = useState(null);
   const [proposals, setProposals] = useState([]);
@@ -190,7 +192,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
           <div className="mb-1 flex items-center gap-2 font-bold text-text"><ShieldCheck size={17} className="text-primary" /> What an agent can do here</div>
           <p>An agent acts with its own credential, never your session. Its authority is what you delegate, narrowed by your current project role and re-checked on every request.
-            Agents can read bounded metadata, submit <span className="font-bold text-text">inert proposals</span>, and run <span className="font-bold text-text">approved workflows inside your studies</span>. They cannot run their own code or R, export data, approve workflows, or accept results.</p>
+            Agents can read bounded metadata, submit <span className="font-bold text-text">inert proposals</span>, and run <span className="font-bold text-text">approved workflows inside your studies</span>. If you allow it, they can also run their own R in sandboxes you set up; that code is flagged as AI-written and its outputs stay drafts until you review them. They cannot export data, approve workflows, or accept results.</p>
           <p className="mt-2">Run the agent under a separate account or isolated runtime that cannot reach your browser, SSH keys, or password. If an agent can use your own login, {APP_NAME} cannot tell it apart from you.</p>
         </div>
 
@@ -268,7 +270,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
                 className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
           </div>
-          <p className="text-xs text-textMuted">Never available to agents: running their own code or R, data export, approving workflows, or accepting results.</p>
+          <p className="text-xs text-textMuted">Never available to agents: data export, approving workflows, or accepting results. Their own R runs only in sandboxes you create.</p>
           <button type="submit" disabled={Boolean(busy) || !form.agentName.trim() || form.capabilities.length === 0} className="btn btn-primary inline-flex items-center gap-2 text-sm">
             {busy === 'create' ? <Loader2 size={16} className="animate-spin" /> : <Bot size={16} />} Create agent and credential
           </button>
