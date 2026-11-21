@@ -78,6 +78,12 @@ describe('AgentNotebook', () => {
     expect(screen.queryByRole('heading', { level: 3 })).not.toBeInTheDocument();
   });
 
+  it('shows its cells under StrictMode, which mounts components twice in development', async () => {
+    render(<React.StrictMode><AgentNotebook projectId="proj_1" api={fakeApi()} /></React.StrictMode>);
+    expect(await screen.findByRole('region', { name: /Cell 1: note/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'All steps (3)' })).toBeInTheDocument();
+  });
+
   it('says so when no agent has done anything yet', async () => {
     const api = { getAgentNotebook: vi.fn(async () => ({ ...notebook, cells: [], hiddenSandboxRuns: 0 })) };
     render(<AgentNotebook projectId="proj_1" api={api} />);

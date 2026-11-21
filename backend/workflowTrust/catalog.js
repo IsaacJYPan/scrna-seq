@@ -86,6 +86,7 @@ const DEFINITIONS = [
     title: 'Ranked GO pathway enrichment for one group (fgsea)',
     jobType: 'enrichment.gsea.v1',
     handlerFiles: ['backend/enrichmentGsea.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R', 'r-backend/lib/enrichmentGsea.R'],
+    readableSource: 'r-backend/lib/enrichmentGsea.R',
     inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample', 'spatial-seurat', ...analysisProducingMethodKeys()] }],
     outputs: [{ name: 'pathways', kind: 'artifact', artifactType: 'enrichment_summary' }],
     parameterSchema: withDesignRoles(ENRICHMENT_GSEA_PARAM_SPEC, ['groupBy', 'targetGroup', 'species', 'geneSetCollection', 'adjustedPValueCutoff']),
@@ -101,6 +102,7 @@ const DEFINITIONS = [
     title: 'Cell-cell communication candidates in one context (CellChat)',
     jobType: 'cellchat.infer.v1',
     handlerFiles: ['backend/cellChatInference.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R', 'r-backend/lib/cellChatInference.R'],
+    readableSource: 'r-backend/lib/cellChatInference.R',
     inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample', 'spatial-seurat', ...analysisProducingMethodKeys()] }],
     outputs: [{ name: 'interactions', kind: 'artifact', artifactType: 'cellchat_summary' }],
     parameterSchema: withDesignRoles(CELLCHAT_INFERENCE_PARAM_SPEC, ['groupBy', 'species', 'databaseCategory', 'analysisIntent', 'pValueCutoff', 'minCellsPerGroup', 'maxCellsPerGroup', 'maxTotalCells']),
@@ -150,7 +152,7 @@ for(const entry of [
   {key:'condition-pseudobulk',title:'Replicate-aware condition DE',jobType:'condition.pseudobulk_de.v1',schema:{contrastId:{type:'contrastId',required:true}},validate:require('../conditionComparison').validateConditionComparisonParams,artifact:'condition_de_summary'},
 ]) DEFINITIONS.push({key:entry.key,version:'1',title:entry.title,jobType:entry.jobType,handlerFiles:['backend/jobs/analysisHandlers.js','r-backend/plumber.R'],inputs:[{name:'clustering',kind:'analysis_object',fromRelease:'seurat-qc-cluster',requiresStage:'cluster'}],outputs:[{name:'result',kind:'artifact',artifactType:entry.artifact}],parameterSchema:entry.schema,resources:{cpus:1,memoryMiB:8192,maxWallSeconds:3600},validation:['job.completed','result.artifact.present'],validateParameters:p=>entry.validate(p).params});
 for(const definition of DEFINITIONS)if(definition.inputs[0].fromRelease==='seurat-qc-cluster')definition.inputs[0].fromRelease=['seurat-qc-cluster','seurat-multisample'];
-DEFINITIONS.push({key:'study-workbench',version:'1',title:'Multi-condition biological investigation and figures',jobType:'explore.summarize.v1',handlerFiles:['backend/exploratoryAnalysis.js','r-backend/lib/conditionStudy.R'],inputs:[{name:'clustering',kind:'analysis_object',fromRelease:['seurat-qc-cluster','seurat-multisample'],requiresStage:'cluster'}],outputs:[{name:'result',kind:'artifact',artifactType:'exploration_summary'}],parameterSchema:{recipe:{type:'enum',values:['study_composition','study_expression','study_qc','study_de','study_pathways','study_communication']},featureNames:{type:'geneList'},groupMap:{type:'groupMap'},conditionName:{type:'safeLabel'},numerator:{type:'safeLabel'},denominator:{type:'safeLabel'},targetGroup:{type:'populationLabel'}},resources:{cpus:1,memoryMiB:12288,maxWallSeconds:3600},validation:['job.completed','result.artifact.present'],validateParameters:p=>require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params});
+DEFINITIONS.push({key:'study-workbench',version:'1',title:'Multi-condition biological investigation and figures',jobType:'explore.summarize.v1',handlerFiles:['backend/exploratoryAnalysis.js','r-backend/lib/conditionStudy.R'],readableSource:'r-backend/lib/conditionStudy.R',inputs:[{name:'clustering',kind:'analysis_object',fromRelease:['seurat-qc-cluster','seurat-multisample'],requiresStage:'cluster'}],outputs:[{name:'result',kind:'artifact',artifactType:'exploration_summary'}],parameterSchema:{recipe:{type:'enum',values:['study_composition','study_expression','study_qc','study_de','study_pathways','study_communication']},featureNames:{type:'geneList'},groupMap:{type:'groupMap'},conditionName:{type:'safeLabel'},numerator:{type:'safeLabel'},denominator:{type:'safeLabel'},targetGroup:{type:'populationLabel'}},resources:{cpus:1,memoryMiB:12288,maxWallSeconds:3600},validation:['job.completed','result.artifact.present'],validateParameters:p=>require('../exploratoryAnalysis').validateExploratoryAnalysisParams(p).params});
 
 // Files every trusted-method release runs through, in addition to its own R file.
 const TRUSTED_METHOD_HANDLER_FILES = [
@@ -174,6 +176,9 @@ function trustedMethodDefinitions() {
     title: method.title,
     jobType: trustedMethods.JOB_TYPE,
     handlerFiles: [...TRUSTED_METHOD_HANDLER_FILES, `trusted-methods/${method.entry}`],
+    // The method's own R is what people read as its reviewed code. Not part
+    // of the digest; the file itself is pinned through handlerFiles.
+    readableSource: `trusted-methods/${method.entry}`,
     inputs: [{ name: 'analysis', kind: 'analysis_object', fromReleases: method.accepts.map(sourceReleaseKey) }],
     outputs: [{ name: 'result', kind: 'analysis_object', objectType: method.outputs.analysis ? 'seurat' : 'generic' }],
     parameterSchema: trustedMethods.releaseParameterSchema(method),

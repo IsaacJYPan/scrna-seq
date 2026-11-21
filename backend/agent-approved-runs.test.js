@@ -230,6 +230,37 @@ describe.skipIf(!CONFIGURED)('scientific scope', () => {
     expect(acceptByAgent.data.code).toBe('AGENT_ROUTE_NOT_ADAPTED');
   });
 
+  it('shows the reviewed R of library methods, including superseded releases whose bytes still match', async () => {
+    const ctx = await setup();
+    const releases = (await api(server, `${ctx.base}/workflow-releases`, { token: ctx.sponsor.token })).data.releases;
+    const method = releases.find((r) => r.key === 'pseudobulk-de');
+    expect(method.readableSource).toBe('trusted-methods/methods/pseudobulk-de.R');
+    const steps = await api(server, `${ctx.base}/workflow-releases/${method.id}/steps`, { token: ctx.sponsor.token });
+    expect(steps.status, JSON.stringify(steps.data)).toBe(200);
+    expect(steps.data.steps.length).toBeGreaterThan(0);
+
+    // An older run's release was superseded by a later code change elsewhere.
+    const row = (await db.query('SELECT * FROM workflow_releases WHERE id = $1', [method.id])).rows[0];
+    const oldId = `rel_${'a'.repeat(24)}`;
+    await db.query(`INSERT INTO workflow_releases (id, release_key, version, job_type, digest, definition_json, status, superseded_at)
+      VALUES ($1, $2, $3, $4, $5, $6, 'superseded', now())`,
+    [oldId, row.release_key, row.version, row.job_type, 'a'.repeat(64), JSON.stringify(row.definition_json)]);
+    const old = await api(server, `${ctx.base}/workflow-releases/${oldId}/steps`, { token: ctx.sponsor.token });
+    expect(old.status, JSON.stringify(old.data)).toBe(200);
+    expect(old.data.steps).toEqual(steps.data.steps);
+
+    // ...but not once the R it pinned has changed.
+    const changedId = `rel_${'b'.repeat(24)}`;
+    const definition = { ...row.definition_json, handler: row.definition_json.handler.map((h) => (
+      h.path === method.readableSource ? { ...h, sha256: 'c'.repeat(64) } : h)) };
+    await db.query(`INSERT INTO workflow_releases (id, release_key, version, job_type, digest, definition_json, status, superseded_at)
+      VALUES ($1, $2, $3, $4, $5, $6, 'superseded', now())`,
+    [changedId, row.release_key, row.version, row.job_type, 'b'.repeat(64), JSON.stringify(definition)]);
+    const changed = await api(server, `${ctx.base}/workflow-releases/${changedId}/steps`, { token: ctx.sponsor.token });
+    expect(changed.status).toBe(409);
+    expect((await api(server, `${ctx.base}/workflow-releases/rel_${'d'.repeat(24)}/steps`, { token: ctx.sponsor.token })).status).toBe(404);
+  });
+
   it('treats changed workflow bytes as a different, unapproved release', () => {
     const real = release();
     const changed = buildRelease({

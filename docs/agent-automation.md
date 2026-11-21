@@ -424,7 +424,11 @@ under the analysis tab each step serves. The tabs are fixed
   by catalog category (`qc`, `integration` → `integrate`, `annotation` →
   `cluster`, `differential` → `deg`, the rest → `explore`). A cell shows the
   release and version, the study's objective, the agent's parameter choices,
-  the saved version read and produced, and the reviewed R on request.
+  the saved version read and produced, and the reviewed R on request
+  (`GET …/workflow-releases/:releaseId/steps`). Library methods show their own
+  R file. A run whose release was later superseded still shows its R while the
+  file's bytes match what that release pinned; otherwise the endpoint answers
+  `409 RELEASE_SOURCE_CHANGED`.
 - **AI-written cells** are sandbox runs. `run_r_script` requires a `tab`
   (`400 TAB_REQUIRED` otherwise); runs from before tabs were required are filed
   under `explore`. A cell shows the agent's reason, the script as numbered

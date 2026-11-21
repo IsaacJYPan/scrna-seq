@@ -206,7 +206,11 @@ export function AgentNotebookCells({ cells, projectId, api = NO_API, theme, canW
 export function useAgentNotebook(projectId, api = NO_API) {
   const [state, setState] = useState({ loading: true, data: null, error: null });
   const live = useRef(true);
-  useEffect(() => () => { live.current = false; }, []);
+  // Set again on every mount: StrictMode mounts, unmounts and remounts.
+  useEffect(() => {
+    live.current = true;
+    return () => { live.current = false; };
+  }, []);
   const load = useCallback(async () => {
     if (!projectId || !api.getAgentNotebook) { setState({ loading: false, data: null, error: null }); return; }
     setState((previous) => ({ ...previous, loading: true }));
