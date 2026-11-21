@@ -951,6 +951,7 @@ export const electronAPI = {
   createStudy: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/studies`, { method: 'POST', body: JSON.stringify(body) }),
   closeStudy: async (id, studyId) => req(`/api/projects/${encodeURIComponent(id)}/studies/${encodeURIComponent(studyId)}/close`, { method: 'POST', body: '{}' }),
   listAgentRuns: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs`),
+  getAgentNotebook: async (id, { tab } = {}) => req(`/api/projects/${encodeURIComponent(id)}/agent-notebook${tab ? `?tab=${encodeURIComponent(tab)}` : ''}`),
   acceptAgentRun: async (id, runId, expectedAcceptedRunId) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/accept`, { method: 'POST', body: JSON.stringify({ expectedAcceptedRunId }) }),
   listAgentSandboxes: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`),
   createAgentSandbox: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`, { method: 'POST', body: JSON.stringify(body) }),

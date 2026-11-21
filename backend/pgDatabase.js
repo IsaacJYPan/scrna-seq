@@ -766,7 +766,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
-      agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
+      agent_notebook_notes, agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
       hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
@@ -1572,7 +1572,7 @@ async function deleteExpiredDemoGuest(userId) {
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
-      for (const table of ['agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
+      for (const table of ['agent_notebook_notes', 'agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
         await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
       }
       for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {

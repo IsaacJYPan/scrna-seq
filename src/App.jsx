@@ -73,6 +73,8 @@ const ProjectHistory = React.lazy(() => import('./pages/ProjectHistory'));
 const BatchIntegration = React.lazy(() => import('./pages/BatchIntegration'));
 const Collaborators = React.lazy(() => import('./pages/Collaborators'));
 const AgentAccess = React.lazy(() => import('./pages/AgentAccess'));
+const AgentNotebookPage = React.lazy(() => import('./pages/AgentNotebookPage'));
+const AgentWorkDock = React.lazy(() => import('./components/AgentNotebook').then((m) => ({ default: m.AgentWorkDock })));
 const Inspect = React.lazy(() => import('./pages/Inspect'));
 const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
 const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
@@ -93,6 +95,7 @@ const TAB_TITLES = {
   account: 'Account security',
   analyses: 'Analyses',
   workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators', agents: 'Agent access',
+  'agent-notebook': 'Agent notebook',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
   'expert-r': 'R console',
@@ -1508,6 +1511,15 @@ export default function App() {
         <ErrorBoundary key="team" onReturn={returnToWorkspace}><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="agents" onReturn={returnToWorkspace}><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics" onReturn={returnToWorkspace}><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="agent-notebook" onReturn={returnToWorkspace}><TabContent id="agent-notebook" activeTab={activeTab}><AgentNotebookPage {...props} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        {/* Agent work filed under the open analysis tab, in a side panel. */}
+        {activeProjectIdForPipeline && deploymentPolicy.demoMode !== true && (
+          <React.Suspense fallback={null}>
+            <AgentWorkDock projectId={activeProjectIdForPipeline} activeTab={activeTab} theme={theme}
+              role={currentWs?.projects?.find((p) => p.id === activeProjectIdForPipeline)?.role || null}
+              onOpenNotebook={() => setActiveTab('agent-notebook')} onOpenTab={setActiveTab} />
+          </React.Suspense>
+        )}
       </div>
     );
   };

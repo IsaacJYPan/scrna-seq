@@ -11,7 +11,7 @@ const { humanActorContext } = require('../actors/actorContext');
 const { READ_ROLES, MANAGE_ROLES } = require('../policy/agentCapabilities');
 const { listAutomationEvents } = require('./automationAudit');
 
-function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports }) {
+function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports, notebook }) {
   const router = express.Router({ mergeParams: true });
 
   const route = (handler, { status = 200 } = {}) => async (req, res) => {
@@ -96,6 +96,13 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
   })));
   router.post('/agent-runs/:runId/accept', route(
     (req, actor) => admission.acceptByHuman(actor, req.params.projectId, req.params.runId, req.body || {})));
+
+  // Everything agents did, as notebook cells filed by analysis tab.
+  if (notebook) {
+    router.get('/agent-notebook', route((req, actor) => notebook.readForHuman(actor, req.params.projectId, {
+      tab: typeof req.query.tab === 'string' ? req.query.tab : undefined,
+    })));
+  }
 
   // Agent sandboxes and their draft outputs (docs/spec.md phase 4).
   if (sandboxes) {

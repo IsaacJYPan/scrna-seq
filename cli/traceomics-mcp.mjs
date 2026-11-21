@@ -25,10 +25,20 @@ export const MCP_INSTRUCTIONS = [
   'Run verified code through a study: list_studies, create_plan, submit_run, get_run, get_run_results.',
   'If a verified entry fits but is not approved or has no study, ask a person or use create_proposal rather than re-implementing it.',
   'Write your own R only when nothing verified covers the step: list_sandboxes, run_r_script (with its reason), get_sandbox_run, read_sandbox_file. That code is flagged as AI-written; inputs are read-only and outputs stay drafts until a person reviews and promotes them. Keep scripts short and close to standard Seurat and Bioconductor calls so they are quick to review.',
+  'Everything you do is laid out for people as a notebook, filed under the analysis tab it serves (qc, normalize, pca, integrate, cluster, umap, deg, enrichment, cellchat, explore). Verified runs are placed automatically; give run_r_script the `tab` of the step it serves. Use add_notebook_note for a short Markdown note before or after a step (what you are about to do, what a result means); get_notebook reads back your cells. Notes and runs are append-only.',
   "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise.",
   'Ask a person (or create_proposal) for anything outside what you were given.',
 ].join(' ');
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+// Analysis tabs of the agent notebook; must match shared/agentNotebookTabs.mjs
+// (checked by the tests). The CLI is standalone, so the list is repeated here.
+export const NOTEBOOK_TABS = ['qc', 'normalize', 'pca', 'integrate', 'cluster', 'umap', 'deg', 'enrichment', 'cellchat', 'explore'];
+const tabProp = { type: 'string', enum: NOTEBOOK_TABS, description: 'Analysis tab this belongs to in the notebook people read.' };
+function tabArg(a) {
+  if (!NOTEBOOK_TABS.includes(a.tab)) throw new ToolInputError(`tab must be one of: ${NOTEBOOK_TABS.join(', ')}.`);
+  return a.tab;
+}
 
 const ID = {
   project: /^[A-Za-z0-9_-]{1,80}$/,
@@ -159,15 +169,16 @@ export const TOOLS = [
     { ...projectProp, sandboxId: { type: 'string' }, title: { type: 'string', description: 'What this run does, in a few words.' },
       script: { type: 'string', description: 'R source, at most 32 KiB.' },
       reason: { type: 'string', description: 'Why verified code does not cover this, naming the list_verified_code entries you checked (20-1000 characters). Shown to the reviewer.' },
+      tab: tabProp,
       inputAnalysisObjectId: { type: 'string', description: 'One of the sandbox inputs; defaults to the first.' },
       requestId: { type: 'string' } },
-    ['projectId', 'sandboxId', 'title', 'script', 'reason'],
+    ['projectId', 'sandboxId', 'title', 'script', 'reason', 'tab'],
     (a) => {
       const base = `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/runs`;
-      const body = { title: str(a, 'title'), script: str(a, 'script'), reason: str(a, 'reason') };
+      const body = { title: str(a, 'title'), script: str(a, 'script'), reason: str(a, 'reason'), tab: tabArg(a) };
       if (a.inputAnalysisObjectId !== undefined) body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
       body.requestId = a.requestId === undefined
-        ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? ''])
+        ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? '', body.tab])
         : str(a, 'requestId');
       return { method: 'POST', path: base, body };
     }, { readOnly: false }),
@@ -188,6 +199,20 @@ export const TOOLS = [
   tool('cancel_sandbox_run', 'Cancel one of this agent\'s sandbox runs. The reserved budget is not refunded.',
     { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
     (a) => ({ method: 'POST', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/cancel`, body: {} }), { readOnly: false }),
+
+  // The agent notebook: cells filed by analysis tab, read top to bottom.
+  tool('get_notebook', 'Your cells in the project notebook, oldest first: verified runs, your own scripts and your notes, each under its analysis tab. Pass `tab` for one tab only.',
+    { ...projectProp, tab: tabProp }, ['projectId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/notebook${a.tab === undefined ? '' : `?tab=${encodeURIComponent(tabArg(a))}`}` })),
+  tool('add_notebook_note', 'Add a short Markdown note to the notebook under an analysis tab, like a text cell: what the next step does and why, or what a result shows. Append-only; at most 8000 characters. Repeating the same call returns the original note.',
+    { ...projectProp, tab: tabProp, markdown: { type: 'string', description: 'Markdown, at most 8000 characters.' }, requestId: { type: 'string' } },
+    ['projectId', 'tab', 'markdown'],
+    (a) => {
+      const base = `${project(a)}/notebook/notes`;
+      const body = { tab: tabArg(a), markdown: str(a, 'markdown') };
+      body.requestId = a.requestId === undefined ? defaultRequestId([base, body.tab, body.markdown]) : str(a, 'requestId');
+      return { method: 'POST', path: base, body };
+    }, { readOnly: false }),
 
   // Reports: draft sections for people to review.
   tool('create_report', 'Start a report (for example a paper draft). Sections are added with write_report_section and reviewed by people.',

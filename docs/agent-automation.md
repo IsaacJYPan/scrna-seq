@@ -317,7 +317,7 @@ active runs, and a CPU-second budget. Content is immutable; a sandbox can only
 be closed. An agent sees only open sandboxes its sponsor created.
 
 **Runs.** `POST …/sandboxes/:sandboxId/runs` with `{ requestId, title, script,
-reason, inputAnalysisObjectId? }` runs the script once as an ordinary Expert R job owned
+reason, tab, inputAnalysisObjectId? }` runs the script once as an ordinary Expert R job owned
 by the sponsor. In the local target that is the ephemeral Expert R container:
 no network, a read-only copy of the pinned checkpoint available as `obj`, no
 project storage mount, 2 CPUs, 8 GiB, 15 minutes, and at most 50 output files
@@ -411,6 +411,38 @@ compute targets list (`GET …/compute-targets`, `traceomics targets list`) show
 configuration, not a proof of isolation: kernel and scheduler vulnerabilities,
 shared filesystems outside the run directory, and site policy still matter.
 
+## Agent notebook
+
+Everything agents do in a project reads top to bottom like a notebook, filed
+under the analysis tab each step serves. The tabs are fixed
+(`shared/agentNotebookTabs.mjs`): `qc`, `normalize`, `pca`, `integrate`,
+`cluster`, `umap`, `deg`, `enrichment`, `cellchat`, `explore`.
+
+- **Verified cells** are runs of reviewed code through a study. They are
+  placed automatically: built-in workflows by job type (markers and pseudobulk
+  DE under `deg`, GSEA under `enrichment`, and so on), trusted library methods
+  by catalog category (`qc`, `integration` → `integrate`, `annotation` →
+  `cluster`, `differential` → `deg`, the rest → `explore`). A cell shows the
+  release and version, the study's objective, the agent's parameter choices,
+  the saved version read and produced, and the reviewed R on request.
+- **AI-written cells** are sandbox runs. `run_r_script` requires a `tab`
+  (`400 TAB_REQUIRED` otherwise); runs from before tabs were required are filed
+  under `explore`. A cell shows the agent's reason, the script as numbered
+  readable steps with each output under the step that wrote it, and the review
+  state. A person sees the runs of sandboxes they may review (their own, or
+  all for owners and admins); others are only counted.
+- **Notes** are short Markdown cells an agent places between steps
+  (`POST …/notebook/notes` with `{ requestId, tab, markdown }`, `report.write`,
+  at most 8000 characters and 500 per delegation). They are idempotent by
+  `requestId` and append-only in the database.
+
+Cells are records: agents only append, and nothing edits or reorders a cell
+once written. People read the notebook at `GET /api/projects/:projectId/agent-notebook`
+(`?tab=` for one tab) on the **Agent notebook** page, and each analysis tab
+shows its own cells in an **Agent work in this step** side panel. An agent
+reads back its own cells with `GET …/projects/:projectId/notebook`
+(`metadata.read`).
+
 ## Agent reports (phase 5)
 
 An agent with `report.write` can draft a report (for example a paper) section by
@@ -470,6 +502,8 @@ Errors use `{ error, code, retry, correlationId }`; `retry` is `never`,
 | Submit a proposal | `POST /api/automation/v1/projects/:projectId/proposals` | `proposal.create` |
 | This agent's proposals | `GET /api/automation/v1/projects/:projectId/proposals[/:proposalId]` | `proposal.create` |
 | Verified code: every reviewed release and library method, approved here or not | `GET …/projects/:projectId/verified-code` | `metadata.read` |
+| This agent's notebook cells, by analysis tab | `GET …/projects/:projectId/notebook` | `metadata.read` |
+| Add a notebook note | `POST …/projects/:projectId/notebook/notes` | `report.write` |
 | Approved releases | `GET …/projects/:projectId/workflows` | `workflow.plan` |
 | Sponsor's open studies, with full trial history | `GET …/projects/:projectId/studies[/:studyId]` | `workflow.plan` |
 | Create or read a plan | `POST …/plans`, `GET …/plans/:planId` | `workflow.plan` |
@@ -489,7 +523,7 @@ Human routes (session only) under `/api/projects/:projectId`:
 `agent-sandboxes`, `agent-sandboxes/:id`, `agent-sandboxes/:id/close`,
 `agent-sandbox-runs/:runId/review`, `agent-sandbox-runs/:runId/files/<name>`,
 `agent-reports`, `agent-reports/:id`, `agent-reports/:id/reviews`,
-`agent-reports/:id/finalize`, and `agent-reports/:id/export`.
+`agent-reports/:id/finalize`, `agent-reports/:id/export`, and `agent-notebook`.
 
 A proposal request is:
 
@@ -563,7 +597,7 @@ Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
 `get_plan`, `submit_run`, `get_run`, `get_run_results`, `cancel_run`,
 `create_proposal`, `list_proposals`, `get_proposal`, `list_sandboxes`,
 `get_sandbox`, `run_r_script`, `get_sandbox_run`, `read_sandbox_file`,
-`cancel_sandbox_run`, `create_report`, `list_reports`, `get_report`, and
+`cancel_sandbox_run`, `get_notebook`, `add_notebook_note`, `create_report`, `list_reports`, `get_report`, and
 `write_report_section`. `read_sandbox_file` returns PNG figures as MCP image
 content, so a multimodal agent can look at its own plots. A refusal from the
 server (for example `BUDGET_EXCEEDED`) comes back as a tool error with the

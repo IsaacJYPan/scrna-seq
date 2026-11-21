@@ -1718,6 +1718,9 @@ const agentServices = {
 agentServices.reports = require('./backend/agentReports/reports').createReportService({
   db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes,
 });
+agentServices.notebook = require('./backend/agentNotebook/notebook').createAgentNotebookService({
+  db, withTransaction: agentDelegations.withTransaction, admission: agentAdmission, sandboxes: agentServices.sandboxes,
+});
 app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
 app.use('/api/automation/v1', automationRoutes({
   ...agentServices,

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, FileText, FolderOpen, GitBranch, History, Images,
-  Bot, ListChecks, Lock, LogOut, Menu, Microscope, Moon, Network, SquareTerminal, Sun, TestTubes,
+  Bot, ListChecks, Lock, LogOut, Menu, Microscope, Moon, Network, NotebookPen, SquareTerminal, Sun, TestTubes,
   UserRound, Users, Workflow,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
@@ -310,6 +310,7 @@ export default function Sidebar({
             <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: TestTubes, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: Workflow, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: History }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'agent-notebook', label: 'Agent notebook', icon: NotebookPen, status: deploymentPolicy.demoMode ? 'Unavailable in public demo' : hasProject ? 'Agent work by step' : 'Select project' }} disabled={!hasProject || deploymentPolicy.demoMode === true} />
             <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'expert-r', label: 'R console', icon: SquareTerminal, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
           </NavSection>
