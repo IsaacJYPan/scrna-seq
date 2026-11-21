@@ -51,15 +51,17 @@ describe('AgentSandboxes', () => {
     expect(within(article).getByTestId('ai-authorship-badge')).toHaveTextContent('AI-written code · Needs review');
     expect(article).toHaveTextContent('Why not verified code: No verified method draws per-donor dot plots');
     const notebook = within(article).getByLabelText('Notebook for run 1');
-    expect(within(notebook).getByRole('region', { name: 'Markdown cell 1' })).toHaveTextContent('1. Cluster');
-    const code = within(notebook).getByRole('region', { name: 'R cell 2' });
-    expect(within(code).getByLabelText('R cell 2 source')).toHaveTextContent('obj <- FindClusters(obj)');
+    // One cell per step: its title, its code and its outputs together.
+    expect(within(notebook).getAllByRole('region')).toHaveLength(1);
+    const code = within(notebook).getByRole('region', { name: 'Step 1: Cluster' });
+    expect(code).toHaveTextContent('1. Cluster');
+    expect(within(code).getByLabelText('R code of Step 1: Cluster')).toHaveTextContent('obj <- FindClusters(obj)');
     expect(code).toHaveTextContent('1 line of error handling hidden');
     expect(within(code).getByRole('img', { name: 'umap.png' })).toHaveAttribute('src', '/files/sbr_1/umap.png');
     fireEvent.click(within(code).getByRole('button', { name: 'Show table' }));
     expect(await within(code).findByText(/CD3E/)).toBeInTheDocument();
     fireEvent.click(within(notebook).getByRole('button', { name: 'Exact code' }));
-    expect(within(notebook).getByLabelText('R cell 2 source')).toHaveTextContent('stopifnot(TRUE)');
+    expect(within(notebook).getByLabelText('R code of Step 1: Cluster')).toHaveTextContent('stopifnot(TRUE)');
     fireEvent.change(within(article).getByLabelText(/review note/i), { target: { value: 'Looks right' } });
     fireEvent.click(within(article).getByRole('button', { name: 'Promote' }));
     await waitFor(() => expect(window.electronAPI.reviewAgentSandboxRun).toHaveBeenCalledWith('proj_1', 'sbr_1', 'promoted', 'Looks right'));

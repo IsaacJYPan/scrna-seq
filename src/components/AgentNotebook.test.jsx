@@ -51,7 +51,8 @@ describe('AgentNotebook', () => {
     const code = screen.getByRole('region', { name: 'Cell 3: agent script Sub-cluster T cells' });
     expect(within(code).getByTestId('ai-authorship-badge')).toHaveTextContent('AI-written code · Needs review');
     expect(within(code).getByText(/checked recluster-integrate/)).toBeInTheDocument();
-    expect(within(code).getByRole('region', { name: 'R cell 2' })).toBeInTheDocument();
+    expect(within(code).getByRole('region', { name: 'Step 1: Subset' })).toBeInTheDocument();
+    expect(within(code).queryByText('Markdown')).not.toBeInTheDocument();
 
     const headings = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
     expect(headings).toEqual(['Quality Control', 'Clustering & annotation']);
