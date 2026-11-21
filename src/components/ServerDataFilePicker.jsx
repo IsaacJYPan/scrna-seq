@@ -36,7 +36,7 @@ function folderResponse(value, selectedRoot, directory) {
 // A source selector only: every request is GET metadata. Copying, request
 // admission, attachment intent and retained outcomes belong to the caller.
 export default function ServerDataFilePicker({ projectId, userId, serviceId, available = true, disabled = false, refreshKey = 0,
-  onSelect, onAuthority, onDenied, onError, onLimits, onLoading, allowedExtensions, maxFileBytes }) {
+  onSelect, onAuthority, onDenied, onError, onLimits, onLoading, allowedExtensions, maxFileBytes, sizeLimitBytes, unsupportedLabel }) {
   const connection = useExecutionTarget();
   const [roots, setRoots] = useState([]), [limits, setLimits] = useState(null), [rootId, setRootId] = useState('');
   const [directory, setDirectory] = useState(''), [items, setItems] = useState([]), [cursor, setCursor] = useState(null);
@@ -98,7 +98,9 @@ export default function ServerDataFilePicker({ projectId, userId, serviceId, ava
     } catch (error) { if (current(controller, submittedScope)) failure(error); }
     finally { if (mounted.current && request.current === controller && !controller.signal.aborted) working(false); }
   };
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; cancel(); }; }, [cancel]);
+  // StrictMode mounts, unmounts and remounts in development. The unmount cancels
+  // the first discovery, so forget it: the remount must discover again.
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; cancel(); inFlight.current = false; lifecycle.current = null; }; }, [cancel]);
   useEffect(() => {
     const previous = lifecycle.current;
     const changedScope = previous?.scope !== scope;
@@ -122,9 +124,10 @@ export default function ServerDataFilePicker({ projectId, userId, serviceId, ava
     finally { if (mounted.current && request.current === controller && !controller.signal.aborted) working(false); }
   }
   const extensions = allowedExtensions?.map(value => value.toLowerCase().replace(/^\./, ''));
-  const maximum = Math.min(limits?.maxFileBytes ?? Infinity, maxFileBytes ?? Infinity);
+  // sizeLimitBytes replaces the result-import limit for callers with their own (pipeline input files).
+  const maximum = sizeLimitBytes ?? Math.min(limits?.maxFileBytes ?? Infinity, maxFileBytes ?? Infinity);
   const unsupported = file => file.sizeBytes < 1 ? 'Empty file' : file.sizeBytes > maximum ? 'Exceeds the import limit'
-    : extensions && !extensions.includes(file.name.split('.').at(-1).toLowerCase()) ? 'Choose a supported table or figure' : null;
+    : extensions && !extensions.includes(file.name.split('.').at(-1).toLowerCase()) ? (unsupportedLabel || 'Choose a supported table or figure') : null;
   const chosenRoot = roots.find(value => value.id === rootId);
   return <section aria-label="Server file selection" className="space-y-3 min-w-0">
     {roots.length > 0 && <>
@@ -149,6 +152,6 @@ export default function ServerDataFilePicker({ projectId, userId, serviceId, ava
       <button type="button" className="btn btn-secondary text-xs" disabled={loading} onClick={() => void discover.current()}>Refresh server folders</button>
     </div>}
     {loading && <p role="status" className="text-xs text-textMuted">Loading server folders…</p>}
-    {limits && <p className="text-xs text-textMuted">Server import limit: {artifactBytesLabel(maximum)} per file · managed artifact quota {artifactBytesLabel(limits.managedQuotaBytes)}.</p>}
+    {limits && sizeLimitBytes === undefined && <p className="text-xs text-textMuted">Server import limit: {artifactBytesLabel(maximum)} per file · managed artifact quota {artifactBytesLabel(limits.managedQuotaBytes)}.</p>}
   </section>;
 }

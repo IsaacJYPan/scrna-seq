@@ -534,6 +534,46 @@ describe.skipIf(!CONFIGURED)('composed follow-on studies', () => {
       body: { name: 'Mine', releaseId: rel.id, sourceStudyId: ctx.study.id } });
     expect(notMine.status).toBe(403);
   });
+
+  it('builds on a person\'s own saved pipeline result without an agent study', async () => {
+    const ctx = await setup();
+    const rel = await approveMarkers(ctx);
+    // The person ran the built-in pipeline themselves (no agent, no study).
+    const ownId = `ao_${'d'.repeat(24)}`;
+    await db.query(`INSERT INTO analysis_objects (id, owner_user_id, project_id, object_type, display_name, metadata_json)
+      VALUES ($1, $2, $3, 'seurat', 'Seurat pipeline result', '{}')`, [ownId, ctx.sponsor.user.id, ctx.project.id]);
+    await db.query(`INSERT INTO jobs (id, owner_user_id, project_id, dataset_id, job_type, status, parameters_json, result_analysis_object_id, completed_at)
+      VALUES ('job_own1', $1, $2, $3, 'seurat.pipeline.v1', 'completed', '{"clusterResolution":0.8}', $4, now())`,
+    [ctx.sponsor.user.id, ctx.project.id, ctx.datasetId, ownId]);
+
+    const listed = await api(server, `${ctx.base}/studies`, { token: ctx.sponsor.token });
+    expect(listed.data.ownResults).toEqual([expect.objectContaining({ analysisObjectId: ownId, jobType: 'seurat.pipeline.v1', stopAfter: 'umap' })]);
+
+    const both = await createFollowOn(ctx, { name: 'Both', releaseId: rel.id, sourceStudyId: ctx.study.id, sourceAnalysisObjectId: ownId });
+    expect(both.status).toBe(400);
+    const created = await createFollowOn(ctx, { name: 'Markers on mine', releaseId: rel.id, sourceAnalysisObjectId: ownId });
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    expect(created.data).toMatchObject({ sourceStudyId: null,
+      inputs: [{ analysisObjectId: ownId, sourceJobId: 'job_own1', datasetId: ctx.datasetId }] });
+    const planned = await plan({ ...ctx, study: created.data }, {});
+    expect(planned.status, JSON.stringify(planned.data)).toBe(201);
+    expect(planned.data.plan.inputs.datasetId).toBe(ctx.datasetId);
+    // Like any follow-on, the job reads only the object; R refuses a dataset binding.
+    const run = await submit({ ...ctx, study: created.data }, planned.data, 'run-req-0301');
+    expect(run.status, JSON.stringify(run.data)).toBe(201);
+    const { rows: [job] } = await db.query('SELECT * FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    expect(job).toMatchObject({ job_type: 'deg.find_markers.v1', analysis_object_id: ownId, dataset_id: null });
+
+    // A stopped-early run has no clustering; another person's result is not theirs to build on.
+    await db.query(`UPDATE jobs SET parameters_json = '{"stopAfter":"pca"}' WHERE id = 'job_own1'`);
+    expect((await createFollowOn(ctx, { name: 'Early', releaseId: rel.id, sourceAnalysisObjectId: ownId })).data.code).toBe('INPUT_NOT_APPLICABLE');
+    await db.query(`UPDATE jobs SET parameters_json = '{}' WHERE id = 'job_own1'`);
+    const other = await createUserWithToken({ email: 'analyst2@example.com', displayName: 'Analyst' });
+    await db.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'analyst')", [ctx.project.id, other.user.id]);
+    const notMine = await api(server, `${ctx.base}/studies`, { method: 'POST', token: other.token,
+      body: { name: 'Mine', releaseId: rel.id, sourceAnalysisObjectId: ownId } });
+    expect(notMine.status).toBe(403);
+  });
 });
 
 describe.skipIf(!CONFIGURED)('study selection rules', () => {

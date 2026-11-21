@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Bot, Loader2, NotebookPen, RefreshCw, ShieldCheck, StickyNote, X } from 'lucide-react';
+import ExactDetails from './ExactDetails';
 import AgentRunNotebook from './AgentRunNotebook';
 import AiAuthorshipBadge from './AiAuthorshipBadge';
 import { formatDate } from './analysisRunDisplay';
@@ -36,9 +37,6 @@ const STATE_LABEL = {
   failed: 'Failed', canceled: 'Canceled', cancel_requested: 'Canceling',
 };
 
-function shortId(id) {
-  return id ? `${String(id).slice(0, 14)}…` : null;
-}
 
 function Markdown({ children }) {
   return <div className="prose prose-sm max-w-none text-text"><ReactMarkdown skipHtml urlTransform={safeUrl}>{children}</ReactMarkdown></div>;
@@ -55,15 +53,12 @@ function CellFrame({ index, kind, children, label }) {
   );
 }
 
-function Lineage({ input, result }) {
-  if (!input && !result) return null;
-  return (
-    <p className="mt-2 text-xs text-textMuted">
-      {input && <>Read saved version <code title={input}>{shortId(input)}</code></>}
-      {input && result && ' → '}
-      {result && <>produced <code title={result}>{shortId(result)}</code></>}
-    </p>
-  );
+function lineage(cell, extra = []) {
+  return [
+    { label: 'Read saved version', value: cell.inputAnalysisObjectId },
+    { label: 'Produced saved version', value: cell.resultAnalysisObjectId },
+    ...extra,
+  ];
 }
 
 function VerifiedBadge() {
@@ -114,10 +109,10 @@ function VerifiedCell({ cell, index, projectId, api, theme }) {
       </div>
       <p className="mt-1 text-xs text-textMuted">
         Run by {cell.agent?.displayName || 'an agent'} in the study “{cell.study?.name || cell.study?.id}” (trial {cell.trialNumber}) · {formatDate(cell.createdAt)}
+        <ExactDetails className="ml-1" label="Exact versions of this run" items={lineage(cell, [{ label: 'Release', value: cell.release?.key ? `${cell.release.key} v${cell.release.version}` : null }])} />
       </p>
       {cell.study?.objective && <div className="mt-3"><Markdown>{cell.study.objective}</Markdown></div>}
       <div className="mt-3"><Choices choices={cell.choices} /></div>
-      <Lineage input={cell.inputAnalysisObjectId} result={cell.resultAnalysisObjectId} />
       {cell.failure && <p className="mt-2 text-xs text-danger">{cell.failure.message}</p>}
       {api.getWorkflowReleaseSteps && cell.release?.id && (
         <button type="button" onClick={toggle} aria-expanded={Boolean(steps)} className="mt-2 text-xs text-primary underline">
@@ -145,13 +140,13 @@ function AgentCodeCell({ cell, index, projectId, api, theme, canWrite, onOpenRev
       </div>
       <p className="mt-1 text-xs text-textMuted">
         Written by {cell.agent?.displayName || 'an agent'} · run {cell.runNumber} in the sandbox “{cell.sandboxName}” · {formatDate(cell.createdAt)}
+        <ExactDetails className="ml-1" label="Exact versions of this run" items={lineage(cell, [{ label: 'Script SHA-256', value: cell.scriptSha256 }])} />
       </p>
       <p className="mt-2 text-xs text-textMuted">
         <span className="font-semibold text-text">Why not verified code: </span>
         {cell.reason || 'No reason was recorded (run submitted before reasons were required).'}
       </p>
       {!cell.tabAssigned && <p className="mt-1 text-xs text-textMuted">Filed under Exploratory analysis: this run was submitted before agents named a tab.</p>}
-      <Lineage input={cell.inputAnalysisObjectId} result={cell.resultAnalysisObjectId} />
       {cell.error && <p className="mt-2 text-xs text-danger">{cell.error.message}</p>}
       {cell.review?.state === 'draft' && cell.state === 'draft_ready' && onOpenReview && (
         <button type="button" onClick={onOpenReview} className="mt-2 text-xs text-primary underline">Review this draft in Agent access</button>

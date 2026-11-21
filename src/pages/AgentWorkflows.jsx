@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Loader2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import AgentRunNotebook from '../components/AgentRunNotebook';
+import ExactDetails from '../components/ExactDetails';
 
 // Human side of approved agent execution (docs/spec.md phase 2): approve exact
 // workflow releases, define studies agents may work in, and accept results.
@@ -89,6 +90,9 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   const [releases, setReleases] = useState([]);
   const [canApprove, setCanApprove] = useState(false);
   const [studies, setStudies] = useState([]);
+  const [ownResults, setOwnResults] = useState([]);
+  const [query, setQuery] = useState('');
+  const [show, setShow] = useState('all');
   const [runs, setRuns] = useState([]);
   const [datasets, setDatasets] = useState([]);
   const [busy, setBusy] = useState(null);
@@ -118,6 +122,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
       setReleases(rel?.releases || []);
       setCanApprove(Boolean(rel?.canApprove));
       setStudies(st?.studies || []);
+      setOwnResults(st?.ownResults || []);
       setRuns(rn?.runs || []);
       setDatasets(Array.isArray(ds) ? ds.filter((d) => d.uploadStatus === 'uploaded') : []);
       if (api.listComputeTargets) {
@@ -147,11 +152,22 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
 
   const approved = releases.filter((r) => r.approval);
   const selected = releases.find((r) => r.id === (form.releaseId || approved[0]?.id));
-  // A follow-on release runs on the accepted result of a study of another release.
+  // A follow-on release runs on an earlier result: the accepted result of a study
+  // of another release, or the person's own saved pipeline result.
   const composedInput = selected?.inputs?.[0]?.kind === 'analysis_object' ? selected.inputs[0] : null;
   const composedFrom = composedInput ? (composedInput.fromReleases || [composedInput.fromRelease]) : null;
   const releaseKey = (id) => releases.find((r) => r.id === id)?.key;
   const sourceStudies = composedFrom ? studies.filter((s) => s.acceptedRunId && composedFrom.includes(releaseKey(s.releaseId))) : [];
+  // Results the person saved from pipelines they ran themselves.
+  const composedJobTypes = composedFrom ? composedFrom.map((key) => releases.find((r) => r.key === key)?.jobType).filter(Boolean) : [];
+  const sourceOwn = composedFrom ? ownResults.filter((o) => composedJobTypes.includes(o.jobType)
+    && (!composedInput.requiresStage || ['cluster', 'umap'].includes(o.stopAfter))) : [];
+  const ownName = (o) => `${o.name || 'Saved result'}${o.datasetName ? ` · ${o.datasetName}` : ''}${o.createdAt ? ` · ${new Date(o.createdAt).toLocaleDateString()}` : ''}`;
+  const needle = query.trim().toLowerCase();
+  const shownReleases = releases
+    .filter((r) => show === 'all' || (show === 'approved' ? r.approval : !r.approval))
+    .filter((r) => !needle || [r.title, r.key, r.jobType, r.method?.category].some((v) => String(v || '').toLowerCase().includes(needle)))
+    .sort((a, b) => Number(Boolean(b.approval)) - Number(Boolean(a.approval)));
   const studyName = (id) => studies.find((s) => s.id === id)?.name || id;
   const slurmAllowed = slurm && selected?.jobType === 'seurat.pipeline.v1';
   const inputFileTypes = selected?.inputs?.[0]?.fileTypes || ['tenx_h5'];
@@ -166,7 +182,9 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
     event.preventDefault();
     const body = {
       name: form.name, releaseId: selected?.id, maxTrials: Number(form.maxTrials),
-      ...(composedFrom ? { sourceStudyId: form.sourceStudyId } : { datasetIds: form.datasetIds }),
+      ...(composedFrom
+        ? (form.sourceStudyId.startsWith('ao_') ? { sourceAnalysisObjectId: form.sourceStudyId } : { sourceStudyId: form.sourceStudyId })
+        : { datasetIds: form.datasetIds }),
       ...(slurmAllowed && form.executionTarget === 'slurm' ? { executionTarget: 'slurm' } : {}),
       ...(form.ruleMetric ? { selectionRule: { metric: form.ruleMetric, goal: form.ruleGoal } } : {}),
     };
@@ -210,19 +228,34 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
       {error && <p role="alert" className="rounded border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}
 
       <div className="space-y-2">
-        <h4 className="text-sm font-bold text-text">Workflow releases</h4>
-        {releases.map((r) => (
-          <article key={r.id} className="rounded-lg border border-border bg-surface p-4 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="text-sm font-bold text-text">Workflow releases <span className="font-normal text-textMuted">{shownReleases.length} of {releases.length}</span></h4>
+          <div className="flex flex-wrap items-center gap-2">
+            <input type="search" aria-label="Search releases" placeholder="Search releases" value={query} onChange={(e) => setQuery(e.target.value)}
+              className="w-56 rounded border border-border bg-background px-3 py-1.5 text-sm text-text" />
+            <span role="group" aria-label="Show releases" className="inline-flex overflow-hidden rounded border border-border text-xs">
+              {[['all', 'All'], ['approved', 'Approved'], ['pending', 'Not approved']].map(([value, text], i) => (
+                <button key={value} type="button" aria-pressed={show === value} onClick={() => setShow(value)}
+                  className={`px-2 py-1.5 ${i ? 'border-l border-border' : ''} ${show === value ? 'bg-primary/10 font-bold text-primary' : 'text-textMuted'}`}>{text}</button>
+              ))}
+            </span>
+          </div>
+        </div>
+        {shownReleases.length === 0 && <p className="text-sm text-textMuted">No release matches.</p>}
+        {shownReleases.map((r) => (
+          <article key={r.id} className="rounded-lg border border-border bg-surface px-4 py-3 text-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="font-bold text-text">{r.title} <span className="text-xs text-textMuted">v{r.version}</span></p>
-                <p className="mt-1 break-all text-xs text-textMuted">Digest {r.digest}</p>
-                <p className="text-xs text-textMuted">Pinned files: {r.handler.map((h) => h.path).join(', ')} · Reserves {r.resources.cpus} CPU, {Math.round(r.resources.memoryMiB / 1024)} GiB, {r.resources.maxWallSeconds / 60} min per run</p>
-                {r.readableSource && api.getWorkflowReleaseSteps && (
-                  <button type="button" onClick={() => toggleSteps(r.id)} aria-expanded={Boolean(steps[r.id])} className="mt-1 text-xs text-primary underline">
-                    {steps[r.id] ? 'Hide the analysis steps' : 'Read the analysis steps'}
-                  </button>
-                )}
+                <p className="flex items-center gap-1.5 font-bold text-text">{r.title} <span className="text-xs font-normal text-textMuted">v{r.version}</span>
+                  <ExactDetails label={`Exact release of ${r.title}`} items={[{ label: 'Release digest', value: r.digest }, { label: 'Pinned files', value: r.handler.map((h) => h.path).join(', ') }]} /></p>
+                <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-textMuted">
+                  <span>{r.resources.cpus} CPU · {Math.round(r.resources.memoryMiB / 1024)} GiB · {r.resources.maxWallSeconds / 60} min per run</span>
+                  {r.readableSource && api.getWorkflowReleaseSteps && (
+                    <button type="button" onClick={() => toggleSteps(r.id)} aria-expanded={Boolean(steps[r.id])} className="text-primary underline">
+                      {steps[r.id] ? 'Hide the analysis steps' : 'Read the analysis steps'}
+                    </button>
+                  )}
+                </p>
               </div>
               {r.approval ? (
                 <div className="flex items-center gap-2">
@@ -235,7 +268,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
             </div>
             {steps[r.id] && (
               <div className="mt-3">
-                <p className="mb-1 text-xs text-textMuted">{steps[r.id].source?.path} · SHA-256 {steps[r.id].source?.sha256?.slice(0, 12)}…</p>
+                <p className="mb-1 text-xs text-textMuted" title={`SHA-256 ${steps[r.id].source?.sha256 || ''}`}>{steps[r.id].source?.path}</p>
                 <AgentRunNotebook run={{ id: r.id, runNumber: 0, title: r.title, steps: steps[r.id].steps, files: [], scriptSha256: steps[r.id].source?.sha256 }}
                   projectId={projectId} label={`Analysis steps of ${r.title}`} />
               </div>
@@ -266,12 +299,21 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
             </div>
           )}
           {composedFrom ? (
-            <label className="block space-y-1 text-xs font-bold text-textMuted">Builds on the accepted result of
+            <label className="block space-y-1 text-xs font-bold text-textMuted">Builds on
               <select value={form.sourceStudyId} onChange={(e) => setForm((f) => ({ ...f, sourceStudyId: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
-                <option value="">Choose a study…</option>
-                {sourceStudies.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                <option value="">Choose a result…</option>
+                {sourceOwn.length > 0 && (
+                  <optgroup label="Your saved results">
+                    {sourceOwn.map((o) => <option key={o.analysisObjectId} value={o.analysisObjectId}>{ownName(o)}</option>)}
+                  </optgroup>
+                )}
+                {sourceStudies.length > 0 && (
+                  <optgroup label="Accepted study results">
+                    {sourceStudies.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </optgroup>
+                )}
               </select>
-              {sourceStudies.length === 0 && <span className="block font-normal">No study of {composedFrom.map((key) => releases.find((r) => r.key === key)?.title || key).join(', ')} has an accepted result yet.</span>}
+              {sourceStudies.length === 0 && sourceOwn.length === 0 && <span className="block font-normal">Nothing to build on yet. Run {composedFrom.map((key) => releases.find((r) => r.key === key)?.title || key).slice(0, 2).join(' or ')} yourself, or accept a result in a study of it.</span>}
             </label>
           ) : (
           <fieldset className="space-y-1">
@@ -372,7 +414,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
               <p className="font-bold text-text">{s.name} <span className="ml-1 text-xs text-textMuted">{s.status}</span></p>
               {s.status === 'open' && canWrite && <button type="button" disabled={Boolean(busy)} onClick={() => act(`close:${s.id}`, () => api.closeStudy(projectId, s.id))} className="btn btn-secondary text-sm">Close study</button>}
             </div>
-            <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours · Runs on {s.executionTarget === 'slurm' ? 'Slurm' : 'this installation'}{s.sourceStudyId ? ` · Builds on ${studyName(s.sourceStudyId)}` : ''}</p>
+            <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours · Runs on {s.executionTarget === 'slurm' ? 'Slurm' : 'this installation'}{s.sourceStudyId ? ` · Builds on ${studyName(s.sourceStudyId)}` : s.inputs?.[0]?.sourceJobId ? ' · Builds on your saved result' : ''}</p>
           </article>
         ))}
       </div>

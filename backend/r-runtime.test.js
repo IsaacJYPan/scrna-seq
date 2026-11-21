@@ -142,6 +142,16 @@ describe('owned R child environment isolation', () => {
     expect(STORAGE_PROBE_CONTENT).toBe('traceomics-shared-storage-v1\n');
   });
 
+  it('passes only a well-formed runtime identity to the owned R service', () => {
+    const options = { token: 'r-token', port: 8123, storageRoot: process.cwd(), analysisRoot: process.cwd() };
+    const digest = `sha256:${'a'.repeat(64)}`;
+    expect(buildRChildEnv({ TRACEOMICS_RUNTIME_IMAGE_DIGEST: digest, TRACEOMICS_RUNTIME_LOCAL_INSTALL: '1' }, options))
+      .toMatchObject({ TRACEOMICS_RUNTIME_IMAGE_DIGEST: digest, TRACEOMICS_RUNTIME_LOCAL_INSTALL: '1' });
+    const odd = buildRChildEnv({ TRACEOMICS_RUNTIME_IMAGE_DIGEST: 'latest; rm -rf', TRACEOMICS_RUNTIME_LOCAL_INSTALL: 'yes' }, options);
+    expect(odd).not.toHaveProperty('TRACEOMICS_RUNTIME_IMAGE_DIGEST');
+    expect(odd).not.toHaveProperty('TRACEOMICS_RUNTIME_LOCAL_INSTALL');
+  });
+
   it('passes the controlled Seurat delay only with non-production test diagnostics', () => {
     const options = {
       token: 'r-token', port: 8123, storageRoot: process.cwd(), analysisRoot: process.cwd(),

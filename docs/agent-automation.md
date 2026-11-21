@@ -110,7 +110,8 @@ upstream provenance and declared deviations), and the shared executor files.
 Approval shows the upstream tutorial, citation and deviations.
 
 - **Inputs.** A method runs on the accepted result of a study whose release it
-  lists in `accepts` (for example `doublets-scdblfinder` → `subset-cells` →
+  lists in `accepts`, or on the person's own saved result of a built-in pipeline
+  it accepts (see *Follow-on studies*) (for example `doublets-scdblfinder` → `subset-cells` →
   `recluster-integrate` → `label-clusters`). Every link is a person's
   acceptance. `seurat-markers` also accepts any method that produces an
   analysis.
@@ -203,8 +204,8 @@ without `results.read` see the rule but not trial summaries or the pick.
 inspection.
 
 **Follow-on studies.** A study of a release whose input is an analysis object
-(today `seurat-markers`) is created with `sourceStudyId` instead of
-`datasetIds`. The source study must run the release the follow-on declares as
+(today `seurat-markers`) is created with `sourceStudyId` or
+`sourceAnalysisObjectId` instead of `datasetIds`. The source study must run the release the follow-on declares as
 its input (`seurat-qc-cluster`), must have an accepted result, and must have
 been created by the same person (runs execute as the study creator, who must
 own the result). The study pins that exact result object, the run it came from,
@@ -212,9 +213,18 @@ and the acceptance version; accepting a different result in the source study
 later does not change it. Agents plan follow-on trials as usual, passing the
 `datasetId` listed in the study's `inputs`. A follow-on run is
 `candidate_ready` once its job completed and recorded the declared summary
-artifact, and acceptance records that artifact. In the UI, choose the marker
-release under *New study* and pick the source study under *Builds on the
-accepted result of*. Follow-on studies run locally only.
+artifact, and acceptance records that artifact. 
+
+**Building on your own result.** With `sourceAnalysisObjectId` a study runs on
+a result you saved from a built-in pipeline you ran yourself (Seurat, multi-
+sample or spatial), with no agent study first. It must be yours, from a
+completed run of a pipeline the release accepts, past clustering when the
+release needs clusters, and its dataset must have a recorded checksum. The
+study pins that object, the job that produced it and the dataset version.
+
+In the UI, choose the release under *New study* and pick the source under
+*Builds on*: your saved results and accepted study results are listed
+separately. Follow-on studies run locally only.
 
 **What is and is not enforced.** Budgets are enforced at admission. The local
 worker runs one job at a time, and physical CPU and memory limits come from the
@@ -676,3 +686,30 @@ sessions.
 - `cli/traceomics.test.mjs`, `cli/traceomics-mcp.test.mjs`,
   `src/pages/AgentAccess.test.jsx`, `src/pages/AgentWorkflows.test.jsx`,
   `src/pages/AgentSandboxes.test.jsx`, `src/pages/AgentReports.test.jsx`.
+
+## Running agents on your own computer
+
+Agents run approved workflows only when the R runtime is pinned, and they run
+their own R only in a no-network container. Locally:
+
+- **Approved workflows without a container.** Pin your R installation:
+
+  ```powershell
+  node scripts/pin-local-runtime.js --out .traceomics-runtime.json
+  ```
+
+  Then set `TRACEOMICS_WORKFLOW_RUNTIME_FILE` to that file and
+  `TRACEOMICS_RUNTIME_LOCAL_INSTALL=1`, and restart. The identity is a digest of
+  the R home, R version and every installed package with its library path, so
+  installing, removing or upgrading a package changes it and pending runs are
+  refused until you pin again and reapprove.
+- **Agent sandboxes and Expert R.** With Docker running, build the R image and
+  set `EXPERT_R_SANDBOX_IMAGE` to its `sha256:…` id. `npm run dev` then also
+  starts the sandbox broker on `127.0.0.1:8090` and enables Expert R for the web
+  service and worker with a generated token (`APP_DEPLOYMENT_MODE` defaults to
+  `private` and `EXPERT_R_ACCESS_POLICY` to `project-roles`, so project writers
+  need no separate operator approval). Each run is a fresh container with no network.
+
+  ```powershell
+  docker build --target runtime -t traceomics-r:local r-backend
+  ```

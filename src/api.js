@@ -704,6 +704,11 @@ export const electronAPI = {
     }, { mutation: true });
   },
 
+  // Copies one granted server-folder file (chosen in ServerDataFilePicker) into
+  // the project as a pipeline input dataset.
+  addDatasetFromServerFolder: async (projectId, source, metadata = {}, fileType) =>
+    req(`/api/projects/${projectId}/datasets/from-server-folder`, { method: 'POST', body: JSON.stringify({ source, fileType, metadata }) }),
+
   // Project-scoped analysis objects & jobs (project metadata/history; ids/owner/
   // project/status are server-controlled). R execution/state is unchanged here —
   // these are metadata APIs only.

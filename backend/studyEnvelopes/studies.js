@@ -19,6 +19,14 @@ const MAX_VALUES_PER_VARIATION = 10;
 const MAX_VARIED_PARAMETERS = 6;
 const DATASET_ID = /^ds_[A-Za-z0-9]+$/;
 const STUDY_ID = /^study_[0-9a-f]{24}$/;
+const ANALYSIS_OBJECT_ID = /^ao_[0-9a-f]{24}$/;
+// Built-in pipelines a person runs themselves whose results can feed a study.
+const OWN_SOURCE_JOB_TYPES = ['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'];
+
+function ownSourceJobTypes(inputSpec, releases) {
+  const keys = inputSpec.fromReleases || (Array.isArray(inputSpec.fromRelease) ? inputSpec.fromRelease : [inputSpec.fromRelease]);
+  return keys.map((key) => releases.find((r) => r.key === key)?.jobType).filter((type) => OWN_SOURCE_JOB_TYPES.includes(type));
+}
 
 function requireHuman(actor) {
   if (actor?.kind !== 'human') throw codedError('HUMAN_ACTOR_REQUIRED', 'This operation requires a signed-in person.', 403);
@@ -83,7 +91,7 @@ function createStudyService({ db, withTransaction, approvals }) {
   async function create(actor, projectId, body = {}) {
     requireHuman(actor);
     const allowed = ['name', 'objective', 'releaseId', 'datasetIds', 'fixedParameters', 'variations',
-      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget', 'sourceStudyId', 'selectionRule'];
+      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget', 'sourceStudyId', 'sourceAnalysisObjectId', 'selectionRule'];
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw codedError('INVALID_INPUT', 'A JSON object is required.', 400);
     for (const key of Object.keys(body)) {
       if (!allowed.includes(key)) throw codedError('UNKNOWN_FIELD', `Unknown field: ${key.slice(0, 64)}.`, 400);
@@ -145,10 +153,13 @@ function createStudyService({ db, withTransaction, approvals }) {
     const inputSpec = release.definition.inputs[0];
     const composed = inputSpec.kind === 'analysis_object';
     if (composed && body.datasetIds !== undefined) {
-      throw codedError('INVALID_INPUT', 'This workflow runs on the accepted result of another study; give sourceStudyId, not datasetIds.', 400);
+      throw codedError('INVALID_INPUT', 'This workflow runs on an earlier result; give sourceStudyId or sourceAnalysisObjectId, not datasetIds.', 400);
     }
-    if (!composed && body.sourceStudyId !== undefined) {
-      throw codedError('INVALID_INPUT', 'This workflow takes datasets as input; sourceStudyId is not allowed.', 400);
+    if (!composed && (body.sourceStudyId !== undefined || body.sourceAnalysisObjectId !== undefined)) {
+      throw codedError('INVALID_INPUT', 'This workflow takes datasets as input; a source result is not allowed.', 400);
+    }
+    if (composed && (body.sourceStudyId === undefined) === (body.sourceAnalysisObjectId === undefined)) {
+      throw codedError('INVALID_INPUT', 'Give exactly one of sourceStudyId (an accepted study result) or sourceAnalysisObjectId (your own saved result).', 400);
     }
     const datasetIds = composed ? [] : body.datasetIds;
     if (!composed && (!Array.isArray(datasetIds) || datasetIds.length < 1 || datasetIds.length > MAX_INPUTS
@@ -221,7 +232,9 @@ function createStudyService({ db, withTransaction, approvals }) {
     }
 
     let sourceStudyId = null;
-    if (composed) {
+    if (composed && body.sourceAnalysisObjectId !== undefined) {
+      inputs.push(await ownSource(actor, projectId, body.sourceAnalysisObjectId, inputSpec, releases));
+    } else if (composed) {
       const source = await acceptedSource(actor, projectId, body.sourceStudyId, inputSpec, releases);
       sourceStudyId = source.studyId;
       inputs.push(source.input);
@@ -298,6 +311,64 @@ function createStudyService({ db, withTransaction, approvals }) {
     };
   }
 
+  // A person's own saved result from a built-in pipeline they ran themselves
+  // (not through an agent). They chose to build on it, so it is pinned the
+  // same way an accepted study result is: exact object, exact dataset version.
+  async function ownSource(actor, projectId, objectId, inputSpec, releases) {
+    if (typeof objectId !== 'string' || !ANALYSIS_OBJECT_ID.test(objectId)) {
+      throw codedError('INVALID_INPUT', 'sourceAnalysisObjectId must name a saved result.', 400);
+    }
+    const allowedJobTypes = ownSourceJobTypes(inputSpec, releases);
+    const { rows } = await db.query(
+      `SELECT ao.id, ao.owner_user_id, j.id AS job_id, j.job_type, j.parameters_json, j.dataset_id, d.sha256
+         FROM analysis_objects ao
+         JOIN jobs j ON j.result_analysis_object_id = ao.id AND j.project_id = ao.project_id AND j.status = 'completed'
+         LEFT JOIN datasets d ON d.id = j.dataset_id AND d.project_id = ao.project_id
+        WHERE ao.id = $1 AND ao.project_id = $2
+        ORDER BY j.completed_at DESC LIMIT 1`,
+      [objectId, String(projectId)]
+    );
+    const row = rows[0];
+    if (!row) throw codedError('NOT_FOUND', 'Saved result not found.', 404);
+    if (String(row.owner_user_id) !== String(actor.userId)) {
+      throw codedError('INPUT_NOT_APPLICABLE', 'You can only build on saved results you own.', 403);
+    }
+    if (!allowedJobTypes.includes(row.job_type)) {
+      throw codedError('INPUT_NOT_APPLICABLE', 'This workflow cannot build on that kind of result.', 400);
+    }
+    const parameters = parseMetadata(row.parameters_json) || {};
+    if (inputSpec.requiresStage && ['qc', 'normalize', 'pca', 'cluster', 'umap'].indexOf(parameters.stopAfter || 'umap') < 3) {
+      throw codedError('INPUT_NOT_APPLICABLE', 'This workflow requires a completed clustering checkpoint.', 400);
+    }
+    if (!row.dataset_id || !/^[0-9a-f]{64}$/.test(String(row.sha256 || ''))) {
+      throw codedError('INPUT_NOT_PINNED', 'The dataset behind this result has no recorded checksum, so its exact version cannot be pinned.', 400);
+    }
+    return { datasetId: row.dataset_id, datasetSha256: row.sha256, analysisObjectId: row.id, sourceJobId: row.job_id };
+  }
+
+  // Results a person may build a follow-on study on without an agent study:
+  // their own completed runs of the built-in pipelines.
+  async function ownResults(actor, projectId) {
+    const { rows } = await db.query(
+      `SELECT DISTINCT ON (ao.id) ao.id, ao.display_name, ao.created_at, j.job_type, j.parameters_json,
+              d.original_filename
+         FROM analysis_objects ao
+         JOIN jobs j ON j.result_analysis_object_id = ao.id AND j.project_id = ao.project_id AND j.status = 'completed'
+         LEFT JOIN datasets d ON d.id = j.dataset_id AND d.project_id = ao.project_id
+        WHERE ao.project_id = $1 AND ao.owner_user_id = $2 AND j.job_type = ANY($3::text[])
+        ORDER BY ao.id, j.completed_at DESC`,
+      [String(projectId), actor.userId, OWN_SOURCE_JOB_TYPES]
+    );
+    return rows.map((row) => ({
+      analysisObjectId: row.id,
+      name: row.display_name,
+      datasetName: row.original_filename || null,
+      jobType: row.job_type,
+      stopAfter: (parseMetadata(row.parameters_json) || {}).stopAfter || 'umap',
+      createdAt: row.created_at,
+    })).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 50);
+  }
+
   async function trialsFor(studyId) {
     const { rows } = await db.query(
       `SELECT ar.id, ar.trial_number, ar.created_at, ar.cancel_requested_at, ar.agent_principal_id, ar.delegation_id,
@@ -341,7 +412,7 @@ function createStudyService({ db, withTransaction, approvals }) {
     await db.requireProjectRole(actor.userId, projectId, READ_ROLES);
     const { rows } = await db.query(
       'SELECT * FROM study_envelopes WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100', [String(projectId)]);
-    return { schema: 'traceomics.studies.v1', studies: rows.map((row) => publicStudy(row)) };
+    return { schema: 'traceomics.studies.v1', studies: rows.map((row) => publicStudy(row)), ownResults: await ownResults(actor, projectId) };
   }
 
   async function getForHuman(actor, projectId, studyId) {

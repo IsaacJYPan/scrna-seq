@@ -1,6 +1,7 @@
 import PageHeader from '../components/PageHeader';
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, AlertTriangle, ImageDown, FileText } from 'lucide-react';
+import LiveUnavailable from '../components/LiveUnavailable';
 import Plot, { getPlotHoverStyle, supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -10,7 +11,7 @@ import { useRestoredReduction } from '../hooks/useRestoredReduction';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
-export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme, deploymentPolicy }) {
+export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme, deploymentPolicy, liveUnavailable, liveReopening, setActiveTab }) {
 
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
@@ -323,6 +324,10 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         </div>
       </div>
     );
+  }
+
+  if (!pipelineState?.pca && !pipelineState?.umap && (liveUnavailable || liveReopening)) {
+    return <LiveUnavailable reopening={liveReopening} onOpenHistory={setActiveTab ? () => setActiveTab('history') : undefined} />;
   }
 
   if (!pipelineState?.pca && !pipelineState?.umap) {

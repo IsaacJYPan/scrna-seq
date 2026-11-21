@@ -85,6 +85,23 @@ describe('App live analysis recovery', () => {
     expect(screen.getByRole('button', { name: 'Open Runs & Results' })).toBeInTheDocument();
   });
 
+  it('reopens a saved version by itself once after the analysis server restarted', async () => {
+    let reopened = false;
+    window.electronAPI.listProjectAnalysisObjects = vi.fn(async () => [{
+      id: 'ao_aaaaaaaaaaaaaaaaaaaaaaaa', projectId: 'proj_test', displayName: 'Saved', ownerUserId: 7, objectType: 'seurat' }]);
+    window.electronAPI.createProjectJob = vi.fn(async () => ({ id: 'job_load', status: 'queued' }));
+    window.electronAPI.getProjectJob = vi.fn(async () => { reopened = true; return { id: 'job_load', status: 'completed' }; });
+    window.electronAPI.apiRequest.mockImplementation(async path => path === '/pipeline-state'
+      ? (reopened ? clean : { exists: false }) : path === '/session-id' ? { sessionId: 'new-runtime' } : {});
+    render(<App />);
+    expect(await screen.findByText(/Reopening your saved version/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('live-object')).toHaveTextContent('ao_aaaaaaaaaaaaaaaaaaaaaaaa:attached'), { timeout: 5000 });
+    expect(screen.queryByText(/Live analysis is unavailable|Reopening/)).not.toBeInTheDocument();
+    expect(window.electronAPI.createProjectJob).toHaveBeenCalledTimes(1);
+    expect(window.electronAPI.createProjectJob).toHaveBeenCalledWith('proj_test', expect.objectContaining({
+      jobType: 'checkpoint.load.v1', analysisObjectId: 'ao_aaaaaaaaaaaaaaaaaaaaaaaa' }));
+  });
+
   it('uses mutation status immediately and clears it when selecting a clean object', async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('live-object')).toHaveTextContent('analysis_a:attached'));

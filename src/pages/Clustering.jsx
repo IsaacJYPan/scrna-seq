@@ -2,11 +2,12 @@ import './analysisUi.css';
 import PageHeader from '../components/PageHeader';
 import React from 'react';
 import { Network, AlertTriangle, FileText, ChevronRight } from 'lucide-react';
+import LiveUnavailable from '../components/LiveUnavailable';
 import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function Clustering({ callApi, datasetInfo, currentProvId: _currentProvId, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed, theme }) {
+export default function Clustering({ callApi, datasetInfo, currentProvId: _currentProvId, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed, theme, liveUnavailable, liveReopening, setActiveTab }) {
   const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
   const clusterSeed = activeProjectSeed || (isPbmcTutorial ? '0' : '');
   // Persisted parameters
@@ -47,6 +48,10 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
         </div>
       </div>
     );
+  }
+
+  if (!pipelineState?.pca && (liveUnavailable || liveReopening)) {
+    return <LiveUnavailable reopening={liveReopening} onOpenHistory={setActiveTab ? () => setActiveTab('history') : undefined} />;
   }
 
   if (!pipelineState?.pca) {

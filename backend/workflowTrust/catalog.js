@@ -63,12 +63,13 @@ const DEFINITIONS = [
     validateParameters: (params) => validateSeuratPipelineParams(params).params,
   },
   {
-    // A follow-on step: it runs on the accepted clustering of a source study
+    // A follow-on step: it runs on a clustering a person chose, either the
+    // accepted result of a source study or their own saved pipeline result
     // (see studies.js), never on an arbitrary object, and reads it without
     // changing it. Its output is a marker table plus a bounded summary.
     key: 'seurat-markers',
     version: '1',
-    title: 'Cluster marker genes (on an accepted clustering)',
+    title: 'Cluster marker genes (on a saved clustering)',
     jobType: 'deg.find_markers.v1',
     handlerFiles: ['backend/degFindMarkers.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R'],
     inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample', 'spatial-seurat', ...analysisProducingMethodKeys()], requiresStage: 'cluster' }],

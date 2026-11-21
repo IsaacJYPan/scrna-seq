@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ChevronDown, ChevronRight, Download, Loader2 } from 'lucide-react';
 import CodeEditor from '../notebooks/CodeEditor';
+import ExactDetails from './ExactDetails';
 import { agentRunCells, agentRunNotebookContent } from '../../shared/agentRunNotebook.mjs';
 import { listAnalyses } from '../analyses/researchAnalysisApi';
 import { createNotebook } from '../notebooks/notebookApi';
@@ -160,7 +161,8 @@ export default function AgentRunNotebook({ run, projectId, theme = 'light', file
       <div className="space-y-4">
         {steps.map((step) => <StepCell key={`${exact}:${step.number}`} step={step} theme={theme} fileUrl={fileUrl} readText={readText} />)}
       </div>
-      {!exact && <p className="text-[11px] text-textMuted">The readable view hides error handling. Exact code shows what ran (script SHA-256 {run.scriptSha256?.slice(0, 12)}…).</p>}
+      {!exact && <p className="text-[11px] text-textMuted">The readable view hides error handling; Exact code shows what ran.
+        <ExactDetails className="ml-1" label="Exact script" items={[{ label: 'Script SHA-256', value: run.scriptSha256 }]} /></p>}
     </div>
   );
 }

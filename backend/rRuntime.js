@@ -186,6 +186,12 @@ function buildRChildEnv(env = process.env, options = {}) {
     }
   }
   if (env.ALLOW_TRUSTED_RDS_LOAD === 'true') child.ALLOW_TRUSTED_RDS_LOAD = 'true';
+  // Runtime identity for approved workflows (r-backend/lib/workflowTrust.R):
+  // an image digest, or a digest of this plain R installation.
+  if (/^sha256:[0-9a-f]{64}$/.test(trimmed(env.TRACEOMICS_RUNTIME_IMAGE_DIGEST))) {
+    child.TRACEOMICS_RUNTIME_IMAGE_DIGEST = trimmed(env.TRACEOMICS_RUNTIME_IMAGE_DIGEST);
+  }
+  if (env.TRACEOMICS_RUNTIME_LOCAL_INSTALL === '1') child.TRACEOMICS_RUNTIME_LOCAL_INSTALL = '1';
   return child;
 }
 

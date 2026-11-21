@@ -179,6 +179,21 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   demoGuestTtlSeconds: null,
 });
 
+// Reopens a saved analysis version in the person's R session after the
+// server lost it (a restart). Resolves true once the load job completes.
+async function reopenSavedVersion(api, projectId, objectId, { intervalMs = 2500, maxPolls = 120 } = {}) {
+  try {
+    let job = await api.createProjectJob(projectId, { jobType: 'checkpoint.load.v1', analysisObjectId: objectId, parameters: {} });
+    for (let i = 0; i < maxPolls && ['queued', 'running'].includes(job?.status); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      job = await api.getProjectJob(projectId, job.id);
+    }
+    return job?.status === 'completed';
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
   const returnToWorkspace = useCallback(() => setActiveTab('workspace'), []);
@@ -244,6 +259,10 @@ export default function App() {
   });
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
   const [liveRecoveryNotice, setLiveRecoveryNotice] = useState('');
+  // When the analysis server restarts, the selected saved version is reopened
+  // once automatically instead of leaving the person at a "not loaded" gate.
+  const [liveReopening, setLiveReopening] = useState(false);
+  const liveReopenTriedRef = React.useRef(new Set());
   const [historyPersistenceNotice, setHistoryPersistenceNotice] = useState('');
   const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
   const checkpointSaveRequestRef = React.useRef(0);
@@ -1277,8 +1296,29 @@ export default function App() {
         pipelineProbeAttemptsRef.current = 0;
         pipelineProbeAttachedRef.current = false;
         setUnsavedLiveChanges(false);
-        setLiveRecoveryNotice('Live analysis is unavailable. Restore a saved version to continue. Any unsaved changes from the previous R session are unavailable.');
         resetPipelineState();
+        const projectId = activeProjectIdForPipeline;
+        const api = window.electronAPI || {};
+        if (/^ao_/.test(objectId) && projectId && api.createProjectJob && api.getProjectJob && !liveReopenTriedRef.current.has(objectId)) {
+          liveReopenTriedRef.current.add(objectId);
+          setLiveReopening(true);
+          setLiveRecoveryNotice('The analysis server restarted. Reopening your saved version…');
+          reopenSavedVersion(api, projectId, objectId).then((ok) => {
+            setLiveReopening(false);
+            if (ok) {
+              setLiveRecoveryNotice('');
+              pipelineProbeKeyRef.current = null;
+              patchActiveWorkspace(ws => ({
+                objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
+              }));
+              setPipelineProbeRetry(value => value + 1);
+            } else {
+              setLiveRecoveryNotice('Live analysis is unavailable and the saved version could not be reopened automatically. Open it from Runs & Results to continue.');
+            }
+          });
+        } else if (!liveReopenTriedRef.current.has(objectId)) {
+          setLiveRecoveryNotice('Live analysis is unavailable. Open a saved version from Runs & Results to continue. Unsaved changes from the previous session are gone.');
+        }
         patchActiveWorkspace(ws => ({
           objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'not_attached' } : object),
         }));
@@ -1329,7 +1369,7 @@ export default function App() {
         pipelineProbeRetryTimeoutRef.current = null;
       }
     };
-  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace]);
+  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace, activeProjectIdForPipeline]);
 
 
 
@@ -1410,6 +1450,8 @@ export default function App() {
       theme,
       rSessionId,          // let components watch session changes directly
       sessionReady,        // gate: true only after R session restore completes
+      liveUnavailable: datasetInfo?.liveState === 'not_attached',
+      liveReopening,
       resetPipelineAfterSubset,
       // For per-object parameter persistence
       userEmail: user?.email ?? null,
@@ -1564,8 +1606,9 @@ export default function App() {
         )}
         {liveRecoveryNotice && !['analyses', 'pipeline-manager'].includes(activeTab) && !activeTab.startsWith('workflow:') && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
+            {liveReopening && <Loader2 size={12} className="mr-1 inline animate-spin" aria-hidden="true" />}
             {liveRecoveryNotice}
-            <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
+            {!liveReopening && <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>}
           </div>
         )}
         {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}

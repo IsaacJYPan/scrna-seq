@@ -1,6 +1,7 @@
 import SeuratPipelineSettings from './SeuratPipelineSettings';
 import React, { useState } from 'react';
-import { FileUp, Zap, Loader2, RefreshCw, Archive } from 'lucide-react';
+import { FileUp, Zap, Loader2, RefreshCw, Archive, FolderOpen } from 'lucide-react';
+import ServerDataFilePicker from './ServerDataFilePicker';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 import { publicErrorMessage } from '../publicError';
 import RefreshButton from './RefreshButton';
@@ -201,6 +202,7 @@ export function SeuratPipelinePanel({
   setActiveTab,
   datasetUploadsEnabled = true,
   canWriteProject = false,
+  userId,
 }) {
   const [analysisApproach, setAnalysisApproach] = useState('automatic');
   const approachId = React.useId();
@@ -209,6 +211,8 @@ export function SeuratPipelinePanel({
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
   const [multiSampleRows, setMultiSampleRows] = useState([]);
   const [datasetStatus, setDatasetStatus] = useState({ loading: false, uploading: false, error: null });
+  const [serverPickerOpen, setServerPickerOpen] = useState(false);
+  const [serverChoice, setServerChoice] = useState(null);
   const [job, setJob] = useState(null);
   const [loadJob, setLoadJob] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -500,6 +504,34 @@ export function SeuratPipelinePanel({
     }
   };
 
+  // Adds an input file from a server folder the person was granted, for files
+  // too large or too remote to upload through the browser.
+  const addFromServerFolder = async () => {
+    const api = window.electronAPI || {};
+    if (!serverChoice || !api.addDatasetFromServerFolder) return;
+    setDatasetStatus({ loading: false, uploading: true, error: null });
+    try {
+      const created = await api.addDatasetFromServerFolder(activeProjectId, {
+        rootId: serverChoice.rootId, relativePath: serverChoice.file.relativePath, selectionToken: serverChoice.file.selectionToken,
+      }, { supportedWorkflow: workflow.jobType, supportedFormat: workflow.formatLabel }, workflow.datasetFileType);
+      setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
+      if (multiSampleMode) {
+        setMultiSampleRows(prev => prev.some(row => row.datasetId === created.id) ? prev : [...prev, {
+          datasetId: created.id, sampleName: defaultSampleName(created), conditionName: '', donorCode: '', batch: '',
+        }]);
+        setSelectedDatasetId(prev => prev || created.id);
+      } else {
+        setSelectedDatasetId(created.id);
+      }
+      setServerChoice(null);
+      setServerPickerOpen(false);
+    } catch (error) {
+      setDatasetStatus(prev => ({ ...prev, error: parseErrorMessage(error) }));
+    } finally {
+      setDatasetStatus(prev => ({ ...prev, uploading: false }));
+    }
+  };
+
   const launchPipeline = async () => {
     if (!canWriteProject) {
       setJobStatus(prev => ({ ...prev, error: 'Your project role is read-only and cannot start analysis jobs.' }));
@@ -739,7 +771,30 @@ export function SeuratPipelinePanel({
                     onChange={uploadDataset}
                   />
                 </label> : null}
+                {datasetUploadsEnabled && canWriteProject && (
+                  <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" aria-expanded={serverPickerOpen}
+                    onClick={() => { setServerPickerOpen(open => !open); setServerChoice(null); }}>
+                    <FolderOpen size={16} /> From a server folder
+                  </button>
+                )}
               </div>
+              {serverPickerOpen && (
+                <div className="mb-3 space-y-3 rounded border border-border bg-background p-3">
+                  <p className="text-xs text-textMuted">Folders on this server that an administrator shared with you for this project. The file is copied into the project like an upload.</p>
+                  <ServerDataFilePicker projectId={activeProjectId} userId={userId} available={canWriteProject && userId != null} disabled={datasetStatus.uploading}
+                    allowedExtensions={[spatialMode ? '.zip' : '.h5']} sizeLimitBytes={Number.MAX_SAFE_INTEGER}
+                    unsupportedLabel={spatialMode ? 'Choose a Visium .zip bundle' : 'Choose a 10x .h5 file'}
+                    onSelect={value => setServerChoice(value)}
+                    onAuthority={allowed => { if (!allowed) setDatasetStatus(prev => ({ ...prev, error: 'No server folder is shared with you for this project. Ask an administrator, or upload the file instead.' })); }}
+                    onError={failure => { if (failure) setDatasetStatus(prev => ({ ...prev, error: failure.message })); }} />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" className="btn btn-primary text-sm" disabled={!serverChoice || datasetStatus.uploading} onClick={() => void addFromServerFolder()}>
+                      {datasetStatus.uploading ? 'Adding…' : serverChoice ? `Add ${serverChoice.file.name}` : 'Choose a file'}
+                    </button>
+                    <button type="button" className="btn btn-secondary text-sm" onClick={() => { setServerPickerOpen(false); setServerChoice(null); }}>Cancel</button>
+                  </div>
+                </div>
+              )}
               {datasetStatus.error && (
                 <div className="mb-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
                   {safeMessage(datasetStatus.error)}

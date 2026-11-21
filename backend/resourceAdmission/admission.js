@@ -177,7 +177,7 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     if (!rows[0] || rows[0].sha256 !== input.datasetSha256) {
       throw codedError('INPUT_CHANGED', 'The pinned input version is no longer available.', 409);
     }
-    if (input.sourceRunId) {
+    if (input.sourceRunId || input.sourceJobId) {
       const { rows: objects } = await client.query(
         'SELECT 1 FROM analysis_objects WHERE id = $1 AND project_id = $2', [input.analysisObjectId, study.project_id]);
       if (!objects[0]) throw codedError('INPUT_CHANGED', 'The pinned source result is no longer available.', 409);
@@ -423,7 +423,10 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       const maxAttempts = db.RETRYABLE_DURABLE_JOB_TYPES.has(plan.release.jobType) ? 2 : 1;
       // Follow-on releases consume the accepted object. Preserve the dataset
       // in the plan for provenance, but omit it from the object-only R receipt.
-      const jobDatasetId = study.source_study_id ? null : dataset.id;
+      // That holds whether the source is an accepted study result or the
+      // sponsor's own saved pipeline result (sourceJobId, no source study).
+      const followOn = study.source_study_id || (study.inputs_json || []).some((entry) => entry.sourceJobId || entry.sourceRunId);
+      const jobDatasetId = followOn ? null : dataset.id;
       await client.query(
         `INSERT INTO jobs (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type, status,
            parameters_json, max_attempts, execution_target)

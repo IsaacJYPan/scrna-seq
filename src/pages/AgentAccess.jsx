@@ -8,6 +8,7 @@ import AgentWorkflows from './AgentWorkflows';
 import AgentSandboxes from './AgentSandboxes';
 import AgentReports from './AgentReports';
 import { APP_NAME } from '../brand';
+import ExactDetails from '../components/ExactDetails';
 
 // Human governance for delegated agents (docs/spec.md phases 0-1). This page
 // only displays and changes delegations; every rule is enforced server-side.
@@ -371,7 +372,7 @@ function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjec
                 <div className="mt-3 space-y-3">
                   {p.summary && <p className="whitespace-pre-wrap text-textMuted">{p.summary}</p>}
                   <pre className="max-h-96 overflow-auto rounded border border-border bg-background p-3 text-xs text-text">{proposalBody[p.id] ?? 'Loading…'}</pre>
-                  <p className="text-xs text-textMuted">SHA-256 {p.bodySha256} · {p.bodyBytes} bytes</p>
+                  <p className="text-xs text-textMuted">{p.bodyBytes} bytes <ExactDetails label="Exact proposal" items={[{ label: 'Proposal SHA-256', value: p.bodySha256 }]} /></p>
                   {p.reviewState === 'open' && role !== 'viewer' && (
                     <div className="space-y-2">
                       <textarea aria-label="Review note" maxLength={2000} value={reviewNote} onChange={e => setReviewNote(e.target.value)}

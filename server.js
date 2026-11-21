@@ -557,16 +557,19 @@ function sanitizeIdSegment(value) {
 
 // Store an uploaded dataset under a server-owned project key. The client never
 // controls the key or final path.
-async function storeDatasetFile(file, projectId, datasetId) {
-  const safeName = (db.sanitizeDatasetFilename(file.originalname) || 'upload.bin')
+function datasetStorageKey(originalname, projectId, datasetId) {
+  const safeName = (db.sanitizeDatasetFilename(originalname) || 'upload.bin')
     .replace(/[^a-zA-Z0-9._-]/g, '_');
-  const key = storage.projectStorageFileKey(
-    sanitizeIdSegment(projectId),
-    'datasets',
-    sanitizeIdSegment(datasetId),
-    safeName
-  );
-  const stored = await durableStorage.putFileFromPath(file.path, key);
+  return storage.projectStorageFileKey(sanitizeIdSegment(projectId), 'datasets', sanitizeIdSegment(datasetId), safeName);
+}
+
+// Moves an uploaded temporary file into project storage. A server-folder
+// source passes an open handle instead: its bytes are copied, never moved.
+async function storeDatasetFile(file, projectId, datasetId) {
+  const key = datasetStorageKey(file.originalname, projectId, datasetId);
+  const stored = file.handle
+    ? await durableStorage.putFileFromHandle(file.handle, key, { maxBytes: file.maxBytes, expectedStat: file.expectedStat })
+    : await durableStorage.putFileFromPath(file.path, key);
   return {
     internalStorageKey: stored.key,
     sha256: stored.checksumSha256,
@@ -1728,7 +1731,8 @@ app.use('/api/automation/v1', automationRoutes({
 }));
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
-app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));
+const serverDataImports = require('./backend/serverDataImports').createServerDataImportService(db, durableStorage);
+app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth, service: serverDataImports }));
 app.use('/api/execution-history', require('./backend/executionHistoryRoutes').executionHistoryRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/run-monitoring', require('./backend/runMonitoringRoutes').runMonitoringRoutes({ db, requireAuth,
   serviceOptions: require('./backend/runMonitoringResources').createRunResourceObservers() }));
@@ -2255,6 +2259,49 @@ app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, 
   } catch (e) {
     cleanupDatasetReqFile(req);
     sendDatasetError(res, e);
+  }
+});
+
+// Adds a pipeline input file from a server folder this person was granted
+// (SERVER_DATA_IMPORT_ROOTS), for files too large or too remote to upload from
+// the browser. The bytes are copied into project storage like an upload.
+app.post('/api/projects/:projectId/datasets/from-server-folder', requireDatasetWriterBeforeUpload, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const fileType = body.fileType;
+  const meta = coerceDatasetJsonField(body.metadata);
+  if (!meta.ok) return res.status(400).json({ error: 'metadata must be valid JSON.' });
+  let opened;
+  try {
+    opened = await serverDataImports.openForDataset(req.user.id, req.params.projectId, body.source);
+  } catch (error) {
+    const status = error?.status || 500;
+    return res.status(status).json({ error: status < 500 ? error.message : 'The server folder is unavailable.', ...(status < 500 && error.code ? { code: error.code } : {}) });
+  }
+  let dataset;
+  let stored = null;
+  try {
+    if (opened.sizeBytes > config.maxUploadBytes()) {
+      return res.status(413).json({ error: 'That file is larger than this server accepts for input files.' });
+    }
+    dataset = await db.createDatasetForProject(req.user.id, req.params.projectId, { fileType, originalFilename: opened.name, metadata: meta.value });
+    stored = await storeDatasetFile({ handle: opened.handle, expectedStat: opened.stat, maxBytes: config.maxUploadBytes(), originalname: opened.name }, req.params.projectId, dataset.id);
+    await opened.revalidate?.();
+    if (stored.fileSizeBytes !== opened.sizeBytes) throw Object.assign(new Error('changed'), { code: 'SERVER_IMPORT_SOURCE_CHANGED' });
+    dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
+    const validation = await validateStoredDataset(durableStorage, dataset);
+    if (validation.validationStatus !== 'pending') {
+      dataset = await db.setDatasetValidationResult(req.params.projectId, dataset.id, validation.validationStatus, validation.validationErrors);
+    }
+    return res.status(201).json(db.toPublicDataset(dataset));
+  } catch (error) {
+    if (stored?.internalStorageKey) { try { durableStorage.remove(stored.internalStorageKey); } catch { /* best effort */ } }
+    if (dataset) await db.markDatasetUploadFailed(req.params.projectId, dataset.id).catch(() => {});
+    if (error?.code === 'SERVER_IMPORT_SOURCE_CHANGED') return res.status(409).json({ error: 'The source file changed while it was copied. Refresh the folder and choose it again.' });
+    if (!dataset) return sendDatasetError(res, error);
+    console.error('[Datasets] Server folder copy failed:', error);
+    return res.status(500).json({ error: 'Dataset file storage failed.' });
+  } finally {
+    await opened.close();
   }
 });
 
