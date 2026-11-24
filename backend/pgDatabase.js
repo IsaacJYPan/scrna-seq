@@ -4739,7 +4739,10 @@ const CLAIMED_OWNED_OBJECT_JOB_TYPES = new Set([
   'expert.r.v1',
 ]);
 
-async function requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts = {}, expectedJobType = null) {
+// Validates the worker's identity and claim before any worker-side write. Returns
+// the normalized worker id, claim token and clock so callers can re-check the
+// claim under a row lock inside their own transaction.
+async function claimedJobContextByWorker(jobId, workerId, claimToken, opts = {}) {
   const wid = requireWorkerId(workerId);
   const token = requireClaimToken(claimToken);
   const now = normalizeWorkerNow(opts);
@@ -4748,6 +4751,11 @@ async function requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts = 
   if (!workerHoldsClaim(row, wid, token, now)) {
     throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
   }
+  return { row, wid, token, now };
+}
+
+async function requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts = {}, expectedJobType = null) {
+  const { row } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (expectedJobType && row.job_type !== expectedJobType) {
     throw codedError('INVALID_JOB_TYPE', `A claimed ${expectedJobType} job is required.`);
   }
@@ -5389,12 +5397,7 @@ async function markRDispatchStartedByWorker(jobId, workerId, claimToken, opts = 
 }
 
 async function completeJobByWorker(jobId, workerId, claimToken, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (!validateJobTransition(row.status, 'completed')) throw codedError('INVALID_TRANSITION', `Cannot complete a job in status '${row.status}'.`);
   let resultId = row.result_analysis_object_id;
   if (opts.resultAnalysisObjectId !== undefined && opts.resultAnalysisObjectId !== null) {
@@ -5435,14 +5438,7 @@ async function completeJobByWorker(jobId, workerId, claimToken, opts = {}) {
  * closed without another R call.
  */
 async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
 
   const recoverySpecs = {
     'pbmc.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
@@ -5612,12 +5608,7 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
 }
 
 async function failJobByWorker(jobId, workerId, claimToken, error, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (!validateJobTransition(row.status, 'failed')) throw codedError('INVALID_TRANSITION', `Cannot fail a job in status '${row.status}'.`);
   const errObj = normalizeJobError(error === undefined || error === null ? { message: 'Job failed.' } : error);
   const errJson = JSON.stringify(errObj);
@@ -5703,12 +5694,7 @@ async function deferIndeterminateRTimeoutByWorker(jobId, workerId, claimToken, o
 }
 
 async function releaseJob(jobId, workerId, claimToken, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (!validateJobTransition(row.status, 'queued')) throw codedError('INVALID_TRANSITION', `Cannot release a job in status '${row.status}'.`);
   const logs = opts.log !== undefined ? [...parseJson(row.logs_json, []), normalizeJobLogEntry(opts.log)] : parseJson(row.logs_json, []);
   const { rows } = await query(
@@ -5732,12 +5718,7 @@ async function releaseJob(jobId, workerId, claimToken, opts = {}) {
 }
 
 async function appendJobLogByWorker(jobId, workerId, claimToken, entry, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   const logs = [...parseJson(row.logs_json, []), normalizeJobLogEntry(entry)];
   const { rows } = await query(
     `UPDATE jobs SET logs_json = $1, updated_at = $2
@@ -5921,14 +5902,7 @@ async function setJobScheduling(jobId, opts = {}) {
 }
 
 async function createCheckpointForJobByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (row.result_analysis_object_id) {
     throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
   }
@@ -6073,14 +6047,7 @@ function validateMetadataOnlyArtifactSpec(input, {
 }
 
 async function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (row.result_analysis_object_id) throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
 
   const owner = Number(row.owner_user_id);
@@ -6198,14 +6165,7 @@ async function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, i
 }
 
 async function completeSeuratPipelineResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (row.result_analysis_object_id) throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
   if (!row.project_id || !row.dataset_id || !row.analysis_object_id || !(await getDatasetRow(row.dataset_id, row.project_id))) {
     throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
@@ -6311,15 +6271,75 @@ async function completeSeuratPipelineResultByWorker(jobId, workerId, claimToken,
   };
 }
 
-async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+// Shared publication step for workers that emit one private results table plus a
+// metadata-only summary. Callers validate both specs first; this re-checks the claim
+// under a row lock, refuses a second results artifact, and inserts both rows in one
+// transaction.
+async function insertTableAndSummaryArtifactsByWorker({
+  row, wid, token, now, refs, resultsType, resultExists, table, tableSpec, summary, summarySpec,
+}) {
+  const resultsArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const claimRow = await client.query(
+      `SELECT 1 FROM jobs
+       WHERE id = $1 AND worker_id = $2 AND claim_token = $3
+         AND status = 'running' AND lease_expires_at > $4
+       FOR UPDATE`,
+      [String(row.id), wid, token, now]
+    );
+    if (!claimRow.rows[0]) {
+      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    }
+    const duplicate = await client.query(
+      'SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = $2 LIMIT 1',
+      [String(row.id), resultsType]
+    );
+    if (duplicate.rows[0]) throw codedError(resultExists[0], resultExists[1]);
+    await insertJobArtifactRow(client, {
+      id: resultsArtifactId,
+      jobRow: row,
+      refs,
+      artifactType: tableSpec.artifactType,
+      name: table.name != null ? String(table.name) : null,
+      description: table.description != null ? String(table.description) : null,
+      mimeType: table.mimeType != null ? String(table.mimeType) : null,
+      storageKind: tableSpec.storageKind,
+      storageUri: tableSpec.storageUri,
+      checksumSha256: tableSpec.checksumSha256,
+      sizeBytes: tableSpec.sizeBytes,
+      status: tableSpec.status,
+      metadata: tableSpec.metadata
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryArtifactId,
+      jobRow: row,
+      refs,
+      artifactType: summarySpec.artifactType,
+      name: summary.name != null ? String(summary.name) : null,
+      description: summary.description != null ? String(summary.description) : null,
+      storageKind: summarySpec.storageKind,
+      status: summarySpec.status,
+      metadata: summarySpec.metadata
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
+  return {
+    resultsArtifact: await getJobArtifactRowById(resultsArtifactId),
+    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
+async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   const existing = await query(
     "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'deg_markers' LIMIT 1",
     [String(row.id)]
@@ -6334,67 +6354,18 @@ async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken,
   assertProjectArtifactStorageKey(row, tblSpec.storageUri, 'artifacts');
   const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
   const smSpec = validateMetadataOnlyArtifactSpec(sm, { defaultArtifactType: 'deg_summary', artifactTypeRequired: false });
-  const markersArtifactId = generateJobArtifactId();
-  const summaryArtifactId = generateJobArtifactId();
   const refs = {
     datasetId: row.dataset_id || null,
     analysisObjectId: row.analysis_object_id || null,
     resultAnalysisObjectId: row.result_analysis_object_id || null
   };
-  const p = await connect();
-  const client = await p.connect();
-  try {
-    await client.query('BEGIN');
-    const claimRow = await client.query(
-      `SELECT 1 FROM jobs
-       WHERE id = $1 AND worker_id = $2 AND claim_token = $3
-         AND status = 'running' AND lease_expires_at > $4
-       FOR UPDATE`,
-      [String(row.id), wid, token, now]
-    );
-    if (!claimRow.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-    const duplicate = await client.query(
-      "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'deg_markers' LIMIT 1",
-      [String(row.id)]
-    );
-    if (duplicate.rows[0]) throw codedError('DEG_RESULT_EXISTS', 'Job already has a DEG marker result artifact.');
-    await insertJobArtifactRow(client, {
-      id: markersArtifactId,
-      jobRow: row,
-      refs,
-      artifactType: tblSpec.artifactType,
-      name: tbl.name != null ? String(tbl.name) : null,
-      description: tbl.description != null ? String(tbl.description) : null,
-      mimeType: tbl.mimeType != null ? String(tbl.mimeType) : null,
-      storageKind: tblSpec.storageKind,
-      storageUri: tblSpec.storageUri,
-      checksumSha256: tblSpec.checksumSha256,
-      sizeBytes: tblSpec.sizeBytes,
-      status: tblSpec.status,
-      metadata: tblSpec.metadata
-    });
-    await insertJobArtifactRow(client, {
-      id: summaryArtifactId,
-      jobRow: row,
-      refs,
-      artifactType: smSpec.artifactType,
-      name: sm.name != null ? String(sm.name) : null,
-      description: sm.description != null ? String(sm.description) : null,
-      storageKind: smSpec.storageKind,
-      status: smSpec.status,
-      metadata: smSpec.metadata
-    });
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-  return {
-    markersArtifact: await getJobArtifactRowById(markersArtifactId),
-    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
-  };
+  const published = await insertTableAndSummaryArtifactsByWorker({
+    row, wid, token, now, refs,
+    resultsType: 'deg_markers',
+    resultExists: ['DEG_RESULT_EXISTS', 'Job already has a DEG marker result artifact.'],
+    table: tbl, tableSpec: tblSpec, summary: sm, summarySpec: smSpec,
+  });
+  return { markersArtifact: published.resultsArtifact, summaryArtifact: published.summaryArtifact };
 }
 
 /**
@@ -6433,14 +6404,7 @@ const CELLCHAT_RESULT_KIND = Object.freeze({
 });
 
 async function completeTableAndSummaryResultByWorker(kind, jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (row.job_type !== kind.jobType) {
     throw codedError('INVALID_JOB_TYPE', `A claimed ${kind.jobType} job is required.`);
   }
@@ -6484,71 +6448,17 @@ async function completeTableAndSummaryResultByWorker(kind, jobId, workerId, clai
     throw codedError(kind.summaryTooLarge[0], kind.summaryTooLarge[1]);
   }
 
-  const resultsArtifactId = generateJobArtifactId();
-  const summaryArtifactId = generateJobArtifactId();
   const refs = {
     datasetId: row.dataset_id || null,
     analysisObjectId: row.analysis_object_id || null,
     resultAnalysisObjectId: null
   };
-  const p = await connect();
-  const client = await p.connect();
-  try {
-    await client.query('BEGIN');
-    const claimRow = await client.query(
-      `SELECT 1 FROM jobs
-       WHERE id = $1 AND worker_id = $2 AND claim_token = $3
-         AND status = 'running' AND lease_expires_at > $4
-       FOR UPDATE`,
-      [String(row.id), wid, token, now]
-    );
-    if (!claimRow.rows[0]) {
-      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-    }
-    const duplicate = await client.query(
-      'SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = $2 LIMIT 1',
-      [String(row.id), kind.resultsType]
-    );
-    if (duplicate.rows[0]) {
-      throw codedError(kind.resultExists[0], kind.resultExists[1]);
-    }
-    await insertJobArtifactRow(client, {
-      id: resultsArtifactId,
-      jobRow: row,
-      refs,
-      artifactType: tableSpec.artifactType,
-      name: table.name != null ? String(table.name) : null,
-      description: table.description != null ? String(table.description) : null,
-      mimeType: table.mimeType != null ? String(table.mimeType) : null,
-      storageKind: tableSpec.storageKind,
-      storageUri: tableSpec.storageUri,
-      checksumSha256: tableSpec.checksumSha256,
-      sizeBytes: tableSpec.sizeBytes,
-      status: tableSpec.status,
-      metadata: tableSpec.metadata
-    });
-    await insertJobArtifactRow(client, {
-      id: summaryArtifactId,
-      jobRow: row,
-      refs,
-      artifactType: summarySpec.artifactType,
-      name: summary.name != null ? String(summary.name) : null,
-      description: summary.description != null ? String(summary.description) : null,
-      storageKind: summarySpec.storageKind,
-      status: summarySpec.status,
-      metadata: summarySpec.metadata
-    });
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-  return {
-    resultsArtifact: await getJobArtifactRowById(resultsArtifactId),
-    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
-  };
+  return insertTableAndSummaryArtifactsByWorker({
+    row, wid, token, now, refs,
+    resultsType: kind.resultsType,
+    resultExists: kind.resultExists,
+    table, tableSpec, summary, summarySpec,
+  });
 }
 
 async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
@@ -6556,14 +6466,7 @@ async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken,
 }
 
 async function completeConditionComparisonResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (row.job_type !== 'condition.pseudobulk_de.v1') {
     throw codedError('INVALID_JOB_TYPE', 'A claimed condition.pseudobulk_de.v1 job is required.');
   }
@@ -6588,46 +6491,13 @@ async function completeConditionComparisonResultByWorker(jobId, workerId, claimT
       || Buffer.byteLength(JSON.stringify(summarySpec.metadata), 'utf8') > 128 * 1024) {
     throw codedError('INVALID_CONDITION_COMPARISON_SUMMARY', 'Condition-comparison summary is invalid.');
   }
-  const resultId = generateJobArtifactId();
-  const summaryId = generateJobArtifactId();
   const refs = { datasetId: row.dataset_id || null, analysisObjectId: row.analysis_object_id, resultAnalysisObjectId: null };
-  const p = await connect();
-  const client = await p.connect();
-  try {
-    await client.query('BEGIN');
-    const claim = await client.query(
-      `SELECT 1 FROM jobs WHERE id=$1 AND worker_id=$2 AND claim_token=$3
-       AND status='running' AND lease_expires_at>$4 FOR UPDATE`, [row.id, wid, token, now]
-    );
-    if (!claim.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-    const duplicate = await client.query(
-      "SELECT 1 FROM job_artifacts WHERE job_id=$1 AND artifact_type='condition_de_results' LIMIT 1", [row.id]
-    );
-    if (duplicate.rows[0]) throw codedError('CONDITION_COMPARISON_RESULT_EXISTS', 'Job already has a condition-comparison result.');
-    await insertJobArtifactRow(client, {
-      id: resultId, jobRow: row, refs, artifactType: tableSpec.artifactType,
-      name: table.name != null ? String(table.name) : null,
-      description: table.description != null ? String(table.description) : null,
-      mimeType: table.mimeType != null ? String(table.mimeType) : null,
-      storageKind: tableSpec.storageKind, storageUri: tableSpec.storageUri,
-      checksumSha256: tableSpec.checksumSha256, sizeBytes: tableSpec.sizeBytes,
-      status: tableSpec.status, metadata: tableSpec.metadata,
-    });
-    await insertJobArtifactRow(client, {
-      id: summaryId, jobRow: row, refs, artifactType: summarySpec.artifactType,
-      name: summary.name != null ? String(summary.name) : null,
-      description: summary.description != null ? String(summary.description) : null,
-      storageKind: summarySpec.storageKind, status: summarySpec.status, metadata: summarySpec.metadata,
-    });
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally { client.release(); }
-  return {
-    resultsArtifact: await getJobArtifactRowById(resultId),
-    summaryArtifact: await getJobArtifactRowById(summaryId),
-  };
+  return insertTableAndSummaryArtifactsByWorker({
+    row, wid, token, now, refs,
+    resultsType: 'condition_de_results',
+    resultExists: ['CONDITION_COMPARISON_RESULT_EXISTS', 'Job already has a condition-comparison result.'],
+    table, tableSpec, summary, summarySpec,
+  });
 }
 
 async function completeExpertRResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
@@ -7084,14 +6954,7 @@ async function getForkableCheckpointForAnalysisObject(userId, projectId, analysi
 }
 
 async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
-  const wid = requireWorkerId(workerId);
-  const token = requireClaimToken(claimToken);
-  const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
+  const { row, wid, token, now } = await claimedJobContextByWorker(jobId, workerId, claimToken, opts);
   if (row.job_type !== 'checkpoint.fork.v1' || !row.project_id || !row.analysis_object_id) {
     throw codedError('INVALID_JOB_TYPE', 'A project checkpoint fork job is required.');
   }
