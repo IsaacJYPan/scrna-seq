@@ -330,8 +330,10 @@ async function main() {
         pValueCutoff: 0.05, topInteractions: 25, topPathways: 15, randomSeed: 1,
       },
     });
-    await page.getByText('TGFB1.TGFBR1_TGFBR2', { exact: true }).waitFor({ state: 'visible' });
-    await page.getByText('CD4 T cells', { exact: true }).waitFor({ state: 'visible' });
+    const candidate = page.getByRole('row').filter({
+      has: page.getByRole('cell', { name: 'TGFB1.TGFBR1_TGFBR2', exact: true }),
+    });
+    await candidate.getByText('CD4 T cells', { exact: true }).waitFor({ state: 'visible' });
     assert.deepEqual(groupKeyRequests, [
       {
         url: `${origin}/api/r/cellchat-group-map?group_by=seurat_clusters&preflight=true&min_cells_per_group=10`,
