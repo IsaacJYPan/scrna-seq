@@ -28,6 +28,8 @@ import { validateWorkflowRestoration } from './analyses/workflowSnapshotClient';
 import { buildProjectProvenancePayload } from './projectProvenance';
 import { FigureProjectProvider, FIGURE_WRITE_ROLES } from './figures/FigureProjectContext';
 import { carryTabParams } from './hooks/useTabParams';
+import { useDeploymentPolicy } from './hooks/useDeploymentPolicy';
+import { useTheme } from './hooks/useTheme';
 
 import {
   saveProvenance,
@@ -168,19 +170,6 @@ export const TabContent = ({ id, activeTab, contextKey = 'workspace', children }
   );
 };
 
-const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
-  registrationEnabled: false,
-  legacyLocalImportsEnabled: false,
-  legacyLiveMutationToolsEnabled: false,
-  serverFigureExportEnabled: false,
-  expertREnabled: false,
-  expertRProfile: null,
-  expertRStatus: null,
-  demoMode: false,
-  datasetUploadsEnabled: false,
-  demoGuestTtlSeconds: null,
-});
-
 // Reopens a saved analysis version in the person's R session after the
 // server lost it (a restart). Resolves true once the load job completes.
 async function reopenSavedVersion(api, projectId, objectId, { intervalMs = 2500, maxPolls = 120 } = {}) {
@@ -203,48 +192,7 @@ export default function App() {
   const workflowNavigation = React.useRef(null);
   const [savedWorkflowNotice, setSavedWorkflowNotice] = useState('');
   const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
-  const [deploymentPolicy, setDeploymentPolicy] = useState(CLOSED_DEPLOYMENT_POLICY);
-
-  useEffect(() => {
-    let active = true;
-    if (!window.electronAPI?.registrationPolicy) return undefined;
-    window.electronAPI.registrationPolicy().then((policy) => {
-      if (!active) return;
-      setDeploymentPolicy((current) => ({
-        registrationEnabled: policy?.registrationEnabled === true,
-        legacyLocalImportsEnabled: policy?.legacyLocalImportsEnabled === true,
-        legacyLiveMutationToolsEnabled: policy?.legacyLiveMutationToolsEnabled === true,
-        serverFigureExportEnabled: policy?.serverFigureExportEnabled === true,
-        expertREnabled: current.expertREnabled,
-        expertRProfile: current.expertRProfile,
-        expertRStatus: current.expertRStatus,
-        demoMode: policy?.demoMode === true,
-        datasetUploadsEnabled: policy?.datasetUploadsEnabled === true,
-        demoGuestTtlSeconds: policy?.demoGuestTtlSeconds || null,
-      }));
-    }).catch(() => {
-      if (active) {
-        setDeploymentPolicy((current) => ({
-          ...CLOSED_DEPLOYMENT_POLICY,
-          expertREnabled: current.expertREnabled,
-          expertRProfile: current.expertRProfile,
-          expertRStatus: current.expertRStatus,
-        }));
-      }
-    });
-    return () => { active = false; };
-  }, []);
-
-  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
-  useEffect(() => {
-    localStorage.setItem('theme', theme);
-    if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
-    else document.documentElement.removeAttribute('data-theme');
-
-    if (window.electronAPI && window.electronAPI.setTheme) {
-      window.electronAPI.setTheme(theme);
-    }
-  }, [theme]);
+  const [theme, setTheme] = useTheme();
 
   // Pipeline state tracking
 
@@ -284,37 +232,7 @@ export default function App() {
   const [loggedOutNotice, setLoggedOutNotice] = useState('');
   const isLoggedIn = !!user;
 
-  useEffect(() => {
-    let active = true;
-    if (!user?.id || typeof window.electronAPI?.getExpertRCapabilities !== 'function') {
-      setDeploymentPolicy((current) => ({
-        ...current,
-        expertREnabled: false,
-        expertRProfile: null,
-        expertRStatus: null,
-      }));
-      return undefined;
-    }
-    window.electronAPI.getExpertRCapabilities().then((capability) => {
-      if (!active) return;
-      setDeploymentPolicy((current) => ({
-        ...current,
-        expertREnabled: capability?.expertREnabled === true,
-        expertRProfile: capability?.expertRProfile || null,
-        expertRStatus: capability?.expertRStatus || null,
-      }));
-    }).catch(() => {
-      if (active) {
-        setDeploymentPolicy((current) => ({
-          ...current,
-          expertREnabled: false,
-          expertRProfile: null,
-          expertRStatus: null,
-        }));
-      }
-    });
-    return () => { active = false; };
-  }, [user?.id]);
+  const deploymentPolicy = useDeploymentPolicy(user?.id);
 
   // Restore auth state from the HttpOnly session cookie (source of truth) on
   // mount, rather than trusting cached local user metadata. Keep the login form
