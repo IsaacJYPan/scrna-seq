@@ -12,7 +12,7 @@ describe.skipIf(!configured)('externally managed database schema', () => {
     await db.initSchema({ force: true });
     await db.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);
     await db.query(`GRANT USAGE ON SCHEMA public TO "${role}"`);
-    await db.query(`GRANT SELECT ON app_schema_contract TO "${role}"`);
+    await db.query(`GRANT SELECT ON app_schema_contract, schema_migrations TO "${role}"`);
   });
 
   afterAll(async () => {

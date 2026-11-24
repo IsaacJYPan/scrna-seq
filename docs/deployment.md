@@ -237,7 +237,8 @@ This release requires database schema contract `20261036`. Apply
 starting the upgraded services. `init:postgres` applies the baseline schema and
 then every pending migration in `backend/pg/migrations`, recording each in the
 `schema_migrations` table; with `DATABASE_SCHEMA_MANAGED_EXTERNALLY=true` the
-services refuse to start while any migration is pending. See the
+services refuse to start while any migration is pending. Externally managed
+services need read access to both `app_schema_contract` and `schema_migrations`. See the
 [migrations guide](../backend/pg/migrations/README.md). It adds delegated-agent principals, project
 delegations, hashed agent credentials, inert proposals, an append-only
 automation audit, approved workflow releases, studies, plans, agent runs and
