@@ -426,7 +426,6 @@ function isInternalOnlyRProxyPath(rawPath) {
 }
 
 const R_PROXY_PRODUCTION_BLOCKED_PATHS = new Set([
-  '/deg', '/cellchat', '/cellchat-infer', '/enrichment', '/annotate-clusters',
   '/load-rds', '/save-session', '/check-session', '/restore-session', '/delete-session',
   '/export-figure',
   // These legacy loaders read/convert user vault contents synchronously before

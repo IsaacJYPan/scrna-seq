@@ -324,49 +324,6 @@ async function main() {
     assert('UMAP trace_data length matches clusters', res.trace_data && res.trace_data.length === 9);
   } catch (e) { fail('/umap request', e.message); }
 
-  // ── 10. Pathway Enrichment ──────────────────────────────────────────────
-  section('STEP 10: /enrichment');
-  try {
-    info('Running Pathway Enrichment (GO_BP)...');
-    const r = await req('GET', '/enrichment?database=GO_BP&pval_cutoff=0.05');
-    if (r.body && r.body.error) {
-      warn(`Enrichment skipped or errored: ${r.body.error}`);
-    } else {
-      assertOk('/enrichment returns 200', r);
-      const res = (r.body || {}).result || {};
-      const expectedPathways = refMetrics.enrichment && refMetrics.enrichment.n_pathways;
-      if (typeof expectedPathways === 'number') {
-        assert(`Pathway Enrichment found exactly ${expectedPathways} pathways (top_n default)`, res.top_pathways && res.top_pathways.length === expectedPathways, `pathways=${res.top_pathways ? res.top_pathways.length : 0}`);
-      } else {
-        warn('Enrichment reference count unavailable; endpoint response shape only was checked.');
-        assert('Enrichment returned a top_pathways array', Array.isArray(res.top_pathways));
-      }
-    }
-  } catch (e) { fail('/enrichment request', e.message); }
-
-  // ── 11. CellChat ────────────────────────────────────────────────────────
-  section('STEP 11: /cellchat-infer');
-  try {
-    info('Running CellChat inference...');
-    const r = await req('POST', '/cellchat-infer', { group_by: 'seurat_clusters', database: 'human' });
-    if (r.body && r.body.error) {
-      warn(`CellChat skipped or errored: ${r.body.error}`);
-    } else {
-      assertOk('/cellchat-infer returns 200', r);
-      const res = (r.body || {}).result || {};
-      const expectedNodes = refMetrics.cellchat && refMetrics.cellchat.n_nodes;
-      const expectedEdges = refMetrics.cellchat && refMetrics.cellchat.n_edges;
-      if (typeof expectedNodes === 'number' && typeof expectedEdges === 'number') {
-        assert(`CellChat inferred exactly ${expectedNodes} nodes`, res.nodes && res.nodes.length === expectedNodes, `nodes=${res.nodes ? res.nodes.length : 0}`);
-        assert(`CellChat inferred exactly ${expectedEdges} edges`, res.edges && res.edges.length === expectedEdges, `edges=${res.edges ? res.edges.length : 0}`);
-      } else {
-        warn('CellChat reference counts unavailable; endpoint response shape only was checked.');
-        assert('CellChat returned nodes array', Array.isArray(res.nodes));
-        assert('CellChat returned edges array', Array.isArray(res.edges));
-      }
-    }
-  } catch (e) { fail('/cellchat-infer request', e.message); }
-
   // ── Cleanup ───────────────────────────────────────────────────────────────────
   section('CLEANUP: Shutting down test Plumber server');
   if (process.platform === 'win32') {

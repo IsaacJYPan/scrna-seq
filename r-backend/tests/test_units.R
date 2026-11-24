@@ -366,7 +366,7 @@ run_test("CellChat: DB load and edge-list extraction (if installed)", function()
   obj <- FindNeighbors(obj, dims = 1:min(8, n_pcs), verbose = FALSE)
   obj <- FindClusters(obj, resolution = 0.4, verbose = FALSE)
 
-  # ── Step 3: Create CellChat object (mirrors /cellchat-infer logic)
+  # ── Step 3: Create CellChat object (mirrors the CellChat setup in lib/cellChatInference.R)
   data_input <- GetAssayData(obj, assay = "RNA", layer = "data")
   meta       <- obj@meta.data
   group_by   <- "seurat_clusters"

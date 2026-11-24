@@ -50,14 +50,14 @@ const INTERNAL_ONLY = [
   '/internal/worker-readiness',
 ];
 
-// Legacy live-R analytical endpoints that are currently reachable (owner-scoped)
-// behind the authenticated proxy. Documented current behavior, not a product API.
+// Legacy live-R endpoints that are still reachable (owner-scoped) behind the
+// authenticated proxy outside production. Documented current behavior, not a
+// product API.
 const LEGACY_REACHABLE = [
-  '/deg',
-  '/cellchat',
-  '/cellchat-infer',
-  '/enrichment',
-  '/annotate-clusters',
+  '/subset',
+  '/integrate',
+  '/export-figure',
+  '/save-session',
 ];
 
 let server;
