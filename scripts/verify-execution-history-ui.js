@@ -44,7 +44,8 @@ async function verifyExecutionHistoryUi({ page, fixtures, newSource, directory, 
   await expand('Executed source'); await expand('Parameters'); await expand('Inputs'); await expand('Outputs'); await expand('Kernel generation');
   assert((await region.innerText()).includes('history-summary@1.0.0'), 'Pinned recipe package identity was absent.');
   assert((await region.innerText()).includes('"threshold": 2') && (await region.innerText()).includes('"seed": 42'), 'Matching recipe parameters/seed were absent.');
-  assert((await region.innerText()).includes(fixtures.checkpoint.sha256), 'Exact recipe input checksum was absent.');
+  await region.getByRole('button', { name: 'Exact identity of analysis', exact: true }).click();
+  await region.getByText(fixtures.checkpoint.sha256, { exact: true }).waitFor({ state: 'visible' });
   assert((await region.innerText()).includes('One-shot jobs do not retain a persistent kernel generation'), 'Recipe generation was falsely presented as kernel command order.');
   await region.getByRole('button', { name: 'Inspect analysis', exact: true }).click();
   await region.getByText('analysis · recorded version checksum verified', { exact: true }).waitFor();
