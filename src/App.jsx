@@ -348,11 +348,12 @@ export default function App() {
   // project's shared gallery; otherwise from the private gallery.
   const onPublicationTab = activeTab === 'publication';
   useEffect(() => {
+    if (!user?.email) return undefined;
     let cancelled = false;
     const api = window.electronAPI;
     const load = figureProjectId && api?.listProjectFigures
       ? api.listProjectFigures(figureProjectId)
-      : (api?.getFigures && user?.email ? api.getFigures(user.email) : null);
+      : api?.getFigures?.(user.email);
     if (!load) return undefined;
     load.then((figures) => {
       if (cancelled) return;
@@ -360,7 +361,7 @@ export default function App() {
       setFiguresCount(list.length);
       setFigureCollections([...new Set(list.map((figure) => figure.collection).filter(Boolean))].sort());
     }).catch(err => {
-      console.error('[App] Failed to load figures count:', err);
+      if (!cancelled && err.status !== 401) console.error('[App] Failed to load figures count:', err);
     });
     return () => { cancelled = true; };
   }, [onPublicationTab, user?.email, figureProjectId, figureRefreshToken]);

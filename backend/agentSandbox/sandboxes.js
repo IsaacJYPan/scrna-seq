@@ -91,7 +91,6 @@ const RUN_SELECT = `
     JOIN agent_delegations ad ON ad.id = sr.delegation_id
     JOIN agent_principals ap ON ap.id = sr.agent_principal_id
     JOIN agent_sandboxes sb ON sb.id = sr.sandbox_id
-    LEFT JOIN execution_source_versions esv ON esv.id = 'src_' || j.id
     LEFT JOIN LATERAL (SELECT a.* FROM job_artifacts a WHERE a.job_id = j.id AND a.artifact_type = 'expert_r_bundle'
                         AND a.status = 'available' ORDER BY a.created_at, a.id LIMIT 1) b ON TRUE`;
 
