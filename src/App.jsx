@@ -807,7 +807,7 @@ export default function App() {
         durableSaved,
       });
     }
-  }, [checkpointSaveBusy, currentWs.selectedProjectId, datasetInfo?.id, datasetInfo?.projectId,
+  }, [checkpointSaveBusy, currentWs.selectedProjectId, datasetInfo?.id, datasetInfo?.projectId, user?.email,
     handleLiveObjectAttached, handleSelectAnalysisObject, refreshAnalysisObjects]);
 
   /**

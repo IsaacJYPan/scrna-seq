@@ -237,11 +237,11 @@ describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('agent sandbox runs on Slu
       ]);
 
       const refused = await ctx.agent(`/sandboxes/${sandboxId}/runs`, {
-        method: 'POST', body: { requestId: 'req-remote-0001', title: 'Escape', script: 'x <- 1\n', remoteInputs: [{ root: 'raw', path: 'escape.txt' }] },
+        method: 'POST', body: { requestId: 'req-remote-0001', title: 'Escape', tab: 'explore', reason: 'Checked the verified catalog for a matching workflow.', script: 'x <- 1\n', remoteInputs: [{ root: 'raw', path: 'escape.txt' }] },
       });
       expect(refused.status).toBe(403);
       const submitted = await ctx.agent(`/sandboxes/${sandboxId}/runs`, {
-        method: 'POST', body: { requestId: 'req-remote-0002', title: 'Load counts',
+        method: 'POST', body: { requestId: 'req-remote-0002', title: 'Load counts', tab: 'qc', reason: 'Checked the verified catalog for a matching workflow.',
           script: 'counts <- Read10X_h5(input_path("raw/filtered/matrix.h5"))\n', remoteInputs: [{ root: 'raw', path: 'filtered/matrix.h5' }] },
       });
       expect(submitted.status, JSON.stringify(submitted.data)).toBe(201);

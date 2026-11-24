@@ -26,6 +26,7 @@ export const MCP_INSTRUCTIONS = [
   'If a verified entry fits but is not approved or has no study, ask a person or use create_proposal rather than re-implementing it.',
   'Write your own R only when nothing verified covers the step: list_sandboxes, run_r_script (with its reason), get_sandbox_run, read_sandbox_file. That code is flagged as AI-written; inputs are read-only and outputs stay drafts until a person reviews and promotes them. Keep scripts short and close to standard Seurat and Bioconductor calls so they are quick to review.',
   'Everything you do is laid out for people as a notebook, filed under the analysis tab it serves (qc, normalize, pca, integrate, cluster, umap, deg, enrichment, cellchat, explore). Verified runs are placed automatically; give run_r_script the `tab` of the step it serves. Use add_notebook_note for a short Markdown note before or after a step (what you are about to do, what a result means); get_notebook reads back your cells. Notes and runs are append-only.',
+  'Remote data: list_remote_files and read_remote_file use only folders granted to the sandbox. Use remoteInputs to stage files read-only. Figures: list_figures, view_figure, get_figure_history.',
   "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise.",
   'Ask a person (or create_proposal) for anything outside what you were given.',
 ].join(' ');

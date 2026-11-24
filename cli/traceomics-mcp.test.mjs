@@ -201,10 +201,12 @@ describe('traceomics MCP server', () => {
     const read = await server.callTool('read_remote_file', { projectId: 'proj_1', sandboxId, root: 'raw', path: 'meta/x.csv' });
     expect(read.result.content[0].text).toBe('a,b\n');
     expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/${sandboxId}/remote/raw/file?path=meta%2Fx.csv`);
-    await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1',
+    await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1', tab: 'explore',
+      reason: 'Checked the verified catalog for a matching workflow.',
       remoteInputs: [{ root: 'raw', path: 'filtered/matrix.h5' }] });
     expect(JSON.parse(calls[1].init.body).remoteInputs).toEqual([{ root: 'raw', path: 'filtered/matrix.h5' }]);
-    expect((await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1',
+    expect((await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1', tab: 'explore',
+      reason: 'Checked the verified catalog for a matching workflow.',
       remoteInputs: [{ root: 'raw', path: '/abs' }] })).result.isError).toBe(true);
   });
 

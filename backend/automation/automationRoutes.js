@@ -59,7 +59,9 @@ function createRateLimiter() {
   };
 }
 
-function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports, notebook }) {
+function automationRoutes({
+  db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports, notebook
+}) {
   const inspection = require('./inspection').createRunInspection({ db, admission });
   const router = express.Router();
   const rateLimit = createRateLimiter();
@@ -252,7 +254,9 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
       createdByUserId: figure.createdByUserId, createdAt: figure.createdAt, updatedAt: figure.updatedAt,
       hasPreview: Boolean(figure.thumbnailB64),
       revisionOf: figure.params?.revision_of || null,
-      ...(labels ? { title: figure.title, collection: figure.collection, tags: figure.tags, notes: figure.notes, params: figure.params } : {}),
+      ...(labels ? {
+        title: figure.title, collection: figure.collection, tags: figure.tags, notes: figure.notes, params: figure.params
+      } : {}),
       ...(match ? { image: { mimeType: match[1], base64: match[2] } } : {}),
     };
   };
