@@ -24,11 +24,6 @@ const METRIC_LABELS = {
 };
 const METRIC_ORDER = ['nCells', 'n_cells', 'cells', 'nFeatures', 'n_features', 'nClusters', 'n_clusters', 'clusters', 'nGroups', 'nMarkersTotal'];
 // Summary fields a selection rule can rank by, per workflow job type.
-const RULE_METRICS = {
-  'seurat.pipeline.v1': [['nClusters', 'clusters'], ['postFilterCells', 'cells kept after QC'], ['nVariableFeatures', 'variable features']],
-  'deg.find_markers.v1': [['nMarkersTotal', 'marker genes'], ['nGroups', 'groups']],
-};
-
 // Mirrors the server's selection: best finished trial by the study's rule, earliest on ties.
 function pickByRule(rule, runs) {
   if (!rule) return null;
@@ -148,7 +143,7 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   const selected = releases.find((r) => r.id === (form.releaseId || approved[0]?.id));
   // A follow-on release runs on the accepted result of a study of another release.
   const composedInput = selected?.inputs?.[0]?.kind === 'analysis_object' ? selected.inputs[0] : null;
-  const composedFrom = composedInput ? (composedInput.fromReleases || [composedInput.fromRelease]) : null;
+  const composedFrom = composedInput ? (Array.isArray(composedInput.fromReleases) ? composedInput.fromReleases : []) : null;
   const releaseKey = (id) => releases.find((r) => r.id === id)?.key;
   const sourceStudies = composedFrom ? studies.filter((s) => s.acceptedRunId && composedFrom.includes(releaseKey(s.releaseId))) : [];
   const studyName = (id) => studies.find((s) => s.id === id)?.name || id;
@@ -159,8 +154,11 @@ export default function AgentWorkflows({ projectId, role, onChanged, onOpenResul
   // Design choices (columns, gene lists, label maps) are fixed by a person.
   const designParams = schemaEntries.filter(([, spec]) => spec.role === 'design');
   const variableParams = schemaEntries.filter(([, spec]) => spec.role !== 'design').map(([name]) => name);
-  const ruleMetrics = RULE_METRICS[selected?.jobType]
-    || (selected?.method?.metrics || []).map((m) => [m.key, m.label]);
+  // The release declares which summary metrics may rank trials; inferential
+  // ones (significance counts) are never offered.
+  const ruleMetrics = (selected?.selectableMetrics || [])
+    .filter((m) => m.kind !== 'inferential')
+    .map((m) => [m.key, m.label]);
   const createStudy = (event) => {
     event.preventDefault();
     const body = {

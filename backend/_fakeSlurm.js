@@ -33,7 +33,7 @@ else
   [ "$mode" = badsum ] && sum=0000000000000000000000000000000000000000000000000000000000000000
   size=$(stat -c %s "$run_dir/output/checkpoint.rds")
   cat > "$run_dir/output/result.json" <<JSON
-{"ok":true,"summary":{"n_cells":120,"n_features":2000,"n_clusters":3,"cluster_sizes":[40,40,40],"reductions":["pca","umap"],"normalization_method":"LogNormalize","resolution":0.8,"used_seed":7},"warnings":[],"checkpoint":{"saved":true,"checksum_sha256":"$sum","size_bytes":$size},"versions":{"seurat_version":"5.1.0","r_version":"4.4.1"}}
+{"ok":true,"summary":{"n_cells":120,"n_features":2000,"n_clusters":3,"cluster_sizes":[40,40,40],"reductions":["pca","umap"],"normalization_method":"LogNormalize","resolution":0.8,"used_seed":7},"warnings":[],"effective_parameters":$(cat "$run_dir/params.json"),"checkpoint":{"saved":true,"checksum_sha256":"$sum","size_bytes":$size},"versions":{"seurat_version":"5.1.0","r_version":"4.4.1"}}
 JSON
   echo COMPLETED > "$FAKE_SLURM_STATE/$n"
 fi
@@ -75,6 +75,19 @@ echo "normal* up 4"; echo "gpu up 2"
 `,
 };
 
+function makeWritable(dir) {
+  let entries;
+  try {
+    fs.chmodSync(dir, 0o755);
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) makeWritable(path.join(dir, entry.name));
+  }
+}
+
 function installFakeSlurm() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-slurm-'));
   const bin = path.join(base, 'bin');
@@ -97,6 +110,9 @@ function installFakeSlurm() {
     setState: (id, value) => fs.writeFileSync(path.join(state, String(id)), `${value}\n`),
     restore: () => {
       for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+      // The executor makes job inputs read-only (chmod -R a-w), as on a real
+      // cluster. Without root, removing them needs the directories writable.
+      makeWritable(base);
       fs.rmSync(base, { recursive: true, force: true });
     },
   };

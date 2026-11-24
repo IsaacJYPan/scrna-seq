@@ -10,7 +10,7 @@ const {
   allocateCellChatInferenceResultStorageKey,
   MAX_CELLCHAT_RESULT_ROWS,
 } = require('../cellChatInference');
-const { validateExploratoryAnalysisParams } = require('../exploratoryAnalysis');
+const { CONTRAST_RECIPES, validateExploratoryAnalysisParams } = require('../exploratoryAnalysis');
 const {
   validateConditionComparisonParams,
   allocateConditionComparisonResultStorageKey,
@@ -516,28 +516,89 @@ async function exploratoryAnalysisHandler(ctx) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
   const { params } = validateExploratoryAnalysisParams(job.parameters);
+  // Contrast recipes test a person-registered contrast. Resolve its pinned
+  // sample snapshot before R is contacted; cell labels never define the design.
+  let design = null;
+  if (CONTRAST_RECIPES.includes(params.recipe)) {
+    if (typeof ctx.getConditionComparisonInputs !== 'function') {
+      throw codedHandlerError('INVALID_CONTRAST', 'Condition-contrast context is incomplete.');
+    }
+    design = await ctx.getConditionComparisonInputs();
+    if (!design || design.analysisObjectId !== objectId || design.contrast.id !== params.contrastId) {
+      throw codedHandlerError('INVALID_CONTRAST', 'Condition contrast is invalid.');
+    }
+    if (
+      design.contrast.blockingFactor ||
+      (Array.isArray(design.contrast.covariates) && design.contrast.covariates.length > 0)
+    ) {
+      throw codedHandlerError(
+        'UNSUPPORTED_CONDITION_MODEL',
+        'Batch, blocking-factor, and covariate-adjusted condition models are not supported yet.'
+      );
+    }
+  }
   const stateKey = await hydrateIsolatedAnalysisObject(ctx, objectId);
   const descriptor = await ctx.runRBridgeOperation({
     job,
     operation: 'r.explore.summarize.v1',
     actor: { userId: job.ownerUserId, projectId: job.projectId || null },
     objectContext: { objectId, stateKey },
-    exploration: { params },
+    exploration: { params, ...(design ? { design } : {}) },
     claimContext: { workerId: ctx.workerId },
     logger: ctx.logger,
     callR: ctx.callR,
   });
-  if(descriptor.figureBundle){
-    const fs=require('node:fs'),crypto=require('node:crypto');
-    const key=require('../storage').projectStorageFileKey(job.projectId,'checkpoints',job.id,'standard-figure.json');
-    const target=ctx.resolveStorageWritePath(key);fs.mkdirSync(require('node:path').dirname(target),{recursive:true});
-    const bytes=Buffer.from(JSON.stringify({...descriptor.figureBundle,provenance:{jobId:job.id,inputAnalysisObjectId:objectId,parameters:params}}));
-    const temporary=target+'.'+crypto.randomBytes(8).toString('hex')+'.tmp';
-    try{
-      fs.writeFileSync(temporary,bytes,{flag:'wx'});fs.renameSync(temporary,target);
-      const artifact=await ctx.createCheckpointArtifact({artifactType:'exploration_summary',name:descriptor.name,description:descriptor.description,storageKind:'local_internal',mimeType:'application/vnd.traceomics.figure+json',internalStorageKey:key,checksumSha256:crypto.createHash('sha256').update(bytes).digest('hex'),sizeBytes:bytes.length,metadata:{kind:'standard_figure',summary:{recipe:params.recipe,nCells:descriptor.figureBundle.nCells,features:descriptor.figureBundle.features||[],investigation:descriptor.figureBundle.scientificSummary||null},resolvedParams:params}});
-      return {result:{ok:true,summaryArtifactId:artifact.id}};
-    }catch(error){try{fs.rmSync(temporary,{force:true});}catch{/* retain original error */}throw error;}
+  if (descriptor.figureBundle) {
+    const fs = require('node:fs');
+    const crypto = require('node:crypto');
+    const key = require('../storage').projectStorageFileKey(job.projectId, 'checkpoints', job.id, 'standard-figure.json');
+    const target = ctx.resolveStorageWritePath(key);
+    fs.mkdirSync(require('node:path').dirname(target), { recursive: true });
+    const bytes = Buffer.from(
+      JSON.stringify({
+        ...descriptor.figureBundle,
+        provenance: { jobId: job.id, inputAnalysisObjectId: objectId, parameters: params },
+      })
+    );
+    const temporary = `${target}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(temporary, bytes, { flag: 'wx' });
+      fs.renameSync(temporary, target);
+      // Inferential results (condition DE, pathways) are a distinct artifact
+      // type so they are never mistaken for descriptive exploration.
+      const artifact = await ctx.createCheckpointArtifact({
+        artifactType: design ? 'study_inference_summary' : 'exploration_summary',
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'local_internal',
+        mimeType: 'application/vnd.traceomics.figure+json',
+        internalStorageKey: key,
+        checksumSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+        sizeBytes: bytes.length,
+        metadata: {
+          kind: 'standard_figure',
+          summary: {
+            recipe: params.recipe,
+            nCells: descriptor.figureBundle.nCells,
+            features: descriptor.figureBundle.features || [],
+            investigation: descriptor.figureBundle.scientificSummary || null,
+            ...(design ? { contrastId: design.contrast.id, inferential: true } : {}),
+          },
+          resolvedParams: params,
+        },
+      });
+      return { result: { ok: true, summaryArtifactId: artifact.id } };
+    } catch (error) {
+      try {
+        fs.rmSync(temporary, { force: true });
+      } catch {
+        /* retain original error */
+      }
+      throw error;
+    }
+  }
+  if (design) {
+    throw codedHandlerError('R_RESPONSE_INVALID', 'A contrast recipe must return an investigation bundle.');
   }
   const artifact = await ctx.createArtifact({
     artifactType: 'exploration_summary',

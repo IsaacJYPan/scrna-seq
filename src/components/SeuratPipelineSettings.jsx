@@ -68,8 +68,8 @@ export default function SeuratPipelineSettings({ params, setParams, controls }) 
     <details className="border-t border-border px-4 py-3 sm:px-5">
       <summary className="w-fit cursor-pointer rounded text-sm font-medium text-textMuted hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Reproducibility</summary>
       <label className="pipeline-parameter mt-4 max-w-56">
-        <span>Seed (optional)</span>
-        <input type="number" min={0} max={2147483647} step={1} className="input tabular-nums"
+        <span>Seed (default 42)</span>
+        <input type="number" min={0} max={2147483647} step={1} className="input tabular-nums" placeholder="42"
           value={params.seed ?? ''} onChange={event => set('seed', event.target.value === '' ? null : event.target.value)} />
       </label>
     </details>

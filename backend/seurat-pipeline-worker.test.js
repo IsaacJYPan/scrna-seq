@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const {
@@ -82,7 +83,7 @@ function pipelineBody() {
 }
 
 function recordingCaller(calls, body = pipelineBody()) {
-  return async (req) => { calls.push(req); return { status: 200, body }; };
+  return async (req) => { calls.push(req); return { status: 200, body: withEffectiveParameters(req, body) }; };
 }
 
 async function drain(callR) {

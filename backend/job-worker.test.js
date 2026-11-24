@@ -396,10 +396,10 @@ describe.skipIf(!CONFIGURED)('job worker — start/stop lifecycle (fake timers, 
         claims += 1;
         return claims === 1 ? {
           id: 'job_first', jobType: 'generic', ownerUserId: alice.id,
-          claimToken: 'wct_first', projectId: null, status: 'running',
+          claimToken: 'wct_first', projectId: null, status: 'running', agentRun: false,
         } : {
           id: 'job_second', jobType: 'generic', ownerUserId: alice.id,
-          claimToken: 'wct_second', projectId: null, status: 'running',
+          claimToken: 'wct_second', projectId: null, status: 'running', agentRun: false,
         };
       },
       appendJobLogByWorker: async () => ({}),
@@ -468,7 +468,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     vi.useFakeTimers();
     const claimed = {
       id: 'job_lease', jobType: 'generic', ownerUserId: alice.id,
-      claimToken: 'wct_lease', projectId: null, analysisObjectId: null, status: 'running',
+      claimToken: 'wct_lease', projectId: null, analysisObjectId: null, status: 'running', agentRun: false,
     };
     const stubDb = {
       reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
@@ -522,7 +522,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     const claimed = {
       id: 'job_recovery_lease', jobType: 'generic', ownerUserId: alice.id,
       claimToken: 'wct_recovery_lease', projectId: null, analysisObjectId: null,
-      status: 'running',
+      status: 'running', agentRun: false,
     };
     let heartbeatCalls = 0;
     let handlerCalls = 0;
@@ -575,7 +575,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     vi.useFakeTimers();
     const claimed = {
       id: 'job_transient_lease', jobType: 'generic', ownerUserId: alice.id,
-      claimToken: 'wct_transient', projectId: null, analysisObjectId: null, status: 'running',
+      claimToken: 'wct_transient', projectId: null, analysisObjectId: null, status: 'running', agentRun: false,
     };
     let heartbeatCalls = 0;
     const stubDb = {
@@ -619,7 +619,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     const claimed = {
       id: 'job_timeout_lease_fence', jobType: 'generic', ownerUserId: alice.id,
       claimToken: 'wct_timeout_lease_fence', projectId: null,
-      analysisObjectId: null, status: 'running',
+      analysisObjectId: null, status: 'running', agentRun: false,
     };
     const events = [];
     let heartbeatCalls = 0;

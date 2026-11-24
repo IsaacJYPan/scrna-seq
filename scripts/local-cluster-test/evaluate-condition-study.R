@@ -2,7 +2,7 @@
 suppressPackageStartupMessages({library(Seurat);library(Matrix);library(jsonlite);library(ggplot2)})
 stopifnot(file.exists('/output/author-freeze-lock.json'))
 config<-fromJSON('/fixture/evaluation-input.json');annotation<-fromJSON(config$annotation)
-source('/source/r-backend/lib/conditionComparison.R');source('/source/r-backend/lib/conditionStudy.R')
+source('/source/r-backend/lib/conditionComparison.R');source('/source/r-backend/lib/conditionStudy.R');source('/source/scripts/local-cluster-test/harness-design.R')
 bundle<-readRDS(config$checkpoint);obj<-bundle$global;rm(bundle);invisible(gc())
 meta<-obj[[]];counts<-LayerData(obj,assay='RNA',layer='counts');rm(obj);invisible(gc())
 groups<-as.character(meta$seurat_clusters);labels<-unlist(annotation$clusterToPopulation)
@@ -56,7 +56,7 @@ if(!is.null(annotation$finerStateMap)) {
 for(level in names(evaluation_labels)) {
  obj$seurat_clusters<-evaluation_labels[[level]]
  for(pair in list(c('severe','control'),c('severe','moderate'),c('moderate','control'))){
-  design<-study_condition_design(obj,pair[1],pair[2]);de<-run_condition_pseudobulk_de(obj,design);contrast<-paste(pair,collapse='_vs_');hits<-de$table[de$table$gene%in%anchors,,drop=FALSE];hits$contrast<-contrast;hits$annotation_level<-level;key<-paste(level,contrast,sep='::');anchor_results[[key]]<-hits;de_summaries[[key]]<-de$summary
+  design<-harness_metadata_design(obj,pair[1],pair[2]);de<-run_condition_pseudobulk_de(obj,design);contrast<-paste(pair,collapse='_vs_');hits<-de$table[de$table$gene%in%anchors,,drop=FALSE];hits$contrast<-contrast;hits$annotation_level<-level;key<-paste(level,contrast,sep='::');anchor_results[[key]]<-hits;de_summaries[[key]]<-de$summary
  }
 }
 write.csv(do.call(rbind,anchor_results),file.path(out,'postfreeze-reference-anchor-de.csv'),row.names=FALSE)

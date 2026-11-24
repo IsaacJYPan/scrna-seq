@@ -94,15 +94,18 @@
       "metrics": [
         {
           "key": "n_doublets",
-          "label": "doublets called"
+          "label": "doublets called",
+          "kind": "quality"
         },
         {
           "key": "doublet_rate",
-          "label": "doublet rate"
+          "label": "doublet rate",
+          "kind": "quality"
         },
         {
           "key": "n_singlets",
-          "label": "singlets"
+          "label": "singlets",
+          "kind": "quality"
         }
       ],
       "resources": {
@@ -202,11 +205,13 @@
       "metrics": [
         {
           "key": "cells_after",
-          "label": "cells kept"
+          "label": "cells kept",
+          "kind": "descriptive"
         },
         {
           "key": "cells_removed",
-          "label": "cells removed"
+          "label": "cells removed",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -342,11 +347,13 @@
       "metrics": [
         {
           "key": "n_clusters",
-          "label": "clusters"
+          "label": "clusters",
+          "kind": "descriptive"
         },
         {
           "key": "smallest_cluster",
-          "label": "cells in the smallest cluster"
+          "label": "cells in the smallest cluster",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -454,11 +461,13 @@
       "metrics": [
         {
           "key": "n_labels",
-          "label": "labels"
+          "label": "labels",
+          "kind": "descriptive"
         },
         {
           "key": "cells_unmapped",
-          "label": "unmapped cells"
+          "label": "unmapped cells",
+          "kind": "quality"
         }
       ],
       "resources": {
@@ -581,11 +590,13 @@
       "metrics": [
         {
           "key": "fraction_s",
-          "label": "fraction in S"
+          "label": "fraction in S",
+          "kind": "descriptive"
         },
         {
           "key": "fraction_g2m",
-          "label": "fraction in G2/M"
+          "label": "fraction in G2/M",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -712,11 +723,13 @@
       "metrics": [
         {
           "key": "n_gene_sets",
-          "label": "gene sets"
+          "label": "gene sets",
+          "kind": "descriptive"
         },
         {
           "key": "min_genes_found",
-          "label": "fewest genes found in a set"
+          "label": "fewest genes found in a set",
+          "kind": "quality"
         }
       ],
       "resources": {
@@ -834,11 +847,13 @@
       "metrics": [
         {
           "key": "genes_found",
-          "label": "genes found"
+          "label": "genes found",
+          "kind": "quality"
         },
         {
           "key": "n_groups",
-          "label": "groups"
+          "label": "groups",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -972,11 +987,13 @@
       "metrics": [
         {
           "key": "n_significant",
-          "label": "clusters with FDR below threshold"
+          "label": "clusters with FDR below threshold",
+          "kind": "inferential"
         },
         {
           "key": "min_replicates",
-          "label": "fewest samples in a condition"
+          "label": "fewest samples in a condition",
+          "kind": "quality"
         }
       ],
       "resources": {
@@ -1101,11 +1118,13 @@
       "metrics": [
         {
           "key": "n_lineages",
-          "label": "lineages"
+          "label": "lineages",
+          "kind": "descriptive"
         },
         {
           "key": "max_pseudotime",
-          "label": "maximum pseudotime"
+          "label": "maximum pseudotime",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -1193,11 +1212,13 @@
       "metrics": [
         {
           "key": "n_fdr_below_0_05",
-          "label": "genes with FDR below 0.05"
+          "label": "genes with FDR below 0.05",
+          "kind": "inferential"
         },
         {
           "key": "top_morans_i",
-          "label": "highest Moran's I"
+          "label": "highest Moran's I",
+          "kind": "inferential"
         }
       ],
       "resources": {
@@ -1309,11 +1330,13 @@
       "metrics": [
         {
           "key": "n_niches",
-          "label": "niches"
+          "label": "niches",
+          "kind": "descriptive"
         },
         {
           "key": "smallest_niche",
-          "label": "cells in the smallest niche"
+          "label": "cells in the smallest niche",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -1427,11 +1450,13 @@
       "metrics": [
         {
           "key": "median_contamination",
-          "label": "median contamination"
+          "label": "median contamination",
+          "kind": "quality"
         },
         {
           "key": "cells_over_0_5",
-          "label": "cells over 50% contamination"
+          "label": "cells over 50% contamination",
+          "kind": "quality"
         }
       ],
       "resources": {
@@ -1592,11 +1617,13 @@
       "metrics": [
         {
           "key": "total_significant",
-          "label": "significant genes across cell types"
+          "label": "significant genes across cell types",
+          "kind": "inferential"
         },
         {
           "key": "cell_types_tested",
-          "label": "cell types tested"
+          "label": "cell types tested",
+          "kind": "descriptive"
         }
       ],
       "resources": {
@@ -1727,11 +1754,13 @@
       "metrics": [
         {
           "key": "n_labels",
-          "label": "labels"
+          "label": "labels",
+          "kind": "descriptive"
         },
         {
           "key": "fraction_unassigned",
-          "label": "fraction unassigned"
+          "label": "fraction unassigned",
+          "kind": "quality"
         }
       ],
       "resources": {
@@ -1846,11 +1875,13 @@
       "metrics": [
         {
           "key": "n_domains",
-          "label": "domains"
+          "label": "domains",
+          "kind": "descriptive"
         },
         {
           "key": "smallest_domain",
-          "label": "cells in the smallest domain"
+          "label": "cells in the smallest domain",
+          "kind": "descriptive"
         }
       ],
       "resources": {

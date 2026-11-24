@@ -195,7 +195,8 @@ function createProposalService({ db, withTransaction }) {
 
   async function reviewByHuman(actor, projectId, proposalId, body = {}) {
     if (actor?.kind !== 'human') throw codedError('HUMAN_ACTOR_REQUIRED', 'This operation requires a signed-in person.', 403);
-    if (body === null || typeof body !== 'object' || Array.isArray(body)) throw codedError('INVALID_INPUT', 'A JSON object is required.', 400);
+    if (body === null || typeof body !== 'object' || Array.isArray(body))
+      throw codedError('INVALID_INPUT', 'A JSON object is required.', 400);
     for (const key of Object.keys(body)) {
       if (!['decision', 'note'].includes(key)) throw codedError('UNKNOWN_FIELD', `Unknown field: ${key.slice(0, 64)}.`, 400);
     }

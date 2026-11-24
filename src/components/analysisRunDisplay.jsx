@@ -45,7 +45,7 @@ export function parseErrorMessage(error) {
 
 const BADGE_TONES = {
   blue: 'bg-primary/10 text-text border-primary/20',
-  green: 'bg-success/10 text-success border-success/30',
+  green: 'bg-success/10 text-text border-success/30',
   amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
   rose: 'bg-danger/10 text-danger border-danger/30',
   slate: 'bg-background text-textMuted border-border',

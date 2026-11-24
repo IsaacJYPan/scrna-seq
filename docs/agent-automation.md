@@ -77,11 +77,14 @@ choose the profile with that in mind.
 ## Approved workflow execution (phase 2)
 
 **Releases.** The only operations an agent can run are listed in
-`backend/workflowTrust/catalog.js`. A release digest covers its handler files
-(`backend/seuratPipeline.js`, `backend/jobs/pipelineHandlers.js`,
-`r-backend/plumber.R`), parameter schema, resources, inputs, and outputs. When
-any of those bytes change, the release gets a new id, the old one is marked
-superseded, and it must be approved again. The first release,
+`backend/workflowTrust/catalog.js`; [workflow-releases.md](workflow-releases.md)
+is generated from it and lists every release with its design parameters and
+selectable metrics. A release digest covers its handler files, parameter schema,
+resources, inputs, outputs and selectable metrics, plus the trust manifest: the
+hash of every production source file under `backend/`, `r-backend/`, `shared/`,
+`cli/` and `trusted-methods/methods/`, the lockfiles and Dockerfiles, and the
+pinned runtime image. When any of those bytes change, every release gets a new
+id, the old ones are marked superseded, and they must be approved again. The first release,
 `seurat-qc-cluster` v1, runs the existing `seurat.pipeline.v1` job on an
 uploaded 10x HDF5 dataset.
 
@@ -193,8 +196,12 @@ choices, the result's cells and clusters, and any summary field that differs
 between trials) so the candidates can be compared before one is accepted.
 
 **Selection rules.** A study may declare `selectionRule: { metric, goal }`
-(goal `max` or `min`) on a result summary field, for example
-`{ "metric": "nClusters", "goal": "max" }`. The rule is fixed with the study.
+(goal `max` or `min`), for example `{ "metric": "nClusters", "goal": "max" }`.
+The metric must be one the release declares in `selectableMetrics`, and its
+kind must be `descriptive` or `quality`. Inferential metrics, such as counts of
+significant genes or test statistics, are refused: ranking trials by them would
+reward trying analyses until one reaches significance. The rule is fixed with
+the study.
 `GET …/studies/:studyId` then reports `selection`: the finished trial the rule
 ranks first (earliest on ties), and the comparison table marks it *Best by
 rule*. It is a recommendation: nothing is accepted automatically. Agents

@@ -130,7 +130,7 @@ async function signUp(page, { name, email, password }) {
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: /Create Account/ }).click();
+  await page.getByRole('button', { name: /Create account/i }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
 

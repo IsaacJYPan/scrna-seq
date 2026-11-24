@@ -134,7 +134,9 @@ function createStudyService({ db, withTransaction, approvals }) {
       for (const [key, value] of Object.entries(fixed)) validateScalar(schema, key, value);
       for (const [key, values] of Object.entries(variations)) {
         for (const value of values) {
-          if(value==='*'&&['geneList','groupMap','populationLabel'].includes(schema[key].type))continue;
+          // '*' lets an agent choose a display gene panel. Groupings, population
+          // labels and contrasts are design choices a person fixes (Q1).
+          if (value === '*' && schema[key].type === 'geneList') continue;
           validateScalar(schema, key, value);
         }
       }
@@ -145,7 +147,11 @@ function createStudyService({ db, withTransaction, approvals }) {
     const inputSpec = release.definition.inputs[0];
     const composed = inputSpec.kind === 'analysis_object';
     if (composed && body.datasetIds !== undefined) {
-      throw codedError('INVALID_INPUT', 'This workflow runs on the accepted result of another study; give sourceStudyId, not datasetIds.', 400);
+      throw codedError(
+        'INVALID_INPUT',
+        'This workflow runs on the accepted result of another study; give sourceStudyId, not datasetIds.',
+        400
+      );
     }
     if (!composed && body.sourceStudyId !== undefined) {
       throw codedError('INVALID_INPUT', 'This workflow takes datasets as input; sourceStudyId is not allowed.', 400);
@@ -184,6 +190,19 @@ function createStudyService({ db, withTransaction, approvals }) {
           || !['max', 'min'].includes(rule.goal)) {
         throw codedError('INVALID_INPUT', 'selectionRule must be { metric: <summary field>, goal: "max" or "min" }.', 400);
       }
+      // Only metrics the release declares, and never an inferential one: ranking
+      // trials by significance would reward trying analyses until one "works".
+      const declared = (release.definition.selectableMetrics || []).find((m) => m.key === rule.metric);
+      if (!declared) {
+        throw codedError('INVALID_INPUT', `'${rule.metric}' is not a metric this workflow declares for selection.`, 400);
+      }
+      if (declared.kind === 'inferential') {
+        throw codedError(
+          'INVALID_INPUT',
+          `'${rule.metric}' is an inferential result; trials cannot be selected by it. Choose a descriptive or quality metric.`,
+          400
+        );
+      }
       selectionRule = { metric: rule.metric, goal: rule.goal };
     }
     const maxTrials = intInRange(body.maxTrials, 'maxTrials', 1, 100, 4);
@@ -208,7 +227,11 @@ function createStudyService({ db, withTransaction, approvals }) {
       if (!dataset) throw codedError('DATASET_NOT_FOUND', 'Dataset not found.', 404);
       const fileTypes = release.definition.inputs[0].fileTypes;
       if (!fileTypes.includes(dataset.file_type) || dataset.upload_status !== 'uploaded' || dataset.validation_status === 'invalid') {
-        throw codedError('INPUT_NOT_APPLICABLE', `Dataset ${datasetId} is not a ready ${fileTypes.join('/')} input for this workflow.`, 400);
+        throw codedError(
+          'INPUT_NOT_APPLICABLE',
+          `Dataset ${datasetId} is not a ready ${fileTypes.join('/')} input for this workflow.`,
+          400
+        );
       }
       if (!/^[0-9a-f]{64}$/.test(String(dataset.sha256 || ''))) {
         throw codedError('INPUT_NOT_PINNED', `Dataset ${datasetId} has no recorded checksum, so its exact version cannot be pinned.`, 400);
@@ -266,7 +289,7 @@ function createStudyService({ db, withTransaction, approvals }) {
     const source = rows[0];
     if (!source) throw codedError('NOT_FOUND', 'Source study not found.', 404);
     const { rows: rel } = await db.query('SELECT release_key FROM workflow_releases WHERE id = $1', [source.release_id]);
-    const allowedSources = inputSpec.fromReleases || (Array.isArray(inputSpec.fromRelease) ? inputSpec.fromRelease : [inputSpec.fromRelease]);
+    const allowedSources = inputSpec.fromReleases;
     if (!allowedSources.includes(rel[0]?.release_key)) {
       const wanted = allowedSources.map((key) => releases.find((r) => r.key === key)?.definition.title || key);
       throw codedError('INPUT_NOT_APPLICABLE', `The source study must run one of: ${wanted.join('; ')}.`.slice(0, 600), 400);
@@ -284,7 +307,11 @@ function createStudyService({ db, withTransaction, approvals }) {
       throw codedError('INPUT_NOT_APPLICABLE', 'You can only build on accepted results of studies you created.', 403);
     }
     const plan = JSON.parse(source.canonical_json);
-    if(inputSpec.requiresStage && ['qc','normalize','pca','cluster','umap'].indexOf(plan.parameters.stopAfter||'umap')<3) throw codedError('INPUT_NOT_APPLICABLE','This workflow requires a completed clustering checkpoint.',400);
+    if (
+      inputSpec.requiresStage &&
+      ['qc', 'normalize', 'pca', 'cluster', 'umap'].indexOf(plan.parameters.stopAfter || 'umap') < 3
+    )
+      throw codedError('INPUT_NOT_APPLICABLE', 'This workflow requires a completed clustering checkpoint.', 400);
     return {
       studyId: source.id,
       input: {

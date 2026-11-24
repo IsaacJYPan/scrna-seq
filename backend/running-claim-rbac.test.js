@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const db = require('./pgDatabase');
 const { createJobWorker } = require('./jobWorker');
@@ -69,10 +70,10 @@ function rCaller(calls) {
   return async (request) => {
     calls.push(request);
     if (request.path === '/object/pbmc-pipeline') {
-      return { status: 200, body: pbmcResponse() };
+      return { status: 200, body: withEffectiveParameters(request, pbmcResponse()) };
     }
     if (request.path === '/object/seurat-pipeline') {
-      return { status: 200, body: seuratResponse() };
+      return { status: 200, body: withEffectiveParameters(request, seuratResponse()) };
     }
     if (request.path === '/object/checkpoint-load') {
       return { status: 200, body: checkpointLoadResponse() };

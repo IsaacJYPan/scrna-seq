@@ -42,7 +42,8 @@ function str(args, name, pattern) {
 
 function optionalLimit(args) {
   if (args.limit === undefined) return '';
-  if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 999) throw new ToolInputError('limit must be an integer from 1 to 999.');
+  if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 999)
+    throw new ToolInputError('limit must be an integer from 1 to 999.');
   return `limit=${args.limit}`;
 }
 
@@ -59,146 +60,362 @@ function tool(name, description, properties, required, build, { readOnly = true,
 }
 
 export const TOOLS = [
-  tool('get_context', 'Show this agent\'s identity, sponsor, project, effective capabilities, and limits. Call this first.',
-    {}, [], () => ({ method: 'GET', path: '/context' })),
-  tool('get_project', 'Bounded summary of the project.', projectProp, ['projectId'],
-    (a) => ({ method: 'GET', path: project(a) })),
-  tool('list_datasets', 'Datasets in the project (metadata only).', { ...projectProp, ...limitProp }, ['projectId'],
-    (a) => { const q = optionalLimit(a); return { method: 'GET', path: `${project(a)}/datasets${q ? `?${q}` : ''}` }; }),
-  tool('list_runs', 'Completed project runs, or only this agent\'s runs with mine=true.',
-    { ...projectProp, ...limitProp, mine: { type: 'boolean' } }, ['projectId'],
-    (a) => {
+  tool(
+    'get_context',
+    "Show this agent's identity, sponsor, project, effective capabilities, and limits. Call this first.",
+    {},
+    [],
+    () => ({ method: 'GET', path: '/context' })
+  ),
+  tool('get_project', 'Bounded summary of the project.', projectProp, ['projectId'], a => ({
+    method: 'GET',
+    path: project(a)
+  })),
+  tool(
+    'list_datasets',
+    'Datasets in the project (metadata only).',
+    { ...projectProp, ...limitProp },
+    ['projectId'],
+    a => {
+      const q = optionalLimit(a);
+      return { method: 'GET', path: `${project(a)}/datasets${q ? `?${q}` : ''}` };
+    }
+  ),
+  tool(
+    'list_runs',
+    "Completed project runs, or only this agent's runs with mine=true.",
+    { ...projectProp, ...limitProp, mine: { type: 'boolean' } },
+    ['projectId'],
+    a => {
       const q = [a.mine === true ? 'scope=mine' : '', optionalLimit(a)].filter(Boolean).join('&');
       return { method: 'GET', path: `${project(a)}/runs${q ? `?${q}` : ''}` };
-    }),
-  tool('list_workflows', 'Workflow releases approved for this project, with parameter schemas.', projectProp, ['projectId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/workflows` })),
-  tool('list_targets', 'Compute targets (local, Slurm) and whether they are available.', projectProp, ['projectId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/targets` })),
-  tool('list_studies', 'Open studies this agent may work in: inputs, allowed parameter values, trial and compute budgets.',
-    projectProp, ['projectId'], (a) => ({ method: 'GET', path: `${project(a)}/studies` })),
-  tool('get_study', 'One study with its full trial history.', { ...projectProp, studyId: { type: 'string' } }, ['projectId', 'studyId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/studies/${str(a, 'studyId', ID.study)}` })),
-  tool('create_plan', 'Create an immutable execution plan for one trial. choices maps each varied parameter to one of the study\'s allowed values. Returns the plan and its digest; nothing runs until submit_run.',
-    { ...projectProp, studyId: { type: 'string' }, datasetId: { type: 'string' },
-      choices: { type: 'object', additionalProperties: { type: ['number', 'string', 'boolean', 'null'] } } },
+    }
+  ),
+  tool(
+    'list_workflows',
+    'Workflow releases approved for this project, with parameter schemas.',
+    projectProp,
+    ['projectId'],
+    a => ({ method: 'GET', path: `${project(a)}/workflows` })
+  ),
+  tool(
+    'list_targets',
+    'Compute targets (local, Slurm) and whether they are available.',
+    projectProp,
+    ['projectId'],
+    a => ({ method: 'GET', path: `${project(a)}/targets` })
+  ),
+  tool(
+    'list_studies',
+    'Open studies this agent may work in: inputs, allowed parameter values, trial and compute budgets.',
+    projectProp,
+    ['projectId'],
+    a => ({ method: 'GET', path: `${project(a)}/studies` })
+  ),
+  tool(
+    'get_study',
+    'One study with its full trial history.',
+    { ...projectProp, studyId: { type: 'string' } },
+    ['projectId', 'studyId'],
+    a => ({ method: 'GET', path: `${project(a)}/studies/${str(a, 'studyId', ID.study)}` })
+  ),
+  tool(
+    'create_plan',
+    "Create an immutable execution plan for one trial. choices maps each varied parameter to one of the study's allowed values. Returns the plan and its digest; nothing runs until submit_run.",
+    {
+      ...projectProp,
+      studyId: { type: 'string' },
+      datasetId: { type: 'string' },
+      choices: { type: 'object', additionalProperties: { type: ['number', 'string', 'boolean', 'null'] } }
+    },
     ['projectId', 'studyId', 'datasetId'],
-    (a) => {
+    a => {
       const choices = a.choices === undefined ? {} : a.choices;
-      if (!choices || typeof choices !== 'object' || Array.isArray(choices)) throw new ToolInputError('choices must be an object.');
-      return { method: 'POST', path: `${project(a)}/plans`,
-        body: { studyId: str(a, 'studyId', ID.study), datasetId: str(a, 'datasetId', ID.dataset), choices } };
-    }, { readOnly: false }),
-  tool('get_plan', 'Read a plan.', { ...projectProp, planId: { type: 'string' } }, ['projectId', 'planId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/plans/${str(a, 'planId', ID.plan)}` })),
-  tool('submit_run', 'Submit a plan for execution. Uses compute budget. Repeating the call with the same plan returns the original run instead of starting another.',
+      if (!choices || typeof choices !== 'object' || Array.isArray(choices))
+        throw new ToolInputError('choices must be an object.');
+      return {
+        method: 'POST',
+        path: `${project(a)}/plans`,
+        body: { studyId: str(a, 'studyId', ID.study), datasetId: str(a, 'datasetId', ID.dataset), choices }
+      };
+    },
+    { readOnly: false }
+  ),
+  tool('get_plan', 'Read a plan.', { ...projectProp, planId: { type: 'string' } }, ['projectId', 'planId'], a => ({
+    method: 'GET',
+    path: `${project(a)}/plans/${str(a, 'planId', ID.plan)}`
+  })),
+  tool(
+    'submit_run',
+    'Submit a plan for execution. Uses compute budget. Repeating the call with the same plan returns the original run instead of starting another.',
     { ...projectProp, planId: { type: 'string' }, planDigest: { type: 'string' }, requestId: { type: 'string' } },
     ['projectId', 'planId', 'planDigest'],
-    (a) => {
+    a => {
       const planId = str(a, 'planId', ID.plan);
       const planDigest = str(a, 'planDigest', /^[0-9a-f]{64}$/);
       const requestId = a.requestId === undefined ? defaultRequestId(['run', planId, planDigest]) : str(a, 'requestId');
       return { method: 'POST', path: `${project(a)}/runs`, body: { planId, planDigest, requestId } };
-    }, { readOnly: false }),
-  tool('get_run', 'Run receipt and state (queued, running, candidate_ready, failed, ...).', { ...projectProp, runId: { type: 'string' } },
-    ['projectId', 'runId'], (a) => ({ method: 'GET', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}` })),
-  tool('get_run_results', 'Bounded result summary of a finished run. Results stay candidates until a person accepts one.',
-    { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/results` })),
-  tool('cancel_run', 'Cancel one of this agent\'s runs. The reserved budget is not refunded.',
-    { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
-    (a) => ({ method: 'POST', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/cancel`, body: {} }), { readOnly: false }),
-  tool('inspect_run','Bounded QC/stage diagnostics and scientific artifact metadata for your completed run. Requires results.inspect and labels disclosure.',{...projectProp,runId:{type:'string'}},['projectId','runId'],a=>({method:'GET',path:`${project(a)}/runs/${str(a,'runId',ID.run)}/inspection`})),
-  tool('preview_artifact','Verified bounded table page or standard PNG/SVG/PDF figure from your completed run. Set table to a named investigation table from inspect_run, or group to a cluster/cell-type label for marker/condition-DE CSV pages. Never accepts a path or source code.',{...projectProp,runId:{type:'string'},artifactId:{type:'string'},table:{type:'string'},group:{type:'string'},offset:{type:'integer',minimum:0,maximum:10000},limit:{type:'integer',minimum:1,maximum:100},format:{type:'string',enum:['png','svg','pdf']}},['projectId','runId','artifactId'],a=>{
-    const offset=a.offset??0,limit=a.limit??50;if(!Number.isInteger(offset)||offset<0||offset>10000||!Number.isInteger(limit)||limit<1||limit>100)throw new ToolInputError('Invalid artifact page.');
-    const format=a.format||'png';if(!['png','svg','pdf'].includes(format))throw new ToolInputError('Invalid figure format.');
-    if(a.group!==undefined&&(typeof a.group!=='string'||!/^[A-Za-z0-9 ._+()-]{1,80}$/.test(a.group)))throw new ToolInputError('Invalid result group.');
-    if(a.table!==undefined&&(typeof a.table!=='string'||!/^[a-z_]{1,40}$/.test(a.table)))throw new ToolInputError('Invalid investigation table.');
-    return {method:'GET',path:`${project(a)}/runs/${str(a,'runId',ID.run)}/artifacts/${str(a,'artifactId',/^art_[a-f0-9]+$/)}?offset=${offset}&limit=${limit}&format=${format}${a.table===undefined?'':`&table=${encodeURIComponent(a.table)}`}${a.group===undefined?'':`&group=${encodeURIComponent(a.group)}`}`};
-  }),
-  tool('create_proposal', 'Submit an inert proposal (code diff, method change, or workflow) for a person to review. Nothing is executed.',
-    { ...projectProp, kind: { type: 'string', enum: ['code', 'method', 'workflow'] }, title: { type: 'string' },
-      summary: { type: 'string' }, body: { type: 'string', description: 'For example a unified diff.' }, requestId: { type: 'string' } },
+    },
+    { readOnly: false }
+  ),
+  tool(
+    'get_run',
+    'Run receipt and state (queued, running, candidate_ready, failed, ...).',
+    { ...projectProp, runId: { type: 'string' } },
+    ['projectId', 'runId'],
+    a => ({ method: 'GET', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}` })
+  ),
+  tool(
+    'get_run_results',
+    'Bounded result summary of a finished run. Results stay candidates until a person accepts one.',
+    { ...projectProp, runId: { type: 'string' } },
+    ['projectId', 'runId'],
+    a => ({ method: 'GET', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/results` })
+  ),
+  tool(
+    'cancel_run',
+    "Cancel one of this agent's runs. The reserved budget is not refunded.",
+    { ...projectProp, runId: { type: 'string' } },
+    ['projectId', 'runId'],
+    a => ({ method: 'POST', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/cancel`, body: {} }),
+    { readOnly: false }
+  ),
+  tool(
+    'inspect_run',
+    'Bounded QC/stage diagnostics and scientific artifact metadata for your completed run. Requires results.inspect and labels disclosure.',
+    { ...projectProp, runId: { type: 'string' } },
+    ['projectId', 'runId'],
+    a => ({ method: 'GET', path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/inspection` })
+  ),
+  tool(
+    'preview_artifact',
+    'Verified bounded table page or standard PNG/SVG/PDF figure from your completed run. Set table to a named investigation table from inspect_run, or group to a cluster/cell-type label for marker/condition-DE CSV pages. Never accepts a path or source code.',
+    {
+      ...projectProp,
+      runId: { type: 'string' },
+      artifactId: { type: 'string' },
+      table: { type: 'string' },
+      group: { type: 'string' },
+      offset: { type: 'integer', minimum: 0, maximum: 10000 },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      format: { type: 'string', enum: ['png', 'svg', 'pdf'] }
+    },
+    ['projectId', 'runId', 'artifactId'],
+    a => {
+      const offset = a.offset ?? 0,
+        limit = a.limit ?? 50;
+      if (
+        !Number.isInteger(offset) ||
+        offset < 0 ||
+        offset > 10000 ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > 100
+      )
+        throw new ToolInputError('Invalid artifact page.');
+      const format = a.format || 'png';
+      if (!['png', 'svg', 'pdf'].includes(format)) throw new ToolInputError('Invalid figure format.');
+      if (a.group !== undefined && (typeof a.group !== 'string' || !/^[A-Za-z0-9 ._+()-]{1,80}$/.test(a.group)))
+        throw new ToolInputError('Invalid result group.');
+      if (a.table !== undefined && (typeof a.table !== 'string' || !/^[a-z_]{1,40}$/.test(a.table)))
+        throw new ToolInputError('Invalid investigation table.');
+      return {
+        method: 'GET',
+        path: `${project(a)}/runs/${str(a, 'runId', ID.run)}/artifacts/${str(a, 'artifactId', /^art_[a-f0-9]+$/)}?offset=${offset}&limit=${limit}&format=${format}${a.table === undefined ? '' : `&table=${encodeURIComponent(a.table)}`}${a.group === undefined ? '' : `&group=${encodeURIComponent(a.group)}`}`
+      };
+    }
+  ),
+  tool(
+    'create_proposal',
+    'Submit an inert proposal (code diff, method change, or workflow) for a person to review. Nothing is executed.',
+    {
+      ...projectProp,
+      kind: { type: 'string', enum: ['code', 'method', 'workflow'] },
+      title: { type: 'string' },
+      summary: { type: 'string' },
+      body: { type: 'string', description: 'For example a unified diff.' },
+      requestId: { type: 'string' }
+    },
     ['projectId', 'kind', 'title'],
-    (a) => {
+    a => {
       const base = project(a);
       const body = { kind: str(a, 'kind'), title: str(a, 'title') };
       if (a.summary !== undefined) body.summary = str(a, 'summary');
       if (a.body !== undefined) body.body = str(a, 'body');
-      body.requestId = a.requestId === undefined
-        ? defaultRequestId([base, body.kind, body.title, body.summary ?? '', body.body ?? ''])
-        : str(a, 'requestId');
+      body.requestId =
+        a.requestId === undefined
+          ? defaultRequestId([base, body.kind, body.title, body.summary ?? '', body.body ?? ''])
+          : str(a, 'requestId');
       return { method: 'POST', path: `${base}/proposals`, body };
-    }, { readOnly: false }),
-  tool('list_proposals', 'This agent\'s proposals.', { ...projectProp, ...limitProp }, ['projectId'],
-    (a) => { const q = optionalLimit(a); return { method: 'GET', path: `${project(a)}/proposals${q ? `?${q}` : ''}` }; }),
-  tool('get_proposal', 'One of this agent\'s proposals.', { ...projectProp, proposalId: { type: 'string' } }, ['projectId', 'proposalId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/proposals/${str(a, 'proposalId', ID.proposal)}` })),
+    },
+    { readOnly: false }
+  ),
+  tool('list_proposals', "This agent's proposals.", { ...projectProp, ...limitProp }, ['projectId'], a => {
+    const q = optionalLimit(a);
+    return { method: 'GET', path: `${project(a)}/proposals${q ? `?${q}` : ''}` };
+  }),
+  tool(
+    'get_proposal',
+    "One of this agent's proposals.",
+    { ...projectProp, proposalId: { type: 'string' } },
+    ['projectId', 'proposalId'],
+    a => ({ method: 'GET', path: `${project(a)}/proposals/${str(a, 'proposalId', ID.proposal)}` })
+  ),
 
   // Isolated development: the agent's own R scripts in a sandbox a person defined.
-  tool('list_sandboxes', 'Sandboxes a person opened for this agent: the analyses you may read, run and compute budgets, and the R runtime (packages, helpers, limits).',
-    projectProp, ['projectId'], (a) => ({ method: 'GET', path: `${project(a)}/sandboxes` })),
-  tool('get_sandbox', 'One sandbox with this agent\'s runs in it.', { ...projectProp, sandboxId: { type: 'string' } }, ['projectId', 'sandboxId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}` })),
-  tool('run_r_script', 'Run your own R script once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
-    { ...projectProp, sandboxId: { type: 'string' }, title: { type: 'string', description: 'What this run does, in a few words.' },
+  tool(
+    'list_sandboxes',
+    'Sandboxes a person opened for this agent: the analyses you may read, run and compute budgets, and the R runtime (packages, helpers, limits).',
+    projectProp,
+    ['projectId'],
+    a => ({ method: 'GET', path: `${project(a)}/sandboxes` })
+  ),
+  tool(
+    'get_sandbox',
+    "One sandbox with this agent's runs in it.",
+    { ...projectProp, sandboxId: { type: 'string' } },
+    ['projectId', 'sandboxId'],
+    a => ({ method: 'GET', path: `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}` })
+  ),
+  tool(
+    'run_r_script',
+    'Run your own R script once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
+    {
+      ...projectProp,
+      sandboxId: { type: 'string' },
+      title: { type: 'string', description: 'What this run does, in a few words.' },
       script: { type: 'string', description: 'R source, at most 32 KiB.' },
       inputAnalysisObjectId: { type: 'string', description: 'One of the sandbox inputs; defaults to the first.' },
-      requestId: { type: 'string' } },
+      requestId: { type: 'string' }
+    },
     ['projectId', 'sandboxId', 'title', 'script'],
-    (a) => {
+    a => {
       const base = `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/runs`;
       const body = { title: str(a, 'title'), script: str(a, 'script') };
-      if (a.inputAnalysisObjectId !== undefined) body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
-      body.requestId = a.requestId === undefined
-        ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? ''])
-        : str(a, 'requestId');
+      if (a.inputAnalysisObjectId !== undefined)
+        body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
+      body.requestId =
+        a.requestId === undefined
+          ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? ''])
+          : str(a, 'requestId');
       return { method: 'POST', path: base, body };
-    }, { readOnly: false }),
-  tool('get_sandbox_run', 'State of a sandbox run (queued, running, draft_ready, failed, ...), its output files, the last lines of the R console, and any error.',
-    { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}` })),
-  tool('read_sandbox_file', 'Read one output file of a finished sandbox run: tables and text as text (up to 256 KiB), PNG figures as images (up to 2 MiB).',
-    { ...projectProp, runId: { type: 'string' }, file: { type: 'string', description: 'Output file name, for example "markers.csv".' } },
+    },
+    { readOnly: false }
+  ),
+  tool(
+    'get_sandbox_run',
+    'State of a sandbox run (queued, running, draft_ready, failed, ...), its output files, the last lines of the R console, and any error.',
+    { ...projectProp, runId: { type: 'string' } },
+    ['projectId', 'runId'],
+    a => ({ method: 'GET', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}` })
+  ),
+  tool(
+    'read_sandbox_file',
+    'Read one output file of a finished sandbox run: tables and text as text (up to 256 KiB), PNG figures as images (up to 2 MiB).',
+    {
+      ...projectProp,
+      runId: { type: 'string' },
+      file: { type: 'string', description: 'Output file name, for example "markers.csv".' }
+    },
     ['projectId', 'runId', 'file'],
-    (a) => ({ method: 'GET', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/files/${str(a, 'file', ID.file).split('/').map(encodeURIComponent).join('/')}` }),
-    { render: (data) => {
-      if (data?.kind === 'image' && data.mimeType === 'image/png' && typeof data.base64 === 'string') {
-        return { content: [{ type: 'image', data: data.base64, mimeType: 'image/png' }, { type: 'text', text: `${data.name} (${data.sizeBytes} bytes)` }] };
+    a => ({
+      method: 'GET',
+      path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/files/${str(a, 'file', ID.file).split('/').map(encodeURIComponent).join('/')}`
+    }),
+    {
+      render: data => {
+        if (data?.kind === 'image' && data.mimeType === 'image/png' && typeof data.base64 === 'string') {
+          return {
+            content: [
+              { type: 'image', data: data.base64, mimeType: 'image/png' },
+              { type: 'text', text: `${data.name} (${data.sizeBytes} bytes)` }
+            ]
+          };
+        }
+        if (data?.kind === 'text' && typeof data.text === 'string')
+          return { content: [{ type: 'text', text: data.text }] };
+        return null;
       }
-      if (data?.kind === 'text' && typeof data.text === 'string') return { content: [{ type: 'text', text: data.text }] };
-      return null;
-    } }),
-  tool('cancel_sandbox_run', 'Cancel one of this agent\'s sandbox runs. The reserved budget is not refunded.',
-    { ...projectProp, runId: { type: 'string' } }, ['projectId', 'runId'],
-    (a) => ({ method: 'POST', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/cancel`, body: {} }), { readOnly: false }),
+    }
+  ),
+  tool(
+    'cancel_sandbox_run',
+    "Cancel one of this agent's sandbox runs. The reserved budget is not refunded.",
+    { ...projectProp, runId: { type: 'string' } },
+    ['projectId', 'runId'],
+    a => ({ method: 'POST', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/cancel`, body: {} }),
+    { readOnly: false }
+  ),
 
   // Reports: draft sections for people to review.
-  tool('create_report', 'Start a report (for example a paper draft). Sections are added with write_report_section and reviewed by people.',
-    { ...projectProp, title: { type: 'string' }, requestId: { type: 'string' } }, ['projectId', 'title'],
-    (a) => {
+  tool(
+    'create_report',
+    'Start a report (for example a paper draft). Sections are added with write_report_section and reviewed by people.',
+    { ...projectProp, title: { type: 'string' }, requestId: { type: 'string' } },
+    ['projectId', 'title'],
+    a => {
       const base = `${project(a)}/reports`;
       const title = str(a, 'title');
-      return { method: 'POST', path: base, body: { title, requestId: a.requestId === undefined ? defaultRequestId([base, title]) : str(a, 'requestId') } };
-    }, { readOnly: false }),
-  tool('list_reports', 'This agent\'s reports and the review status of each section.', projectProp, ['projectId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/reports` })),
-  tool('get_report', 'A report with every section, its version history, and reviewers\' decisions and comments. Read this to see what to revise.',
-    { ...projectProp, reportId: { type: 'string' } }, ['projectId', 'reportId'],
-    (a) => ({ method: 'GET', path: `${project(a)}/reports/${str(a, 'reportId', ID.report)}` })),
-  tool('write_report_section', 'Write or revise one section (Markdown). Writing the same key again creates a new version that needs a fresh review. Figures cite output files of your sandbox runs.',
-    { ...projectProp, reportId: { type: 'string' },
+      return {
+        method: 'POST',
+        path: base,
+        body: { title, requestId: a.requestId === undefined ? defaultRequestId([base, title]) : str(a, 'requestId') }
+      };
+    },
+    { readOnly: false }
+  ),
+  tool(
+    'list_reports',
+    "This agent's reports and the review status of each section.",
+    projectProp,
+    ['projectId'],
+    a => ({ method: 'GET', path: `${project(a)}/reports` })
+  ),
+  tool(
+    'get_report',
+    "A report with every section, its version history, and reviewers' decisions and comments. Read this to see what to revise.",
+    { ...projectProp, reportId: { type: 'string' } },
+    ['projectId', 'reportId'],
+    a => ({ method: 'GET', path: `${project(a)}/reports/${str(a, 'reportId', ID.report)}` })
+  ),
+  tool(
+    'write_report_section',
+    'Write or revise one section (Markdown). Writing the same key again creates a new version that needs a fresh review. Figures cite output files of your sandbox runs.',
+    {
+      ...projectProp,
+      reportId: { type: 'string' },
       key: { type: 'string', description: 'Stable section id, for example "methods" or "results-clustering".' },
-      heading: { type: 'string' }, body: { type: 'string', description: 'Markdown, at most 64 KiB.' },
-      position: { type: 'integer', minimum: 0, maximum: 999, description: 'Order in the report; defaults to the end, or the previous position for a revision.' },
-      figures: { type: 'array', items: { type: 'object', properties: {
-        sandboxRunId: { type: 'string' }, file: { type: 'string' }, caption: { type: 'string' } },
-        required: ['sandboxRunId', 'file'], additionalProperties: false } },
-      requestId: { type: 'string' } },
+      heading: { type: 'string' },
+      body: { type: 'string', description: 'Markdown, at most 64 KiB.' },
+      position: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 999,
+        description: 'Order in the report; defaults to the end, or the previous position for a revision.'
+      },
+      figures: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            sandboxRunId: { type: 'string' },
+            file: { type: 'string' },
+            caption: { type: 'string' }
+          },
+          required: ['sandboxRunId', 'file'],
+          additionalProperties: false
+        }
+      },
+      requestId: { type: 'string' }
+    },
     ['projectId', 'reportId', 'key', 'heading', 'body'],
-    (a) => {
+    a => {
       const base = `${project(a)}/reports/${str(a, 'reportId', ID.report)}/sections`;
-      const body = { key: str(a, 'key'), heading: str(a, 'heading'), body: typeof a.body === 'string' ? a.body : str(a, 'body') };
+      const body = {
+        key: str(a, 'key'),
+        heading: str(a, 'heading'),
+        body: typeof a.body === 'string' ? a.body : str(a, 'body')
+      };
       if (a.position !== undefined) body.position = a.position;
       if (a.figures !== undefined) {
         if (!Array.isArray(a.figures)) throw new ToolInputError('figures must be a list.');
@@ -206,7 +423,9 @@ export const TOOLS = [
       }
       body.requestId = a.requestId === undefined ? defaultRequestId([base, JSON.stringify(body)]) : str(a, 'requestId');
       return { method: 'POST', path: base, body };
-    }, { readOnly: false }),
+    },
+    { readOnly: false }
+  )
 ];
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
@@ -222,7 +441,8 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
     let request;
     let token;
     try {
-      if (args !== undefined && (args === null || typeof args !== 'object' || Array.isArray(args))) throw new ToolInputError('arguments must be an object.');
+      if (args !== undefined && (args === null || typeof args !== 'object' || Array.isArray(args)))
+        throw new ToolInputError('arguments must be an object.');
       const input = args || {};
       const allowed = Object.keys(definition.inputSchema.properties);
       const unknown = Object.keys(input).filter((k) => !allowed.includes(k));
@@ -241,7 +461,25 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
     }
     if(reply.response.ok&&name==='preview_artifact'&&(reply.data.imageBase64||reply.data.blob)){
       const {imageBase64,blob,...metadata}=reply.data;
-      return {result:{content:[{type:'text',text:JSON.stringify(metadata)},...(imageBase64?[{type:'image',data:imageBase64,mimeType:'image/png'}]:[{type:'resource',resource:{uri:`traceomics:figure/${metadata.artifactId}.${metadata.format}`,mimeType:metadata.mimeType,blob}}])]}};
+      return {
+        result: {
+          content: [
+            { type: 'text', text: JSON.stringify(metadata) },
+            ...(imageBase64
+              ? [{ type: 'image', data: imageBase64, mimeType: 'image/png' }]
+              : [
+                  {
+                    type: 'resource',
+                    resource: {
+                      uri: `traceomics:figure/${metadata.artifactId}.${metadata.format}`,
+                      mimeType: metadata.mimeType,
+                      blob
+                    }
+                  }
+                ])
+          ]
+        }
+      };
     }
     return { result: textResult(reply.data, !reply.response.ok) };
   }
@@ -256,16 +494,28 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
     let outcome;
     if (method === 'initialize') {
       const requested = params?.protocolVersion;
-      outcome = { result: {
-        protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: SERVER_INFO,
-        instructions: 'TraceOmics delegated-agent tools. Start with get_context to see what you may do. Approved workflows: list_studies, create_plan, submit_run, get_run, get_run_results. Your own analysis code: list_sandboxes, run_r_script, get_sandbox_run, read_sandbox_file (inputs are read-only and outputs stay drafts until a person promotes them). Writing up: create_report, write_report_section, get_report to read reviewers\' comments and revise. Ask a person (or create_proposal) for anything outside what you were given.',
-      } };
+      outcome = {
+        result: {
+          protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: SERVER_INFO,
+          instructions:
+            "TraceOmics delegated-agent tools. Start with get_context to see what you may do. Approved workflows: list_studies, create_plan, submit_run, get_run, get_run_results. Your own analysis code: list_sandboxes, run_r_script, get_sandbox_run, read_sandbox_file (inputs are read-only and outputs stay drafts until a person promotes them). Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise. Ask a person (or create_proposal) for anything outside what you were given."
+        }
+      };
     } else if (method === 'ping') {
       outcome = { result: {} };
     } else if (method === 'tools/list') {
-      outcome = { result: { tools: TOOLS.map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations })) } };
+      outcome = {
+        result: {
+          tools: TOOLS.map(({ name, description, inputSchema, annotations }) => ({
+            name,
+            description,
+            inputSchema,
+            annotations
+          }))
+        }
+      };
     } else if (method === 'tools/call') {
       outcome = await callTool(params?.name, params?.arguments);
     } else if (method.startsWith('notifications/')) {

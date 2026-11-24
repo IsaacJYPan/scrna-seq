@@ -25,6 +25,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 // backend/jobWorker.js (pbmcPipelineHandler), r-backend/plumber.R (POST /object/pbmc-pipeline).
 // ════════════════════════════════════════════════════════════════════════════
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const CONFIGURED = config.hasPostgresConnection();
@@ -84,7 +85,7 @@ function pipelineBody(overrides = {}) {
 
 // Injectable R caller that records every request and returns a body (default healthy).
 function recordingPipelineCaller(record, body = pipelineBody()) {
-  return async (req) => { record.push(req); return { status: 200, body }; };
+  return async (req) => { record.push(req); return { status: 200, body: withEffectiveParameters(req, body) }; };
 }
 
 // Run the worker once with an injected R caller + clock + the REAL state-key deriver.
@@ -149,7 +150,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
     // /object/deg-find-markers (deg.find_markers.v1 branch), /object/enrichment-gsea,
     // and the narrow durable CellChat endpoint.
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'GET /runtime/workflow-trust', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
   });
 
   it('legacy enrichment names and CellChat aliases are NOT registered job types or handlers', async () => {
@@ -163,7 +164,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
     expect(DEFAULT_HANDLERS['cellchat.infer.v1']).toBe(worker.cellChatInferenceHandler);
     // Only the reviewed durable CellChat bridge operation is added; legacy aliases remain absent.
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.hydrate.v1', 'r.checkpoint.load.v1', 'r.checkpoint.save.v1', 'r.condition.pseudobulk_de.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.explore.summarize.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.multisample.v1', 'r.seurat.pipeline.v1', 'r.spatial.seurat.v1']);
+      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.hydrate.v1', 'r.checkpoint.load.v1', 'r.checkpoint.save.v1', 'r.condition.pseudobulk_de.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.explore.summarize.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.multisample.v1', 'r.seurat.pipeline.v1', 'r.spatial.seurat.v1', 'r.workflow.trust']);
     for (const op of ['r.enrichment.v1', 'r.cellchat.v1']) {
       expect(isAllowedRBridgeOperation(op)).toBe(false);
     }
@@ -199,7 +200,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — parameter validation', () => 
     expect(params).toEqual({
       normalizationMethod: 'LogNormalize', scaleFactor: 10000, variableFeatures: 2000,
       pcaDims: 50, clusterDims: 15, clusterResolution: 0.8, umapDims: 15,
-      umapComponents: 2, umapNeighbors: 30, umapMinDist: 0.3, seed: null,
+      umapComponents: 2, umapNeighbors: 30, umapMinDist: 0.3, seed: 42,
     });
     expect(defaultsApplied.sort()).toEqual(PBMC_PIPELINE_PARAM_NAMES.slice().sort());
   });
@@ -400,9 +401,9 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — bridge allowlist & input cont
   });
 
   it('sanitizes the summary: matrices/cells/genes/embeddings/paths/state-keys are dropped', async () => {
-    const nasty = async () => ({
+    const nasty = async (req) => ({
       status: 200,
-      body: {
+      body: withEffectiveParameters(req, {
         ok: true,
         summary: {
           n_cells: 10, n_features: 20, n_variable_features: 5, n_pcs: 10, n_clusters: 3,
@@ -413,7 +414,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — bridge allowlist & input cont
         },
         checkpoint: { saved: true, checksum_sha256: 'b'.repeat(64), size_bytes: 9, path: '/vault/secret.rds' },
         versions: { seurat_version: '5.0.1', r_version: 'R 4.6.0' },
-      },
+      }),
     });
     const descriptor = await runRBridgeOperation({ job, operation: 'r.pbmc.pipeline.v1', objectContext, pipeline, callR: nasty, logger: silentLogger() });
     // Check the data-bearing parts only (the static `description` is safe prose that

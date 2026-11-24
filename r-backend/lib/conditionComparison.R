@@ -46,6 +46,26 @@ normalize_condition_pseudobulk_design <- function(value) {
   )
 }
 
+# Pseudobulk models raw counts. Never read the default assay: after
+# SCTransform it holds corrected counts, which edgeR must not treat as raw.
+condition_raw_count_matrix <- function(input_obj) {
+  assay <- intersect(c("RNA", "Spatial"), Seurat::Assays(input_obj))[1]
+  if (is.na(assay)) stop("Pseudobulk requires a raw-count RNA or Spatial assay.")
+  assay_obj <- input_obj[[assay]]
+  if (inherits(assay_obj, "Assay5") &&
+      length(SeuratObject::Layers(assay_obj, search = "counts")) > 1L) {
+    assay_obj <- SeuratObject::JoinLayers(assay_obj, layers = "counts", new = "counts")
+  }
+  counts <- SeuratObject::LayerData(assay_obj, layer = "counts")
+  if (is.null(counts) || !nrow(counts) || !ncol(counts)) stop("The raw-count assay has no counts layer.")
+  counts <- counts[, colnames(input_obj), drop = FALSE]
+  values <- if (inherits(counts, "dgCMatrix")) counts@x else as.vector(as.matrix(counts))
+  if (any(!is.finite(values)) || any(values < 0) || any(values != round(values))) {
+    stop(sprintf("Pseudobulk requires non-negative integer counts; assay %s does not contain them.", assay))
+  }
+  list(assay = assay, counts = counts)
+}
+
 run_condition_pseudobulk_de <- function(input_obj, design) {
   if (!requireNamespace("edgeR", quietly = TRUE) || !requireNamespace("limma", quietly = TRUE)) {
     stop("Controlled pseudobulk packages are unavailable.")
@@ -73,8 +93,9 @@ run_condition_pseudobulk_de <- function(input_obj, design) {
   cell_types <- sort(unique(cell_type[valid]))
   if (length(cell_types) > 128L) stop("Cell-type cardinality exceeds the supported limit.")
 
-  assay <- Seurat::DefaultAssay(input_obj)
-  counts <- Seurat::GetAssayData(input_obj, assay = assay, layer = "counts")
+  raw_counts <- condition_raw_count_matrix(input_obj)
+  assay <- raw_counts$assay
+  counts <- raw_counts$counts
   if (nrow(counts) > 100000L || ncol(counts) > 1000000L) stop("Pseudobulk input exceeds supported dimensions.")
   result_parts <- list()
   skipped <- character()
@@ -150,6 +171,7 @@ run_condition_pseudobulk_de <- function(input_obj, design) {
     table = result_table,
     summary = list(
       method = "edgeR quasi-likelihood pseudobulk",
+      count_assay = assay,
       cell_type_column = design$cell_type_column,
       unit_of_replication = design$unit_of_replication,
       paired = design$paired,
