@@ -7,7 +7,7 @@ const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ACTIONS = new Set([
   'branch.created', 'branch.advanced', 'branch.published',
   'review.requested', 'review.commented', 'review.decided', 'canonical.promoted',
-  'artifact.downloaded', 'reproducibility.exported', 'attachment.commented',
+  'artifact.downloaded', 'reproducibility.exported', 'methods.exported', 'attachment.commented',
   'snapshot.published', 'snapshot.withdrawn',
   'figure.bundle_exported', 'figure.updated', 'figure.removed',
 ]);
@@ -16,7 +16,7 @@ const DETAIL_KEYS = new Set([
   'artifactType', 'branchVisibility', 'canonicalVersion', 'decision',
   'fromAnalysisObjectId', 'toAnalysisObjectId', 'manifestVersion',
   'snapshotSha256', 'policyVersion', 'resultCount', 'documentCount',
-  'bundleVersion', 'figureCount', 'stepCount', 'scriptSha256',
+  'bundleVersion', 'figureCount', 'stepCount', 'scriptSha256', 'methodsVersion',
 ]);
 
 function safeToken(value, maxLength = 160) {
@@ -29,7 +29,7 @@ function sanitizeDetails(details = {}) {
   const safe = {};
   for (const key of DETAIL_KEYS) {
     if (!(key in details)) continue;
-    if (['canonicalVersion', 'manifestVersion', 'policyVersion', 'resultCount', 'documentCount', 'bundleVersion', 'figureCount', 'stepCount'].includes(key)) {
+    if (['canonicalVersion', 'manifestVersion', 'methodsVersion', 'policyVersion', 'resultCount', 'documentCount', 'bundleVersion', 'figureCount', 'stepCount'].includes(key)) {
       const value = Number(details[key]);
       if (Number.isSafeInteger(value) && value >= 0) safe[key] = value;
     } else {

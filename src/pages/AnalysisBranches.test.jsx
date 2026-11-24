@@ -22,6 +22,7 @@ describe('AnalysisBranches', () => {
       promoteAnalysisBranch: vi.fn(async () => ({ analysisObjectId: 'ao_abc123' })),
       compareAnalysisBranches: vi.fn(async () => ({ relation: 'shared_lineage' })),
       downloadReproducibilityManifest: vi.fn(async () => ({ filename: 'manifest.json' })),
+      downloadMethodsText: vi.fn(async () => ({ filename: 'methods.md' })),
       listProjectAuditEvents: vi.fn(async () => [{
         id: 'aud_abc123', action: 'branch.published', targetType: 'branch',
         targetId: 'br_right123', createdAt: '2026-08-01T12:00:00.000Z',
@@ -156,5 +157,26 @@ describe('AnalysisBranches', () => {
     expect(await screen.findByText('Changes requested')).toBeInTheDocument();
     expect(screen.getByText(/Document why SCTransform was selected/i)).toBeInTheDocument();
     expect(screen.getByText(/Add the normalization comparison figure/i)).toBeInTheDocument();
+  });
+
+  it('downloads a Methods draft for a branch and labels both export events', async () => {
+    const branch = {
+      id: 'br_left123', ownerUserId: 1, name: 'owner/method-a', visibility: 'private',
+      status: 'active', headAnalysisObjectId: 'ao_abc123', version: 1,
+    };
+    window.electronAPI.listAnalysisBranches.mockResolvedValue([branch]);
+    window.electronAPI.listProjectAuditEvents.mockResolvedValue([
+      { id: 'aud_methods1', action: 'methods.exported', targetId: 'ao_abc123', createdAt: '2026-08-02T12:00:00.000Z' },
+      { id: 'aud_record1', action: 'reproducibility.exported', targetId: 'ao_abc123', createdAt: '2026-08-01T12:00:00.000Z' },
+    ]);
+
+    render(<AnalysisBranches currentWs={workspace} datasetInfo={workspace.objects[0]} userId={1} />);
+    expect((await screen.findAllByText('owner/method-a')).length).toBeGreaterThan(0);
+    expect(screen.getByText('Methods draft exported')).toBeInTheDocument();
+    expect(screen.getByText('Research record exported')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /download methods draft/i }));
+    await waitFor(() => expect(window.electronAPI.downloadMethodsText)
+      .toHaveBeenCalledWith('proj_1', { branchId: branch.id }));
   });
 });

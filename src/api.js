@@ -933,6 +933,15 @@ export const electronAPI = {
       'reproducibility-manifest.json'
     );
   },
+  downloadMethodsText: async (projectId, { branchId, analysisObjectId } = {}) => {
+    const qs = new URLSearchParams();
+    if (branchId) qs.set('branchId', branchId);
+    else if (analysisObjectId) qs.set('analysisObjectId', analysisObjectId);
+    return downloadResponse(
+      `/api/projects/${projectId}/methods-text?${qs.toString()}`,
+      'methods.md'
+    );
+  },
   listProjectAuditEvents: async (projectId, filters = {}) => {
     const qs = new URLSearchParams(
       Object.entries(filters).filter(([, value]) => value != null && value !== '')

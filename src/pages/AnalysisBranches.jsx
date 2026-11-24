@@ -46,6 +46,8 @@ function activityLabel(action) {
     'review.requested': 'Review requested',
     'review.decided': 'Review decision recorded',
     'export.downloaded': 'Research record exported',
+    'reproducibility.exported': 'Research record exported',
+    'methods.exported': 'Methods draft exported',
   };
   return labels[action] || 'Recorded project update';
 }
@@ -254,6 +256,16 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
                       ))}
                     >
                       <Download size={13} /> Download review record
+                    </button>
+                    <button
+                      className="btn btn-secondary text-xs"
+                      disabled={!!busy}
+                      title="A Methods section drafted from the recorded parameters, software versions and method citations"
+                      onClick={() => mutate(`methods-${branch.id}`, () => (
+                        window.electronAPI.downloadMethodsText(projectId, { branchId: branch.id })
+                      ))}
+                    >
+                      <Download size={13} /> Download Methods draft
                     </button>
                   </div>
                   {owned && (

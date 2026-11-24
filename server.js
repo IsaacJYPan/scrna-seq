@@ -13,6 +13,8 @@ const analysisBranches = require('./backend/analysisBranches');
 const experimentalDesign = require('./backend/experimentalDesign');
 const projectAudit = require('./backend/projectAudit');
 const researchExports = require('./backend/researchExports');
+const methodsText = require('./backend/methodsText');
+const { methodByKey: trustedMethodByKey } = require('./backend/workflowTrust/trustedMethods');
 const { researchAnalysisRoutes } = require('./backend/researchAnalyses');
 const {
   expertRSandboxEnabled,
@@ -3312,6 +3314,34 @@ app.get('/api/projects/:projectId/reproducibility-manifest', async (req, res) =>
     res.json(manifest);
   } catch (error) {
     sendProjectResourceError(res, error, 'ProjectReproducibilityManifest');
+  }
+});
+
+app.get('/api/projects/:projectId/methods-text', async (req, res) => {
+  try {
+    const manifest = await researchExports.buildReproducibilityManifest(
+      req.user.id,
+      req.params.projectId,
+      {
+        branchId: typeof req.query.branchId === 'string' ? req.query.branchId : undefined,
+        analysisObjectId: typeof req.query.analysisObjectId === 'string'
+          ? req.query.analysisObjectId : undefined,
+      }
+    );
+    const text = methodsText.renderMethodsText(manifest, { lookupMethod: trustedMethodByKey });
+    await projectAudit.recordEvent(db, {
+      projectId: req.params.projectId, actorUserId: req.user.id,
+      action: 'methods.exported', targetType: 'analysis_object',
+      targetId: manifest.exportedAnalysisObjectId,
+      details: { manifestVersion: manifest.version, methodsVersion: methodsText.METHODS_TEXT_VERSION },
+    });
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="methods-${manifest.exportedAnalysisObjectId}.md"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(text);
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectMethodsText');
   }
 });
 

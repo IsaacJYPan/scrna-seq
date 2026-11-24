@@ -291,6 +291,25 @@ manifest listing what was kept, what was left out, and any state that has no
 recorded step. The same export is `POST /api/projects/:id/figures/bundles`
 (`format=r` for the script alone) and is recorded in the project audit log.
 
+## Methods draft
+
+In **Analysis branches**, **Download Methods draft** writes a Markdown Methods
+section for a branch's current analysis. It is built from the same record as
+**Download review record** (`GET /api/projects/:id/methods-text`, with
+`branchId` or `analysisObjectId`), and each download is recorded in the project
+audit log.
+
+The draft covers every completed step in the analysis's lineage: QC thresholds,
+normalization, PCA, clustering and UMAP settings, marker, enrichment, CellChat
+and pseudobulk settings with their statistical tests, and each trusted method's
+pinned version, parameters, citation and documented deviations. A Software
+paragraph lists the R and package versions the runtime reported, and only the
+methods that actually ran are cited.
+
+It states what ran, not why. Custom R and console code is identified by a
+script hash, not described. Treat it as a starting point: check it against
+your analysis, add your reasoning, and attach any custom scripts.
+
 ## Ranked Pathway Enrichment
 
 The Pathway Enrichment tab now launches `enrichment.gsea.v1` for one selected

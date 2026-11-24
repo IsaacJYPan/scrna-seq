@@ -49,12 +49,14 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
   [release list](docs/workflow-releases.md).
 - Agent-drafted reports: sections are drafted, reviewed by a person, finalized
   and exported as Markdown ([agent automation](docs/agent-automation.md)).
+- A [Methods draft](docs/analysis-workflows.md#methods-draft) generated from the
+  recorded parameters, software versions and method citations, and figure
+  exports that include the R script and manifest needed to redraw them.
 - [Shared pipelines](docs/pipelines.md), [custom workflow steps](docs/workflow-pipelines.md),
   and a private R console on installations with the isolated R runtime configured.
 
 Limitations: annotation is available through the trusted methods, not yet as a
-guided step in production; cross-condition CellChat is not supported; there is
-no generated Methods text or reproducibility bundle yet. See
+guided step in production; cross-condition CellChat is not supported. See
 [analysis workflows](docs/analysis-workflows.md) for supported methods and
 the [end-to-end walkthrough](docs/analysis-workflows.md#from-raw-counts-to-a-condition-comparison).
 
