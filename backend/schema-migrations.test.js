@@ -36,7 +36,7 @@ describe('schema baseline', () => {
 describe.skipIf(!CONFIGURED)('schema migrations', () => {
   afterAll(async () => { await db.close(); });
   beforeEach(async () => {
-    await db.resetSchemaForTests();
+    await db.resetSchemaForTests({ migrationsDir: migrationsDir({}) });
     await db.query('DROP TABLE IF EXISTS migration_probe');
   });
 

@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { Client } = require('pg');
 const config = require('../backend/config');
 const { environmentBytes, summarizeEnvironmentManifest } = require('../backend/rEnvironment');
@@ -74,7 +74,10 @@ async function dropDrillDatabase(admin, databaseName) {
 }
 
 async function initializeSourceDatabase(databaseUrl, storageRoot) {
-  const schema = await fs.promises.readFile(path.join(__dirname, '..', 'backend', 'pg', 'schema.sql'), 'utf8');
+  execFileSync(process.execPath, [path.join(__dirname, 'init-postgres.js')], {
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: 'inherit',
+  });
   const datasetKey = 'projects/proj_restore/datasets/ds_restore/matrix.h5';
   const artifactKey = 'projects/proj_restore/artifacts/job_restore/result.csv';
   const managedVersionId = 'av_0123456789abcdef01234567';
@@ -111,7 +114,6 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    await client.query(schema);
     await client.query('BEGIN');
     const user = await client.query(
       `INSERT INTO users (email, password_hash, salt, display_name)

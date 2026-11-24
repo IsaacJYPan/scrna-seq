@@ -838,7 +838,7 @@ function isDisposableTestDatabase(databaseName, env = process.env) {
 
 // TEST-ONLY: drop the app tables so a contract run starts from a clean schema.
 // Guarded so it can never run against a production or development database.
-async function resetSchemaForTests() {
+async function resetSchemaForTests({ migrationsDir } = {}) {
   if (config.isProduction()) {
     throw new Error('resetSchemaForTests must not run in production.');
   }
@@ -853,7 +853,8 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
-      agent_notebook_notes, agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
+      agent_notebook_notes, agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_remote_inputs,
+      agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
       hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
@@ -880,7 +881,7 @@ async function resetSchemaForTests() {
       account_security_events, operator_audit_events, users
     CASCADE;
   `);
-  await initSchema();
+  await initSchema({ migrationsDir });
 }
 
 async function close() {
@@ -1659,6 +1660,10 @@ async function deleteExpiredDemoGuest(userId) {
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
+      await client.query(
+        'DELETE FROM agent_sandbox_remote_inputs WHERE run_id IN (SELECT id FROM agent_sandbox_runs WHERE project_id = ANY($1::text[]))',
+        [projectIds]
+      );
       for (const table of ['agent_notebook_notes', 'agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
         await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
       }
