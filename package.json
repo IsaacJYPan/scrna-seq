@@ -80,6 +80,7 @@
     "test:large-r-artifacts": "node scripts/verify-large-r-artifacts.js",
     "test:demo-compose": "node scripts/verify-compose-demo.js",
     "test:demo-browser": "node scripts/verify-guided-demo-ui.js",
+    "test:researcher-workflow": "node scripts/verify-researcher-workflow.js",
     "test:frontend": "vitest run src/",
     "test:tools": "vitest run scripts/ cli/ --environment node --fileParallelism=false",
     "test:desktop": "vitest run desktop/ backend/desktop-packaging.test.js --environment node --fileParallelism=false",

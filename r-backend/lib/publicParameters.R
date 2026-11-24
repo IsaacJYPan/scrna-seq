@@ -21,7 +21,17 @@ MAX_PUBLIC_BATCHES <- 100L
 MAX_PUBLIC_METADATA_COLUMNS <- 64L
 MAX_PUBLIC_METADATA_VALUES <- 1000L
 MAX_PUBLIC_MAPPING_ENTRIES <- 1000L
-MAX_PUBLIC_OBJECT_BYTES <- 512 * 1024 * 1024
+# Computed columns (clusters and QC metrics). A metadata mapping creates a new
+# label column; it must not overwrite values that Seurat computed.
+PROTECTED_MAPPING_COLUMNS <- c("seurat_clusters", "nCount_RNA", "nFeature_RNA", "percent.mt")
+# Live (synchronous) requests refuse objects above this in-memory size. 512 MiB
+# keeps a shared server responsive; an installation where one researcher owns the
+# R process sets R_MAX_PUBLIC_OBJECT_BYTES from its memory, because a typical
+# 50,000-100,000-cell study is several GiB.
+MAX_PUBLIC_OBJECT_BYTES <- local({
+  configured <- suppressWarnings(as.numeric(Sys.getenv("R_MAX_PUBLIC_OBJECT_BYTES", unset = "")))
+  if (length(configured) == 1 && is.finite(configured) && configured >= 1) floor(configured) else 512 * 1024 * 1024
+})
 MAX_PUBLIC_DENSE_VALUES <- 50000000
 
 # Public browser-driven R operations are synchronous and can duplicate large

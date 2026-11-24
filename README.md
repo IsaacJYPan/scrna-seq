@@ -38,6 +38,8 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
 - Seurat preprocessing for single-sample and multi-sample 10x data, plus classic
   Space Ranger Visium data.
 - QC, PCA, UMAP, gene expression, heatmaps, and marker finding.
+- Manual cluster annotation: name clusters from their markers and use the labels
+  as cell types in UMAP, markers, pseudobulk, and CellChat.
 - Ranked pathway enrichment, replicate-aware pseudobulk comparisons on raw
   counts, and single-context CellChat candidate analysis.
 - A library of trusted methods, including reference-based cell annotation
@@ -53,8 +55,8 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
 Limitations: annotation is available through the trusted methods, not yet as a
 guided step in production; cross-condition CellChat is not supported; there is
 no generated Methods text or reproducibility bundle yet. See
-[analysis workflows](docs/analysis-workflows.md) for the supported methods and
-their interpretation.
+[analysis workflows](docs/analysis-workflows.md) for supported methods and
+the [end-to-end walkthrough](docs/analysis-workflows.md#from-raw-counts-to-a-condition-comparison).
 
 ## AI agents
 

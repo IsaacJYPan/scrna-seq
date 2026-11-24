@@ -7,6 +7,7 @@ const EXPLORATORY_ANALYSIS_RECIPES = Object.freeze([
   'overview',
   'feature_by_group',
   'metadata_distribution',
+  'group_composition',
   'study_composition','study_expression','study_qc','study_de','study_pathways','study_communication',
 ]);
 const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
@@ -67,7 +68,7 @@ function validateExploratoryAnalysisParams(input) {
 
   const recipe = raw.recipe === undefined ? 'overview' : String(raw.recipe).trim();
   if (!EXPLORATORY_ANALYSIS_RECIPES.includes(recipe)) {
-    throw codedError('INVALID_PARAMETER', 'recipe must be overview, feature_by_group, or metadata_distribution.');
+    throw codedError('INVALID_PARAMETER', 'recipe must be overview, feature_by_group, metadata_distribution, or group_composition.');
   }
 
   const params = {
@@ -103,15 +104,20 @@ function validateExploratoryAnalysisParams(input) {
     throw codedError('INVALID_PARAMETER', `species applies only to ${SPECIES_RECIPES.join(' and ')}.`);
   }
 
-  if (recipe === 'feature_by_group') {
-    if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {
-      throw codedError('INVALID_PARAMETER', 'feature_by_group requires 1-12 feature names.');
-    }
-    params.features = [...new Set(raw.features.map((value) => safeFieldName(value, 'features')))].slice(0, 12);
+  if (recipe === 'feature_by_group' || recipe === 'group_composition') {
     params.groupBy = raw.groupBy === undefined ? 'seurat_clusters' : String(raw.groupBy).trim();
     if (!['seurat_clusters', 'ident'].includes(params.groupBy)) {
       throw codedError('INVALID_PARAMETER', 'groupBy must be seurat_clusters or ident.');
     }
+  }
+  if (recipe === 'group_composition') {
+    // The categorical column that splits cells, usually the sample or condition.
+    params.metadataField = safeFieldName(raw.metadataField, 'metadataField');
+  } else if (recipe === 'feature_by_group') {
+    if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {
+      throw codedError('INVALID_PARAMETER', 'feature_by_group requires 1-12 feature names.');
+    }
+    params.features = [...new Set(raw.features.map((value) => safeFieldName(value, 'features')))].slice(0, 12);
   } else if (recipe === 'metadata_distribution') {
     params.metadataField = safeFieldName(raw.metadataField, 'metadataField');
   }

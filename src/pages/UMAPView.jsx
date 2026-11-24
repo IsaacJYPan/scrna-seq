@@ -1,6 +1,7 @@
 import PageHeader from '../components/PageHeader';
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, AlertTriangle, ImageDown, FileText } from 'lucide-react';
+import LiveUnavailable from '../components/LiveUnavailable';
 import Plot, { getPlotHoverStyle, supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -10,7 +11,7 @@ import { useRestoredReduction } from '../hooks/useRestoredReduction';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
-export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme, deploymentPolicy }) {
+export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme, deploymentPolicy, liveUnavailable, liveReopening, setActiveTab }) {
 
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
@@ -115,7 +116,10 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   // In-memory UI cache dictionary to enable zero-latency dimension toggling
   const [cachedDims, setCachedDims] = useState({});
-  const contextKey = JSON.stringify([userEmail, objectId, rSessionId, sessionReady]);
+  // Colour the embedding by the current identities or by a metadata column
+  // such as sample_id or condition (to check for batch structure).
+  const [colorBy, setColorBy] = useState('');
+  const contextKey = JSON.stringify([userEmail, objectId, rSessionId, sessionReady, colorBy]);
   const runGeneration = React.useRef(0);
   const currentReductionComponents = React.useRef(null);
   const settingsKeyFor = (values) => JSON.stringify([values.dims, values.nNeighbors, values.minDist, umapSeed, rSessionId, pcaProvId, clusterProvId]);
@@ -130,7 +134,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   }, [pipelineState?.clusterDims, pipelineState?.clusterCount]);
 
   const { invalidate: invalidateRestored, ...restored } = useRestoredReduction({
-    callApi, reduction: 'umap', contextKey,
+    callApi, reduction: 'umap', contextKey, groupBy: colorBy,
     enabled: !!(datasetInfo && (pipelineState?.pca || pipelineState?.umap) && sessionReady),
     onReset: () => {
       runGeneration.current += 1;
@@ -248,6 +252,11 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   const result = displayedResult;
   const resultNComponents = result ? nComponents : null;
   const settingsChanged = !!displayedResult && displayedResult.settingsKey !== settingsKey;
+  const [colorOptions, setColorOptions] = useState([]);
+  const offeredColumns = displayedResult?.result?.group_by_options;
+  useEffect(() => {
+    if (Array.isArray(offeredColumns)) setColorOptions(offeredColumns.filter(value => typeof value === 'string'));
+  }, [offeredColumns]);
 
   // Fetch base64 fallback for large datasets
   useEffect(() => {
@@ -257,7 +266,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       callApi('/render-plot-base64', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plot_type: 'UMAP', width: 8, height: 6, res: 200 })
+        body: JSON.stringify({ plot_type: 'UMAP', width: 8, height: 6, res: 200, ...(colorBy ? { group_by: colorBy } : {}) })
       })
       .then(data => {
         if (!active) return;
@@ -267,7 +276,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       .catch(() => { if (active) setLoadingBase64(false); });
     }
     return () => { active = false; };
-  }, [result, isHighPerfMode, nComponents, callApi]);
+  }, [result, isHighPerfMode, nComponents, callApi, colorBy]);
 
   const isDark = theme === 'dark';
   const plotText = isDark ? '#94a3b8' : '#475569';
@@ -315,6 +324,10 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         </div>
       </div>
     );
+  }
+
+  if (!pipelineState?.pca && !pipelineState?.umap && (liveUnavailable || liveReopening)) {
+    return <LiveUnavailable reopening={liveReopening} onOpenHistory={setActiveTab ? () => setActiveTab('history') : undefined} />;
   }
 
   if (!pipelineState?.pca && !pipelineState?.umap) {
@@ -500,7 +513,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                 </div>
               ) : base64Image ? (
                 <>
-                  <img src={base64Image} alt={`UMAP embedding scatter plot (${nComponents}D), cells colored by cluster`} className="max-w-full max-h-full object-contain p-2" />
+                  <img src={base64Image} alt={`UMAP embedding scatter plot (${nComponents}D), cells colored by ${colorBy || 'cluster'}`} className="max-w-full max-h-full object-contain p-2" />
                   <div className="absolute top-4 right-4 bg-primary/20 text-primary border border-primary/40 px-3 py-1 rounded-full text-xs font-semibold">
                     High-Performance View
                   </div>
@@ -563,6 +576,14 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               <h4 className="font-semibold border-b border-border pb-2 mb-3 text-text text-sm">
                 Cell groups
               </h4>
+              {(colorOptions.length > 0 || colorBy) && (
+                <label className="mb-3 block text-xs font-medium text-textMuted">Colour by
+                  <select className="input mt-1 w-full text-sm" value={colorBy} onChange={event => setColorBy(event.target.value)}>
+                    <option value="">Current identities</option>
+                    {colorOptions.map(column => <option key={column} value={column}>{column}</option>)}
+                  </select>
+                </label>
+              )}
               <div role="region" aria-label="Cell group counts" tabIndex={0} className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
                 {activeTraces.map((trace, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-white/5">

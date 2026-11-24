@@ -2,14 +2,15 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ChevronDown, ChevronRight, Download, Loader2 } from 'lucide-react';
 import CodeEditor from '../notebooks/CodeEditor';
+import ExactDetails from './ExactDetails';
 import { agentRunCells, agentRunNotebookContent } from '../../shared/agentRunNotebook.mjs';
 import { listAnalyses } from '../analyses/researchAnalysisApi';
 import { createNotebook } from '../notebooks/notebookApi';
 import { publicErrorMessage } from '../publicError';
 
-// An agent's sandbox run shown the way the app shows notebooks: numbered
-// Markdown and R cells, read-only, with each output file under the step that
-// wrote it. "Readable" hides error handling; "Exact code" is what ran. A
+// An agent's sandbox run shown as numbered notebook steps, read-only. Each
+// step is one cell: its title and explanation, then its R, then the output
+// files that step wrote. "Readable" hides error handling; "Exact code" is what ran. A
 // person with write access can save the run as a notebook in an analysis.
 
 const safeUrl = (url) => (/^(https?:|mailto:|#)/i.test(String(url || '')) ? url : '');
@@ -53,23 +54,44 @@ function CellOutputs({ outputs, fileUrl, readText }) {
   );
 }
 
-function Cell({ cell, index, theme, fileUrl, readText }) {
+// agentRunCells gives each step as a Markdown cell ("## n. Title" plus the
+// step's leading comments) followed by its code cell; show them as one.
+export function stepsFromCells(cells) {
+  const steps = [];
+  for (const cell of cells) {
+    let step = steps.find((entry) => entry.number === cell.step);
+    if (!step) { step = { number: cell.step, title: '', text: '', code: null }; steps.push(step); }
+    if (cell.kind === 'markdown') {
+      const [heading, ...rest] = cell.source.split('\n');
+      step.title = heading.replace(/^#+\s*\d+\.\s*/, '');
+      step.text = rest.join('\n').trim();
+    } else {
+      step.code = cell;
+    }
+  }
+  return steps;
+}
+
+function StepCell({ step, theme, fileUrl, readText }) {
   const [collapsed, setCollapsed] = useState(false);
-  const label = `${cell.kind === 'markdown' ? 'Markdown' : 'R'} cell ${index + 1}`;
+  const label = `Step ${step.number}${step.title ? `: ${step.title}` : ''}`;
+  const lines = step.code ? step.code.source.split('\n').length : 0;
   return (
     <section aria-label={label} className="min-w-0 rounded-lg border border-border bg-surface/50 p-4">
-      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
         <button type="button" onClick={() => setCollapsed(!collapsed)} aria-expanded={!collapsed} aria-label={`${collapsed ? 'Show' : 'Hide'} ${label}`} className="rounded p-1 text-textMuted">
           {collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
         </button>
-        <span className="font-semibold">{index + 1}. {cell.kind === 'markdown' ? 'Markdown' : 'R'}</span>
-        {cell.kind === 'code' && cell.hiddenLines > 0 && <span className="text-textMuted">{cell.hiddenLines} line{cell.hiddenLines === 1 ? '' : 's'} of error handling hidden</span>}
+        <span className="font-semibold text-text">{step.number}. {step.title || 'Step'}</span>
+        {step.code?.hiddenLines > 0 && <span className="text-xs text-textMuted">{step.code.hiddenLines} line{step.code.hiddenLines === 1 ? '' : 's'} of error handling hidden</span>}
       </div>
-      {collapsed ? <p className="text-xs text-textMuted">Hidden · {cell.source.split('\n').length} lines</p>
-        : cell.kind === 'markdown'
-          ? <div className="prose prose-sm max-w-none text-text"><ReactMarkdown skipHtml urlTransform={safeUrl}>{cell.source}</ReactMarkdown></div>
-          : <CodeEditor key={cell.source} value={cell.source} language="R" theme={theme} readOnly label={`${label} source`} />}
-      {!collapsed && <CellOutputs outputs={cell.outputs} fileUrl={fileUrl} readText={readText} />}
+      {collapsed ? <p className="mt-1 text-xs text-textMuted">Hidden · {lines} line{lines === 1 ? '' : 's'} of R</p> : (
+        <>
+          {step.text && <div className="prose prose-sm mt-2 max-w-none text-text"><ReactMarkdown skipHtml urlTransform={safeUrl}>{step.text}</ReactMarkdown></div>}
+          {step.code && <div className="mt-3"><CodeEditor key={step.code.source} value={step.code.source} language="R" theme={theme} readOnly label={`R code of ${label}`} /></div>}
+          <CellOutputs outputs={step.code?.outputs} fileUrl={fileUrl} readText={readText} />
+        </>
+      )}
     </section>
   );
 }
@@ -77,6 +99,7 @@ function Cell({ cell, index, theme, fileUrl, readText }) {
 export default function AgentRunNotebook({ run, projectId, theme = 'light', fileUrl, readText, canSave = false, label }) {
   const [exact, setExact] = useState(false);
   const cells = useMemo(() => agentRunCells(run, { exact }), [run, exact]);
+  const steps = useMemo(() => stepsFromCells(cells), [cells]);
   const [saving, setSaving] = useState(null);
   const [analyses, setAnalyses] = useState(null);
   const [target, setTarget] = useState('');
@@ -111,7 +134,7 @@ export default function AgentRunNotebook({ run, projectId, theme = 'light', file
   return (
     <div className="space-y-3" aria-label={label || `Notebook for run ${run.runNumber}`}>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-textMuted">
-        <span>{cells.filter((c) => c.kind === 'code').length} steps</span>
+        <span>{steps.length} step{steps.length === 1 ? '' : 's'}</span>
         <span className="flex flex-wrap items-center gap-2">
           <span role="group" aria-label="Code view" className="inline-flex overflow-hidden rounded border border-border">
             <button type="button" aria-pressed={!exact} onClick={() => setExact(false)} className={`px-2 py-1 ${!exact ? 'bg-primary/10 font-bold text-primary' : ''}`}>Readable</button>
@@ -136,9 +159,10 @@ export default function AgentRunNotebook({ run, projectId, theme = 'light', file
       {message?.ok && <p role="status" className="text-xs text-success">{message.ok}</p>}
       {message?.error && <p role="alert" className="text-xs text-danger">{message.error}</p>}
       <div className="space-y-4">
-        {cells.map((cell, index) => <Cell key={`${exact}:${cell.id}`} cell={cell} index={index} theme={theme} fileUrl={fileUrl} readText={readText} />)}
+        {steps.map((step) => <StepCell key={`${exact}:${step.number}`} step={step} theme={theme} fileUrl={fileUrl} readText={readText} />)}
       </div>
-      {!exact && <p className="text-[11px] text-textMuted">The readable view hides error handling. Exact code shows what ran (script SHA-256 {run.scriptSha256?.slice(0, 12)}…).</p>}
+      {!exact && <p className="text-[11px] text-textMuted">The readable view hides error handling; Exact code shows what ran.
+        <ExactDetails className="ml-1" label="Exact script" items={[{ label: 'Script SHA-256', value: run.scriptSha256 }]} /></p>}
     </div>
   );
 }

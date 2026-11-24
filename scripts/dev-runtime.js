@@ -71,7 +71,26 @@ function createDevRuntime(options = {}) {
     || (explicitExternalR ? '' : crypto.randomBytes(32).toString('hex'));
   const plumberPort = env.PLUMBER_PORT || '8000';
   const rBaseUrl = env.R_BACKEND_URL || `http://127.0.0.1:${plumberPort}`;
-  const common = { ...env, R_API_TOKEN: sharedToken };
+  // Agent sandboxes and Expert R run in a fresh no-network container per run.
+  // Setting EXPERT_R_SANDBOX_IMAGE (an image pinned by sha256) starts the
+  // sandbox broker beside the stack and points the web service and worker at it.
+  const sandboxImage = String(env.EXPERT_R_SANDBOX_IMAGE || '').trim();
+  const sandbox = sandboxImage ? {
+    image: sandboxImage,
+    token: /^[0-9a-f]{64}$/.test(String(env.EXPERT_R_SANDBOX_TOKEN || '')) ? env.EXPERT_R_SANDBOX_TOKEN : crypto.randomBytes(32).toString('hex'),
+    port: String(positiveInt(env.EXPERT_R_SANDBOX_PORT, 8090)),
+    workRoot: env.EXPERT_R_SANDBOX_WORK_ROOT || path.join(root, '.expert-r-work'),
+  } : null;
+  const sandboxEnv = sandbox ? {
+    APP_DEPLOYMENT_MODE: env.APP_DEPLOYMENT_MODE || 'private',
+    EXPERT_R_ENABLED: 'true',
+    // On one researcher's machine, project writers may use the sandbox without a
+    // separate operator approval. A deployment sets its own policy.
+    EXPERT_R_ACCESS_POLICY: env.EXPERT_R_ACCESS_POLICY || 'project-roles',
+    EXPERT_R_SANDBOX_URL: `http://127.0.0.1:${sandbox.port}`,
+    EXPERT_R_SANDBOX_TOKEN: sandbox.token,
+  } : {};
+  const common = { ...env, R_API_TOKEN: sharedToken, ...sandboxEnv };
   const configuredWorkerMinFreeMemoryMb = env.JOB_WORKER_MIN_FREE_MEMORY_MB;
   const devWorkerMinFreeMemoryMb = configuredWorkerMinFreeMemoryMb === undefined
     || configuredWorkerMinFreeMemoryMb === null
@@ -103,6 +122,15 @@ function createDevRuntime(options = {}) {
       throw Object.assign(new Error('R_API_TOKEN is required when using an external R runtime.'), {
         code: 'R_API_TOKEN_REQUIRED',
       });
+    }
+    if (sandbox) {
+      launch('sandbox', path.join(root, 'backend', 'expertSandboxBroker.js'), [], {
+        ...common,
+        EXPERT_R_SANDBOX_IMAGE: sandbox.image,
+        EXPERT_R_SANDBOX_HOST: '127.0.0.1',
+        EXPERT_R_SANDBOX_PORT: sandbox.port,
+        EXPERT_R_SANDBOX_WORK_ROOT: sandbox.workRoot,
+      }, true);
     }
     const viteScript = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
     launch('vite', viteScript, [], common, false);
@@ -138,6 +166,8 @@ function createDevRuntime(options = {}) {
       try { await stopChild(children.get('web'), { graceful: true, timeoutMs: DEFAULT_CHILD_STOP_MS }); }
       catch { exitCode = 1; }
       try { await stopChild(children.get('vite'), { graceful: false, timeoutMs: DEFAULT_CHILD_STOP_MS }); }
+      catch { exitCode = 1; }
+      try { await stopChild(children.get('sandbox'), { graceful: true, timeoutMs: DEFAULT_CHILD_STOP_MS }); }
       catch { exitCode = 1; }
       exit(exitCode);
       return exitCode;

@@ -1,10 +1,12 @@
 # Approved agent workflows and inspection
 
-Agent execution still accepts parameter choices, never submitted R code. A person approves a release and creates a bounded study. Follow-on studies consume a person's accepted, immutable source result. Acceptance is not delegated to the analyst.
+Agent execution still accepts parameter choices, never submitted R code. A person approves a release and creates a bounded study. Follow-on studies consume an immutable source result a person chose: an accepted study result or their own saved pipeline result. Acceptance is not delegated to the analyst.
 
 ## Operator runtime pin
 
 Set `TRACEOMICS_WORKFLOW_RUNTIME_FILE` in the web and worker processes to an operator-owned JSON file. Its profile has schema `traceomics.workflow-runtime.v1`, an immutable `imageDigest` (`sha256:…`), exact `rVersion`, and the complete installed package inventory (`packages: [{name, version}, …]`). It may instead contain `targets.local` and `targets.slurm` profiles. Missing runtime pins prevent agent planning. Read the authenticated R service's `/runtime/workflow-trust` report, verify its image against the deployed container, then approve that profile; do not treat an unverified remote response as independent proof of image identity.
+
+A plain R installation without a container can be pinned instead: `node scripts/pin-local-runtime.js --out <file>` writes the profile, and `TRACEOMICS_RUNTIME_LOCAL_INSTALL=1` makes the R service report the same identity, a digest of the R home, R version and every installed package with its library path. It identifies the installation, not an image: anyone who can change that R library can change what runs, so use it on a workstation you control, not a shared server.
 
 Supply `TRACEOMICS_RUNTIME_IMAGE_DIGEST` from the deployed immutable image identity. Slurm can alternatively read an operator-owned `/run/traceomics/image-digest`. These are attestations within a trusted operator/runtime boundary, not hardware attestation against a compromised server.
 

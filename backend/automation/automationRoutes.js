@@ -59,7 +59,7 @@ function createRateLimiter() {
   };
 }
 
-function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports }) {
+function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports, notebook }) {
   const inspection = require('./inspection').createRunInspection({ db, admission });
   const router = express.Router();
   const rateLimit = createRateLimiter();
@@ -174,6 +174,12 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
     schema: 'traceomics.automation.workflows.v1',
     releases: await approvals.listApprovedForProject(actor.delegation.projectId),
   })));
+  // Verified code first: every reviewed workflow and library method, approved
+  // here or not, so an agent checks it before writing its own R.
+  router.get('/projects/:projectId/verified-code', route('metadata.read', async (req, actor) => ({
+    schema: 'traceomics.automation.verified-code.v1',
+    ...(await require('./verifiedCode').listVerifiedCode(approvals, actor.delegation.projectId)),
+  })));
   router.get('/projects/:projectId/targets', route('metadata.read', () => targets.list()));
   router.get('/projects/:projectId/studies', route('workflow.plan', async (req, actor) => ({
     schema: 'traceomics.automation.studies.v1',
@@ -267,6 +273,17 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
     router.post('/projects/:projectId/reports/:reportId/sections', route('report.write', async (req, actor) => {
       const { section, replayed } = await reports.writeSectionForAgent(actor, req.params.reportId, req.body);
       return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.report-section.v1', replayed, section } };
+    }));
+  }
+
+  // The agent notebook: this agent's cells by analysis tab, and Markdown notes
+  // it places between them.
+  if (notebook) {
+    router.get('/projects/:projectId/notebook', route('metadata.read', async (req, actor) =>
+      notebook.readForAgent(actor, { tab: typeof req.query.tab === 'string' ? req.query.tab : undefined })));
+    router.post('/projects/:projectId/notebook/notes', route('report.write', async (req, actor) => {
+      const { note, replayed } = await notebook.addNoteForAgent(actor, req.body);
+      return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.notebook-note.v1', replayed, note } };
     }));
   }
 

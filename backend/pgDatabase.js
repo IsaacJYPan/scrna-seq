@@ -827,15 +827,33 @@ async function acquireStandaloneWorkerLock(options = {}) {
   });
 }
 
+// A database is disposable when its name marks it as one (scrna_test, ci_db,
+// ...), matching scripts/require-test-database.js, or when the caller opts in
+// explicitly for a throwaway database with another name.
+const TEST_DATABASE_NAME = /(?:^|[_-])(test|ci)(?:$|[_-])/i;
+
+function isDisposableTestDatabase(databaseName, env = process.env) {
+  return TEST_DATABASE_NAME.test(String(databaseName || '')) || env.TRACEOMICS_ALLOW_SCHEMA_RESET === '1';
+}
+
 // TEST-ONLY: drop the app tables so a contract run starts from a clean schema.
-// Guarded so it can never run against a production database.
+// Guarded so it can never run against a production or development database.
 async function resetSchemaForTests() {
   if (config.isProduction()) {
     throw new Error('resetSchemaForTests must not run in production.');
   }
+  const { rows: current } = await query('SELECT current_database() AS name');
+  const databaseName = current[0]?.name;
+  if (!isDisposableTestDatabase(databaseName)) {
+    throw new Error(
+      `resetSchemaForTests refuses to drop tables in "${databaseName}". `
+      + 'Point DATABASE_URL at a test database (for example scrna_test), '
+      + 'or set TRACEOMICS_ALLOW_SCHEMA_RESET=1 for a disposable one.',
+    );
+  }
   await query(`
     DROP TABLE IF EXISTS
-      agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
+      agent_notebook_notes, agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
       hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
@@ -1641,7 +1659,7 @@ async function deleteExpiredDemoGuest(userId) {
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
-      for (const table of ['agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
+      for (const table of ['agent_notebook_notes', 'agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
         await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
       }
       for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {
@@ -2478,7 +2496,36 @@ function rowToAnalysisObject(row) {
     objectHash: row.object_hash,
     metadata: JSON.parse(row.metadata_json || '{}'),
     createdByProvenanceId: row.created_by_provenance_id,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    // Present only on reads that join it (AI_AUTHORSHIP_SELECT).
+    ...(row.ai_authorship ? { aiAuthorship: aiAuthorshipFromRow(row.ai_authorship) } : {}),
+  };
+}
+
+// An object produced by an agent's own sandbox script is the output of
+// AI-written code. The flag travels with the object, with the run's current
+// review state, so every view can show that a person must (or did) review it.
+const AI_AUTHORSHIP_SELECT = `(
+  SELECT jsonb_build_object('sandboxRunId', sr.id, 'sandboxId', sr.sandbox_id, 'agentName', ap.display_name,
+           'reviewState', sr.review_state, 'reviewedAt', sr.reviewed_at, 'reason', sr.agent_reason,
+           'scriptSha256', sr.script_sha256)
+    FROM agent_sandbox_runs sr
+    JOIN jobs j ON j.id = sr.job_id
+    JOIN agent_principals ap ON ap.id = sr.agent_principal_id
+   WHERE j.result_analysis_object_id = ao.id
+   ORDER BY sr.created_at DESC LIMIT 1) AS ai_authorship`;
+
+function aiAuthorshipFromRow(value) {
+  const data = typeof value === 'string' ? JSON.parse(value) : value;
+  return {
+    kind: 'ai_written_code',
+    sandboxRunId: data.sandboxRunId,
+    sandboxId: data.sandboxId,
+    agentName: data.agentName,
+    reviewState: data.reviewState,
+    reviewedAt: data.reviewedAt || null,
+    reason: data.reason || null,
+    scriptSha256: data.scriptSha256,
   };
 }
 
@@ -2757,7 +2804,7 @@ async function listProjectAnalysisObjects(userId, projectId, filters = {}) {
     if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
   }
   const { rows } = await query(
-    `SELECT ao.* FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
+    `SELECT ao.*, ${AI_AUTHORSHIP_SELECT} FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
     params
   );
   return rows.map(rowToAnalysisObject);
@@ -2767,7 +2814,7 @@ async function getProjectAnalysisObject(userId, projectId, objectId) {
   const membership = await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
   if (typeof objectId !== 'string' || objectId === '') return null;
   const { rows } = await query(
-    `SELECT ao.* FROM analysis_objects ao
+    `SELECT ao.*, ${AI_AUTHORSHIP_SELECT} FROM analysis_objects ao
       WHERE ao.id = $1 AND ao.project_id = $2
         AND ${expertRAnalysisObjectVisibilitySql('ao', '$3')}`,
     [objectId, String(projectId), Number(membership.userId)]
@@ -7090,6 +7137,7 @@ async function getAgentRunTrustForJob(jobId) {
 }
 
 module.exports = {
+  isDisposableTestDatabase,
   getAgentRunTrustForJob,
   // lifecycle
   isConfigured,

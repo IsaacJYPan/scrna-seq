@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const storage = require('./storage');
-const { installFakeSlurm } = require('./_fakeSlurm');
+const { installFakeSlurm, FAKE_SLURM_SUPPORTED } = require('./_fakeSlurm');
 const { createJobWorker, createLanedJobWorker, slurmLaneCount } = require('./jobWorker');
 const { createSlurmExecutor, slurmConfig, wallTime } = require('./executors/slurm');
 const { silentLogger } = require('./_test-helpers');
@@ -64,7 +64,7 @@ function drain() {
     slurmExecutor: createSlurmExecutor({ db: dbmod }) }).runOnce();
 }
 
-describe.skipIf(!CONFIGURED)('Slurm target through the real worker', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('Slurm target through the real worker', () => {
   it('stages, submits, polls, collects a verified checkpoint, and records the result', async () => {
     const { proj, job } = await seedSlurmJob();
     expect(job.executionTarget).toBe('slurm');
@@ -130,7 +130,7 @@ describe.skipIf(!CONFIGURED)('Slurm target through the real worker', () => {
   });
 });
 
-describe.skipIf(!CONFIGURED)('Slurm executor', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('Slurm executor', () => {
   it('sends scancel when cancellation is requested while the job runs', async () => {
     process.env.FAKE_SLURM_MODE = 'hold';
     const { job } = await seedSlurmJob();
@@ -184,7 +184,7 @@ describe.skipIf(!CONFIGURED)('Slurm executor', () => {
   });
 });
 
-describe.skipIf(!CONFIGURED)('Slurm execution lane', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('Slurm execution lane', () => {
   it('a running local job does not block Slurm jobs, and lanes only claim their own target', async () => {
     const { alice, proj, input, job: slurmJob } = await seedSlurmJob();
     const localJob = await dbmod.createProjectJob(alice.id, proj.id, {

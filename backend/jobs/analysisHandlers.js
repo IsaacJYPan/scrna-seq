@@ -676,6 +676,14 @@ async function conditionComparisonHandler(ctx) {
     });
   } catch (error) {
     await discardUnrecordedProjectOutput(ctx, resultStorageKey, error);
+    if (error && error.rStatus === 400 && error.rCode === 'CONDITION_METADATA_ABSENT') {
+      const column = String(design.contrast.cellTypeColumn || 'cell type');
+      throw codedHandlerError(
+        'CONDITION_METADATA_ABSENT',
+        `Choose the saved version that contains the "${column}" column and the sample column; ` +
+          'this saved version does not have them. Labels added after it was saved are in the newer saved version.'
+      );
+    }
     throw error;
   }
   const result = descriptor.result || {};

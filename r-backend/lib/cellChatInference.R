@@ -695,6 +695,9 @@ cellchat_inference_bounded_pathway_rows <- function(net_arrays, pair_metadata, p
   }
 
   accumulator <- empty_cellchat_inference_raw_pathway_frame()
+  # The strongest source/target row of each pathway, so the preview can name
+  # distinct pathways instead of repeating the single strongest one.
+  leaders <- empty_cellchat_inference_raw_pathway_frame()
   candidate_count <- 0L
   source_ranks <- cellchat_inference_group_ranks(
     net_arrays$source_labels, display_by_internal
@@ -735,6 +738,10 @@ cellchat_inference_bounded_pathway_rows <- function(net_arrays, pair_metadata, p
       .pathway_rank = rep(as.integer(pathway_ranks[[pathway_index]]), nrow(coordinates)),
       stringsAsFactors = FALSE
     )
+    leaders <- rbind(leaders, cellchat_inference_keep_ranked_rows(
+      block, 1L,
+      function(value) cellchat_inference_pathway_rank_order(value, display_by_internal)
+    ))
     if (accumulator_is_ranked) {
       better <- cellchat_inference_rows_strictly_before(
         block,
@@ -757,7 +764,34 @@ cellchat_inference_bounded_pathway_rows <- function(net_arrays, pair_metadata, p
     }
   }
   rownames(accumulator) <- NULL
-  list(rows = accumulator, candidate_count = candidate_count)
+  if (nrow(leaders) > 0L) {
+    leaders <- cellchat_inference_keep_ranked_rows(
+      leaders, nrow(leaders),
+      function(value) cellchat_inference_pathway_rank_order(value, display_by_internal)
+    )
+    rownames(leaders) <- NULL
+  }
+  list(rows = accumulator, leaders = leaders, candidate_count = candidate_count)
+}
+
+# Preview rows: one row per distinct pathway (its strongest source/target pair)
+# first, then the strongest remaining rows when there are fewer pathways than
+# the preview limit.
+cellchat_inference_diverse_pathway_rows <- function(pathway_result, limit) {
+  leaders <- pathway_result$leaders
+  rows <- pathway_result$rows
+  if (!is.data.frame(leaders) || nrow(leaders) == 0L) {
+    return(rows[seq_len(min(nrow(rows), limit)), , drop = FALSE])
+  }
+  chosen <- leaders[seq_len(min(nrow(leaders), limit)), , drop = FALSE]
+  remaining <- limit - nrow(chosen)
+  if (remaining > 0L && nrow(rows) > 0L) {
+    key <- function(frame) paste(frame$.source_index, frame$.target_index, frame$.pathway_index)
+    extra <- rows[!(key(rows) %in% key(chosen)), , drop = FALSE]
+    chosen <- rbind(chosen, extra[seq_len(min(nrow(extra), remaining)), , drop = FALSE])
+  }
+  rownames(chosen) <- NULL
+  chosen
 }
 
 cellchat_inference_integer_count <- function(value) {
@@ -1015,7 +1049,8 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
       warnings_out <- c(warnings_out, "Pathway level summaries were unavailable for this CellChat result.")
     } else {
       pathway_table <- cellchat_inference_pathway_table(
-        pathway_result$rows, display_by_internal, p
+        cellchat_inference_diverse_pathway_rows(pathway_result, p$top_pathways),
+        display_by_internal, p
       )
       retained_pathway_count <- cellchat_inference_integer_count(
         pathway_result$candidate_count

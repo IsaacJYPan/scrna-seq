@@ -15,7 +15,30 @@ import { pathToFileURL } from 'node:url';
 import { defaultRequestId, readToken, sendRequest } from './traceomics.mjs';
 
 const SERVER_INFO = { name: 'traceomics', version: '1.0.0' };
+
+// Verified code first. Every script an agent writes needs a person to review
+// it, while reviewed workflows and library methods do not, so the server tells
+// agents to look for verified code before writing their own.
+export const MCP_INSTRUCTIONS = [
+  'TraceOmics delegated-agent tools. Start with get_context to see what you may do.',
+  'Prefer verified code. Call list_verified_code before any analysis: it lists every reviewed workflow and trusted library method, whether this project approved it, and reviewed multi-step chains.',
+  'Run verified code through a study: list_studies, create_plan, submit_run, get_run, get_run_results.',
+  'If a verified entry fits but is not approved or has no study, ask a person or use create_proposal rather than re-implementing it.',
+  'Write your own R only when nothing verified covers the step: list_sandboxes, run_r_script (with its reason), get_sandbox_run, read_sandbox_file. That code is flagged as AI-written; inputs are read-only and outputs stay drafts until a person reviews and promotes them. Keep scripts short and close to standard Seurat and Bioconductor calls so they are quick to review.',
+  'Everything you do is laid out for people as a notebook, filed under the analysis tab it serves (qc, normalize, pca, integrate, cluster, umap, deg, enrichment, cellchat, explore). Verified runs are placed automatically; give run_r_script the `tab` of the step it serves. Use add_notebook_note for a short Markdown note before or after a step (what you are about to do, what a result means); get_notebook reads back your cells. Notes and runs are append-only.',
+  "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise.",
+  'Ask a person (or create_proposal) for anything outside what you were given.',
+].join(' ');
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+// Analysis tabs of the agent notebook; must match shared/agentNotebookTabs.mjs
+// (checked by the tests). The CLI is standalone, so the list is repeated here.
+export const NOTEBOOK_TABS = ['qc', 'normalize', 'pca', 'integrate', 'cluster', 'umap', 'deg', 'enrichment', 'cellchat', 'explore'];
+const tabProp = { type: 'string', enum: NOTEBOOK_TABS, description: 'Analysis tab this belongs to in the notebook people read.' };
+function tabArg(a) {
+  if (!NOTEBOOK_TABS.includes(a.tab)) throw new ToolInputError(`tab must be one of: ${NOTEBOOK_TABS.join(', ')}.`);
+  return a.tab;
+}
 
 const ID = {
   project: /^[A-Za-z0-9_-]{1,80}$/,
@@ -90,6 +113,13 @@ export const TOOLS = [
       const q = [a.mine === true ? 'scope=mine' : '', optionalLimit(a)].filter(Boolean).join('&');
       return { method: 'GET', path: `${project(a)}/runs${q ? `?${q}` : ''}` };
     }
+  ),
+  tool(
+    'list_verified_code',
+    'List reviewed workflows, trusted methods, their approval status, and reviewed multi-step chains. Check this before writing R.',
+    projectProp,
+    ['projectId'],
+    a => ({ method: 'GET', path: `${project(a)}/verified-code` })
   ),
   tool(
     'list_workflows',
@@ -279,24 +309,26 @@ export const TOOLS = [
   ),
   tool(
     'run_r_script',
-    'Run your own R script once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
+    'Last resort: use only when list_verified_code has nothing that covers this step. Your script is flagged as AI-written code for a person to review. Give `reason`: which verified entries you checked and why none fits. Runs once in the sandbox: no network, a read-only copy of the input analysis as `obj` (a Seurat object). Save outputs with write_table(df, "name.csv"), save_figure(plot, "name.png"), or save_workspace(value, "name.rds"). Mark steps with "# ---- Step name ----" lines and keep error handling minimal: people read the steps. Outputs stay drafts until a person promotes them. Uses compute budget; repeating the same call returns the original run.',
     {
       ...projectProp,
       sandboxId: { type: 'string' },
       title: { type: 'string', description: 'What this run does, in a few words.' },
       script: { type: 'string', description: 'R source, at most 32 KiB.' },
+      reason: { type: 'string', description: 'Why verified code does not cover this, naming the list_verified_code entries you checked (20-1000 characters). Shown to the reviewer.' },
+      tab: tabProp,
       inputAnalysisObjectId: { type: 'string', description: 'One of the sandbox inputs; defaults to the first.' },
       requestId: { type: 'string' }
     },
-    ['projectId', 'sandboxId', 'title', 'script'],
+    ['projectId', 'sandboxId', 'title', 'script', 'reason', 'tab'],
     a => {
       const base = `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/runs`;
-      const body = { title: str(a, 'title'), script: str(a, 'script') };
+      const body = { title: str(a, 'title'), script: str(a, 'script'), reason: str(a, 'reason'), tab: tabArg(a) };
       if (a.inputAnalysisObjectId !== undefined)
         body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
       body.requestId =
         a.requestId === undefined
-          ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? ''])
+          ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? '', body.tab])
           : str(a, 'requestId');
       return { method: 'POST', path: base, body };
     },
@@ -346,6 +378,20 @@ export const TOOLS = [
     a => ({ method: 'POST', path: `${project(a)}/sandbox-runs/${str(a, 'runId', ID.sandboxRun)}/cancel`, body: {} }),
     { readOnly: false }
   ),
+
+  // The agent notebook: cells filed by analysis tab, read top to bottom.
+  tool('get_notebook', 'Your cells in the project notebook, oldest first: verified runs, your own scripts and your notes, each under its analysis tab. Pass `tab` for one tab only.',
+    { ...projectProp, tab: tabProp }, ['projectId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/notebook${a.tab === undefined ? '' : `?tab=${encodeURIComponent(tabArg(a))}`}` })),
+  tool('add_notebook_note', 'Add a short Markdown note to the notebook under an analysis tab, like a text cell: what the next step does and why, or what a result shows. Append-only; at most 8000 characters. Repeating the same call returns the original note.',
+    { ...projectProp, tab: tabProp, markdown: { type: 'string', description: 'Markdown, at most 8000 characters.' }, requestId: { type: 'string' } },
+    ['projectId', 'tab', 'markdown'],
+    (a) => {
+      const base = `${project(a)}/notebook/notes`;
+      const body = { tab: tabArg(a), markdown: str(a, 'markdown') };
+      body.requestId = a.requestId === undefined ? defaultRequestId([base, body.tab, body.markdown]) : str(a, 'requestId');
+      return { method: 'POST', path: base, body };
+    }, { readOnly: false }),
 
   // Reports: draft sections for people to review.
   tool(
@@ -499,8 +545,7 @@ export function createMcpServer({ env = process.env, fetchImpl = globalThis.fetc
           protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: SERVER_INFO,
-          instructions:
-            "TraceOmics delegated-agent tools. Start with get_context to see what you may do. Approved workflows: list_studies, create_plan, submit_run, get_run, get_run_results. Your own analysis code: list_sandboxes, run_r_script, get_sandbox_run, read_sandbox_file (inputs are read-only and outputs stay drafts until a person promotes them). Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise. Ask a person (or create_proposal) for anything outside what you were given."
+          instructions: MCP_INSTRUCTIONS
         }
       };
     } else if (method === 'ping') {

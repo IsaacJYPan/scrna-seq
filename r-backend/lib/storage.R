@@ -85,7 +85,10 @@ atomic_save_rds <- function(value, destination) {
   temp_path <- paste0(destination, ".partial-", Sys.getpid(), "-", sample.int(1000000000, 1))
   completed <- FALSE
   on.exit(if (!completed && file.exists(temp_path)) unlink(temp_path), add = TRUE)
-  saveRDS(value, file = temp_path)
+  # Fast gzip: default level 6 takes many minutes for a multi-gigabyte study
+  # and gains little. readRDS reads either level.
+  connection <- gzfile(temp_path, open = "wb", compression = 1L)
+  tryCatch(saveRDS(value, file = connection), finally = close(connection))
   if (!file.rename(temp_path, destination)) stop("Unable to finalize checkpoint file.")
   completed <- TRUE
 }

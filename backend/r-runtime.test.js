@@ -142,6 +142,16 @@ describe('owned R child environment isolation', () => {
     expect(STORAGE_PROBE_CONTENT).toBe('traceomics-shared-storage-v1\n');
   });
 
+  it('passes only a well-formed runtime identity to the owned R service', () => {
+    const options = { token: 'r-token', port: 8123, storageRoot: process.cwd(), analysisRoot: process.cwd() };
+    const digest = `sha256:${'a'.repeat(64)}`;
+    expect(buildRChildEnv({ TRACEOMICS_RUNTIME_IMAGE_DIGEST: digest, TRACEOMICS_RUNTIME_LOCAL_INSTALL: '1' }, options))
+      .toMatchObject({ TRACEOMICS_RUNTIME_IMAGE_DIGEST: digest, TRACEOMICS_RUNTIME_LOCAL_INSTALL: '1' });
+    const odd = buildRChildEnv({ TRACEOMICS_RUNTIME_IMAGE_DIGEST: 'latest; rm -rf', TRACEOMICS_RUNTIME_LOCAL_INSTALL: 'yes' }, options);
+    expect(odd).not.toHaveProperty('TRACEOMICS_RUNTIME_IMAGE_DIGEST');
+    expect(odd).not.toHaveProperty('TRACEOMICS_RUNTIME_LOCAL_INSTALL');
+  });
+
   it('passes the controlled Seurat delay only with non-production test diagnostics', () => {
     const options = {
       token: 'r-token', port: 8123, storageRoot: process.cwd(), analysisRoot: process.cwd(),
@@ -196,6 +206,15 @@ describe('owned R child environment isolation', () => {
       R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: '1073741824',
     });
     expect(JSON.stringify(child)).not.toContain('must-not-cross');
+    const sized = buildRChildEnv({}, { ...options, totalMemoryBytes: 32 * 1024 ** 3 });
+    expect(sized).toMatchObject({
+      R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: String(Math.floor(32 * 1024 ** 3 * 0.4)),
+      R_MAX_ACTIVE_SESSION_BYTES_PER_USER: String(16 * 1024 ** 3),
+      R_MAX_ACTIVE_SESSION_BYTES: String(Math.floor(32 * 1024 ** 3 * 0.6)),
+      R_MAX_PUBLIC_OBJECT_BYTES: String(Math.floor(32 * 1024 ** 3 * 0.4)),
+    });
+    const small = buildRChildEnv({}, { ...options, totalMemoryBytes: 2 * 1024 ** 3 });
+    expect(small.R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION).toBe(String(1024 ** 3));
     for (const value of ['0', '-1', '1.5', 'not-a-number', '9999999999999999']) {
       expect(() => buildRChildEnv({ R_MAX_ACTIVE_SESSIONS: value }, options))
         .toThrow(/positive safe integer/i);

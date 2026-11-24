@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./pgDatabase');
 const storage = require('./storage');
-const { installFakeSlurm } = require('./_fakeSlurm');
+const { installFakeSlurm, FAKE_SLURM_SUPPORTED } = require('./_fakeSlurm');
 const { createJobWorker } = require('./jobWorker');
 const { createSlurmExecutor } = require('./executors/slurm');
 const { qualifySlurmTarget, sandboxReadiness } = require('./executors/slurmQualification');
@@ -95,7 +95,7 @@ function drain() {
   return createJobWorker({ db, logger: silentLogger(), storageProvider: provider, slurmExecutor: createSlurmExecutor({ db }) }).runOnce();
 }
 
-describe.skipIf(!CONFIGURED)('Slurm qualification', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('Slurm qualification', () => {
   it('passes on a target that isolates the sandbox, and records the evidence', async () => {
     const result = await qualify();
     expect(result.checks.filter((c) => !c.passed)).toEqual([]);
@@ -134,7 +134,7 @@ describe.skipIf(!CONFIGURED)('Slurm qualification', () => {
   });
 });
 
-describe.skipIf(!CONFIGURED)('agent sandbox runs on Slurm', () => {
+describe.skipIf(!CONFIGURED || !FAKE_SLURM_SUPPORTED)('agent sandbox runs on Slurm', () => {
   it('runs the agent script on the cluster with the sandbox reservation and returns validated draft outputs', async () => {
     await qualify();
     const ctx = await setup();
@@ -142,7 +142,7 @@ describe.skipIf(!CONFIGURED)('agent sandbox runs on Slurm', () => {
     expect(created.status, JSON.stringify(created.data)).toBe(201);
     expect(created.data.sandbox).toMatchObject({ executionTarget: 'slurm', perRun: { cpus: 4, memoryMiB: 16384, maxWallSeconds: 7200 }, cpuSecondsPerRun: 28800 });
     const submitted = await ctx.agent(`/sandboxes/${created.data.sandbox.id}/runs`, {
-      method: 'POST', body: { requestId: 'req-hpc-00001', title: 'Clusters', script: '# ---- Count ----\nwrite_table(table(obj$seurat_clusters), "clusters.csv")\n' },
+      method: 'POST', body: { requestId: 'req-hpc-00001', title: 'Clusters', reason: 'No verified entry covers this step: checked seurat-markers and gene-figures.', tab: 'cluster', script: '# ---- Count ----\nwrite_table(table(obj$seurat_clusters), "clusters.csv")\n' },
     });
     expect(submitted.status, JSON.stringify(submitted.data)).toBe(201);
     const job = (await db.query('SELECT execution_target, parameters_json FROM jobs WHERE id = (SELECT job_id FROM agent_sandbox_runs WHERE id = $1)', [submitted.data.run.id])).rows[0];
@@ -171,7 +171,7 @@ describe.skipIf(!CONFIGURED)('agent sandbox runs on Slurm', () => {
     const ctx = await setup();
     const created = await ctx.createSandbox();
     const submitted = await ctx.agent(`/sandboxes/${created.data.sandbox.id}/runs`, {
-      method: 'POST', body: { requestId: 'req-hpc-00002', title: 'Broken', script: 'stop("nope")\n' },
+      method: 'POST', body: { requestId: 'req-hpc-00002', title: 'Broken', reason: 'No verified entry covers this step: checked seurat-markers and gene-figures.', tab: 'cluster', script: 'stop("nope")\n' },
     });
     await drain();
     const run = (await ctx.agent(`/sandbox-runs/${submitted.data.run.id}`)).data.run;
@@ -184,7 +184,7 @@ describe.skipIf(!CONFIGURED)('agent sandbox runs on Slurm', () => {
     const ctx = await setup();
     const created = await ctx.createSandbox();
     const submitted = await ctx.agent(`/sandboxes/${created.data.sandbox.id}/runs`, {
-      method: 'POST', body: { requestId: 'req-hpc-00003', title: 'Link', script: 'x <- 1\n' },
+      method: 'POST', body: { requestId: 'req-hpc-00003', title: 'Link', reason: 'No verified entry covers this step: checked seurat-markers and gene-figures.', tab: 'cluster', script: 'x <- 1\n' },
     });
     // Replace the stand-in so this run leaves a symlink in its outputs.
     fs.writeFileSync(process.env.SLURM_SANDBOX_EXEC, '#!/bin/bash\nln -s /etc/passwd "$4/output/passwd.txt"\n', { mode: 0o755 });

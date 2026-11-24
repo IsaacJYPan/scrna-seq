@@ -11,7 +11,7 @@ const { humanActorContext } = require('../actors/actorContext');
 const { READ_ROLES, MANAGE_ROLES } = require('../policy/agentCapabilities');
 const { listAutomationEvents } = require('./automationAudit');
 
-function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports }) {
+function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports, notebook }) {
   const router = express.Router({ mergeParams: true });
 
   const route = (handler, { status = 200 } = {}) => async (req, res) => {
@@ -74,7 +74,14 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
   router.get('/workflow-releases/:releaseId/steps', route(async (req, actor) => {
     await db.requireProjectRole(actor.userId, req.params.projectId, READ_ROLES);
     const releases = await approvals.ensureCatalog();
-    const release = releases.find((r) => r.id === req.params.releaseId);
+    let release = releases.find((r) => r.id === req.params.releaseId);
+    if (!release && /^rel_[0-9a-f]{24}$/.test(String(req.params.releaseId))) {
+      // A superseded release (older runs in the agent notebook): read the same
+      // source file, but only while its bytes still match what that release pinned.
+      const { rows } = await db.query('SELECT id, release_key, definition_json FROM workflow_releases WHERE id = $1', [req.params.releaseId]);
+      const current = rows[0] && releases.find((r) => r.key === rows[0].release_key);
+      if (rows[0] && current) release = { id: rows[0].id, readableSource: current.readableSource, definition: rows[0].definition_json };
+    }
     if (!release) throw Object.assign(new Error('Workflow release not found.'), { code: 'NOT_FOUND' });
     if (!release.readableSource) return { schema: 'traceomics.release-steps.v1', releaseId: release.id, source: null, steps: [] };
     const pinned = release.definition.handler.find((h) => h.path === release.readableSource);
@@ -97,6 +104,13 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
   })));
   router.post('/agent-runs/:runId/accept', route(
     (req, actor) => admission.acceptByHuman(actor, req.params.projectId, req.params.runId, req.body || {})));
+
+  // Everything agents did, as notebook cells filed by analysis tab.
+  if (notebook) {
+    router.get('/agent-notebook', route((req, actor) => notebook.readForHuman(actor, req.params.projectId, {
+      tab: typeof req.query.tab === 'string' ? req.query.tab : undefined,
+    })));
+  }
 
   // Agent sandboxes and their draft outputs (docs/spec.md phase 4).
   if (sandboxes) {

@@ -6,6 +6,7 @@ import { clearSubmissionRecovery, submitWithRecovery } from './executions/submis
 // Register private-R storage cleanup before any logout or account switch,
 // including when the console has not been opened in this renderer.
 import './executions/privateSubmissionRecovery';
+import { noteProjectJobStatus } from './projectJobEvents';
 
 // API base URL is configured via Vite env (VITE_API_BASE_URL).
 // When unset, fall back to same-origin relative requests (empty base),
@@ -427,6 +428,17 @@ async function getComputeRuntimeStatus() {
   };
 }
 
+// Report a job read from the backend so a running job that finishes can
+// refresh the project's saved versions (see projectJobEvents.js).
+function noteJob(projectId, job) {
+  noteProjectJobStatus(projectId, job);
+  return job;
+}
+
+async function postProjectJob(projectId, options) {
+  return noteJob(projectId, await req(`/api/projects/${projectId}/jobs`, options));
+}
+
 export const electronAPI = {
   // R Plumber Proxy
   apiRequest: async (endpoint, options = {}) => {
@@ -692,6 +704,11 @@ export const electronAPI = {
     }, { mutation: true });
   },
 
+  // Copies one granted server-folder file (chosen in ServerDataFilePicker) into
+  // the project as a pipeline input dataset.
+  addDatasetFromServerFolder: async (projectId, source, metadata = {}, fileType) =>
+    req(`/api/projects/${projectId}/datasets/from-server-folder`, { method: 'POST', body: JSON.stringify({ source, fileType, metadata }) }),
+
   // Project-scoped analysis objects & jobs (project metadata/history; ids/owner/
   // project/status are server-controlled). R execution/state is unchanged here —
   // these are metadata APIs only.
@@ -779,36 +796,38 @@ export const electronAPI = {
     return req(`/api/projects/${projectId}/branch-comparison?${qs}`);
   },
   createProjectJob: async (projectId, payload) =>
-    req(`/api/projects/${projectId}/jobs`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+    postProjectJob(projectId, { method: 'POST', body: JSON.stringify(payload || {}) }),
   listProjectJobs: async (projectId, filters = {}) => {
     const qs = new URLSearchParams(
       Object.entries(filters).filter(([, v]) => v != null && v !== '')
     ).toString();
-    return req(`/api/projects/${projectId}/jobs${qs ? `?${qs}` : ''}`);
+    const jobs = await req(`/api/projects/${projectId}/jobs${qs ? `?${qs}` : ''}`);
+    if (Array.isArray(jobs)) jobs.forEach(job => noteProjectJobStatus(projectId, job));
+    return jobs;
   },
-  getProjectJob: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}`),
+  getProjectJob: async (projectId, jobId) => noteJob(projectId, await req(`/api/projects/${projectId}/jobs/${jobId}`)),
   getProjectJobLogs: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}/logs`),
   retryProjectJob: async (projectId, jobId) =>
-    req(`/api/projects/${projectId}/jobs/${jobId}/retry`, { method: 'POST', body: '{}' }),
+    noteJob(projectId, await req(`/api/projects/${projectId}/jobs/${jobId}/retry`, { method: 'POST', body: '{}' })),
   cancelProjectJob: async (projectId, jobId) =>
     req(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: 'POST' }),
   createDegFindMarkersJob: async (projectId, objectId, params = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildDegFindMarkersJobPayload(objectId, params)),
     }),
   createEnrichmentGseaJob: async (projectId, objectId, params = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildEnrichmentGseaJobPayload(objectId, params)),
     }),
   createCellChatInferenceJob: async (projectId, objectId, params = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildCellChatInferenceJobPayload(objectId, params)),
     }),
   createExploratoryAnalysisJob: async (projectId, objectId, params = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify({
         jobType: 'explore.summarize.v1',
@@ -817,7 +836,7 @@ export const electronAPI = {
       }),
     }),
   createCheckpointLoadJob: async (projectId, objectId) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify({
         jobType: 'checkpoint.load.v1',
@@ -826,27 +845,27 @@ export const electronAPI = {
       }),
     }),
   createCheckpointSaveJob: async (projectId, objectId) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildCheckpointSaveJobPayload(objectId)),
     }),
   createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {}, executionTarget } = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params, executionTarget })),
     }),
   createMultiSampleSeuratPipelineJob: async (projectId, { samples = [], analysisObjectId, params = {}, executionTarget } = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildMultiSampleSeuratPipelineJobPayload({ samples, analysisObjectId, params, executionTarget })),
     }),
   createSpatialSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildSpatialSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
     }),
   createCheckpointForkJob: async (projectId, analysisObjectId) =>
-    req(`/api/projects/${projectId}/jobs`, {
+    postProjectJob(projectId, {
       method: 'POST',
       body: JSON.stringify(buildCheckpointForkJobPayload(analysisObjectId)),
     }),
@@ -937,6 +956,7 @@ export const electronAPI = {
   createStudy: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/studies`, { method: 'POST', body: JSON.stringify(body) }),
   closeStudy: async (id, studyId) => req(`/api/projects/${encodeURIComponent(id)}/studies/${encodeURIComponent(studyId)}/close`, { method: 'POST', body: '{}' }),
   listAgentRuns: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs`),
+  getAgentNotebook: async (id, { tab } = {}) => req(`/api/projects/${encodeURIComponent(id)}/agent-notebook${tab ? `?tab=${encodeURIComponent(tab)}` : ''}`),
   acceptAgentRun: async (id, runId, expectedAcceptedRunId) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/accept`, { method: 'POST', body: JSON.stringify({ expectedAcceptedRunId }) }),
   listAgentSandboxes: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`),
   createAgentSandbox: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`, { method: 'POST', body: JSON.stringify(body) }),

@@ -289,6 +289,13 @@ export async function submitWithRecovery({ projectId, instanceId, kind = 'job', 
   return withExecutionTarget(async () => {
     if (!['job', 'workflow'].includes(kind) || !ID.test(projectId) || !UUID.test(requestId) || (kind === 'workflow' && !ID.test(instanceId))) throw failure(messages.invalid);
     await ensureSubmissionRecovery({ userId: expectedOwner, force: true });
+    // Reopening the app leaves runs that were already accepted unconfirmed until
+    // their receipts are read again. Read them now (a GET, never a resubmission)
+    // so an accepted run does not block the next one. Requests whose reply was
+    // lost, and missing receipts, still need the person's check in Runs & Results.
+    for (const item of snapshot.records.filter(entry => entry.projectId === projectId && !entry.confirmed && entry.state === 'accepted')) {
+      await checkSubmissionReceipt(item.requestId);
+    }
     const context = contextNow();
     const record = { kind, projectId, requestId, state: 'pending', createdAt: new Date().toISOString(), ...(instanceId ? { instanceId } : {}) };
     await ledgerLock(() => {

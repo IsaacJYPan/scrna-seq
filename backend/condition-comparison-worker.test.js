@@ -158,6 +158,35 @@ describe('condition pseudobulk worker contract', () => {
     expect(result.result).toMatchObject({ resultsArtifactId: 'art_results', summaryArtifactId: 'art_summary' });
   });
 
+  it('names the missing column when the saved version lacks the contrast metadata', async () => {
+    const design = {
+      analysisObjectId: 'ao_abc',
+      contrast: { id: 'contrast_a1b2', unitOfReplication: 'sample', paired: false, cellTypeColumn: 'cell_type', status: 'valid' },
+      samples: [],
+    };
+    const ctx = {
+      job: {
+        id: 'job_def', jobType: 'condition.pseudobulk_de.v1', ownerUserId: 7,
+        projectId: 'proj_abc', analysisObjectId: 'ao_abc', attempts: 1,
+        parameters: { contrastId: 'contrast_a1b2' },
+      },
+      workerId: 'worker_1', heartbeat: vi.fn(), log: vi.fn(), logger: {}, callR: vi.fn(),
+      deriveRObjectStateKey: (userId, objectId) => `user-${userId}-${objectId}`,
+      getOwnedAnalysisObject: vi.fn(async () => ({ id: 'ao_abc' })),
+      getConditionComparisonInputs: vi.fn(async () => design),
+      getHydrationCheckpoint: vi.fn(async () => ({ analysisObjectId: 'ao_abc', checkpointArtifactId: 'art_cp' })),
+      removeDurableObject: vi.fn(),
+      runRBridgeOperation: vi.fn(async (input) => {
+        if (input.operation === 'r.checkpoint.hydrate.v1') return { loaded: { loaded: true } };
+        throw Object.assign(new Error('R rejected the input'), { code: 'R_CONDITION_COMPARISON_FAILED', rStatus: 400, rCode: 'CONDITION_METADATA_ABSENT' });
+      }),
+    };
+    await expect(conditionComparisonHandler(ctx)).rejects.toMatchObject({
+      code: 'CONDITION_METADATA_ABSENT',
+      message: expect.stringMatching(/^Choose the saved version that contains the "cell_type" column/),
+    });
+  });
+
   it('rejects invalid parameters before any R contact', async () => {
     const ctx = {
       job: { analysisObjectId: 'ao_abc', parameters: { contrastId: 'bad' } },

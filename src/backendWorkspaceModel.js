@@ -127,6 +127,9 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
     assays: Array.isArray(summary.assays) ? summary.assays : [],
     reductions: Array.isArray(summary.reductions) ? summary.reductions : [],
     isBackendAnalysisObject: true,
+    // Set when an agent's own sandbox script produced this object; it carries
+    // the run's review state (see AiAuthorshipBadge).
+    aiAuthorship: object.aiAuthorship && typeof object.aiAuthorship === 'object' ? object.aiAuthorship : null,
     // Project metadata is durable and shared; it cannot establish whether this
     // browser user's private R key is currently attached. Only a live response
     // from the current session may mark the object attached.

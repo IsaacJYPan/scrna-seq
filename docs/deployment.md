@@ -747,6 +747,12 @@ host source fails instead of creating a directory. The base deployment remains
 unchanged when the overlay is omitted. Remove grants to revoke new source access;
 saved private snapshots remain retained under their existing artifact permissions.
 
+The same folders also feed pipelines: on **Pipelines**, *From a server folder*
+lists granted 10x `.h5` files (or Visium `.zip` bundles) and copies the chosen
+file into the project as an input dataset, like an upload but without the
+browser. The source file is copied, never moved or changed. Input datasets use
+the dataset upload limit rather than the import limit below.
+
 For a directly managed local web service, set `SERVER_DATA_IMPORT_ROOTS` to actual
 absolute directories on that host and restart it. Compose source paths are not
 needed outside containers. The browser and desktop client use the service currently

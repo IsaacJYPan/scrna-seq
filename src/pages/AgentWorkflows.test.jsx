@@ -33,6 +33,11 @@ describe('AgentWorkflows', () => {
   });
   afterEach(() => { delete window.electronAPI; vi.restoreAllMocks(); });
 
+  it('finishes loading under StrictMode, which mounts components twice in development', async () => {
+    render(<React.StrictMode><AgentWorkflows projectId="proj_1" role="owner" /></React.StrictMode>);
+    expect(await screen.findByRole('button', { name: /approve this exact release/i })).toBeInTheDocument();
+  });
+
   it('approves the exact reviewed digest', async () => {
     render(<AgentWorkflows projectId="proj_1" role="owner" />);
     fireEvent.click(await screen.findByRole('button', { name: /approve this exact release/i }));
@@ -74,8 +79,8 @@ describe('AgentWorkflows', () => {
     fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Markers' } });
     fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_2' } });
     expect(screen.queryByText('pbmc.h5')).not.toBeInTheDocument();
-    const source = screen.getByLabelText(/Builds on the accepted result of/);
-    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a study…', 'Sweep']);
+    const source = screen.getByLabelText(/^Builds on/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a result…', 'Sweep']);
     expect(screen.getByRole('button', { name: /create study/i })).toBeDisabled();
     fireEvent.change(source, { target: { value: 'study_1' } });
     fireEvent.click(screen.getByRole('button', { name: /create study/i }));
@@ -99,8 +104,8 @@ describe('AgentWorkflows', () => {
     render(<AgentWorkflows projectId="proj_1" role="analyst" />);
     fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Investigate' } });
     fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_w' } });
-    const source = screen.getByLabelText(/Builds on the accepted result of/);
-    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a study…', 'Single sweep', 'Donor sweep']);
+    const source = screen.getByLabelText(/^Builds on/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a result…', 'Single sweep', 'Donor sweep']);
     fireEvent.change(source, { target: { value: 'study_2' } });
     fireEvent.click(screen.getByRole('button', { name: /create study/i }));
     await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
@@ -119,6 +124,45 @@ describe('AgentWorkflows', () => {
     const options = [...metric.options].map((o) => o.value);
     expect(options).toContain('testedGeneCount');
     expect(options).not.toContain('significantResultCount');
+  });
+
+  it('lets a person build a study on their own saved pipeline result', async () => {
+    const markers = { ...release, id: 'rel_2', key: 'seurat-markers', title: 'Markers', jobType: 'deg.find_markers.v1',
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster'], requiresStage: 'cluster' }],
+      parameterSchema: {}, approval: { id: 'wfa_2' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, markers] }));
+    window.electronAPI.listStudies = vi.fn(async () => ({ studies: [], ownResults: [
+      { analysisObjectId: 'ao_own', name: 'Seurat pipeline result', datasetName: 'C144.h5', jobType: 'seurat.pipeline.v1', stopAfter: 'umap' },
+      { analysisObjectId: 'ao_pca', name: 'Stopped at PCA', jobType: 'seurat.pipeline.v1', stopAfter: 'pca' },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Markers' } });
+    fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_2' } });
+    const source = screen.getByLabelText(/^Builds on/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a result…', 'Seurat pipeline result · C144.h5']);
+    fireEvent.change(source, { target: { value: 'ao_own' } });
+    fireEvent.click(screen.getByRole('button', { name: /create study/i }));
+    await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({ sourceAnalysisObjectId: 'ao_own' })));
+    expect(window.electronAPI.createStudy.mock.calls[0][1].sourceStudyId).toBeUndefined();
+  });
+
+  it('searches releases and keeps the exact digest out of sight until asked', async () => {
+    const other = { ...release, id: 'rel_3', key: 'pathway-gsea', title: 'Pathway enrichment', jobType: 'enrichment.gsea.v1', digest: 'c'.repeat(64) };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: true, releases: [release, other] }));
+    render(<AgentWorkflows projectId="proj_1" role="owner" />);
+    expect(await screen.findByText('Pathway enrichment')).toBeInTheDocument();
+    // The digest sits behind the fingerprint control, not in the card text.
+    const exact = screen.getByRole('button', { name: 'Exact release of Seurat QC' });
+    expect(exact).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(exact);
+    expect(exact).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('a'.repeat(64))).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search releases' }), { target: { value: 'pathway' } });
+    expect(screen.queryByText('Seurat QC')).not.toBeInTheDocument();
+    expect(screen.getByText('Pathway enrichment')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search releases' }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Approved' }));
+    expect(screen.getByText('No release matches.')).toBeInTheDocument();
   });
 
   it('opens a candidate result in the workspace', async () => {

@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { codedError } = require('../codedError');
+const { localTarCommand } = require('../localTar');
 
 const ROOT = path.join(__dirname, '..', '..');
 const RUNNER_FILES = [
@@ -68,9 +69,9 @@ function slurmConfig(env = process.env) {
   return config;
 }
 
-function run(command, args, { input, timeoutMs = 120000 } = {}) {
+function run(command, args, { input, timeoutMs = 120000, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs);
@@ -381,13 +382,15 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
       if ((await fs.promises.stat(fetched)).size > MAX_ARCHIVE_BYTES) throw codedError('EXPERT_R_RESULT_INVALID', 'The cluster outputs exceed the sandbox limits.');
       const outputDir = path.join(local, 'output');
       await fs.promises.mkdir(outputDir);
-      await run('tar', ['-xzf', fetched, '-C', outputDir, '--no-same-owner', '--no-same-permissions'], { timeoutMs: 300000 });
+      const extract = localTarCommand('extract', fetched, outputDir, ['--no-same-owner', '--no-same-permissions']);
+      await run('tar', extract.args, { timeoutMs: 300000, cwd: extract.cwd });
       let outputs;
       try { outputs = await collectOutputs(outputDir); } catch (error) {
         throw codedError('EXPERT_R_RESULT_INVALID', `The cluster outputs were rejected: ${error.message}`);
       }
       const archive = path.join(local, 'expert-r-outputs.tar.gz');
-      await run('tar', ['-czf', archive, '-C', outputDir, '.'], { timeoutMs: 300000 });
+      const create = localTarCommand('create', archive, outputDir);
+      await run('tar', create.args, { timeoutMs: 300000, cwd: create.cwd });
       const stored = await provider.putFileFromPath(archive, outputStorageKey);
       const consoleTail = (await tail(runDir)).slice(-4000);
       await saveDispatch(jobId, { remoteDir: runDir, state: 'collected' });

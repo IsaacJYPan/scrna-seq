@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'node:stream';
-import { createMcpServer, serveStdio, TOOLS } from './traceomics-mcp.mjs';
+import { createMcpServer, serveStdio, TOOLS, MCP_INSTRUCTIONS, NOTEBOOK_TABS } from './traceomics-mcp.mjs';
+import { AGENT_NOTEBOOK_TAB_IDS } from '../shared/agentNotebookTabs.mjs';
 
 const TOKEN = `tro_agent_${'A'.repeat(43)}`;
 const ENV = { TRACEOMICS_AGENT_TOKEN: TOKEN, TRACEOMICS_URL: 'http://127.0.0.1:9' };
@@ -62,15 +63,37 @@ describe('traceomics MCP server', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('steers agents to verified code before their own R, and requires a reason for their own R', async () => {
+    const init = await createMcpServer({ env: ENV, fetchImpl: recordingFetch().fetchImpl })
+      .handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
+    expect(init.result.instructions).toBe(MCP_INSTRUCTIONS);
+    expect(MCP_INSTRUCTIONS).toMatch(/Prefer verified code. Call list_verified_code before any analysis/);
+    expect(MCP_INSTRUCTIONS.indexOf('list_verified_code')).toBeLessThan(MCP_INSTRUCTIONS.indexOf('run_r_script'));
+    expect(MCP_INSTRUCTIONS).toMatch(/flagged as AI-written/);
+
+    const rScript = TOOLS.find((t) => t.name === 'run_r_script');
+    expect(rScript.description).toMatch(/^Last resort/);
+    expect(rScript.inputSchema.required).toContain('reason');
+
+    const { calls, fetchImpl } = recordingFetch(200, { schema: 'x', entries: [] });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    await server.callTool('list_verified_code', { projectId: 'proj_1' });
+    expect(calls[0].url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/verified-code');
+    const missing = await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 't', script: 'print(1)' });
+    expect(missing.result.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
   it('runs an R script in a sandbox with a stable request id and returns figures as images', async () => {
     const { calls, fetchImpl } = recordingFetch(201, { schema: 'x', run: { id: 'sbr_1' } });
     const server = createMcpServer({ env: ENV, fetchImpl });
-    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)' };
+    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)',
+      reason: 'No verified entry plots per-donor marker dot plots; checked seurat-markers and gene-figures.', tab: 'deg' };
     await server.callTool('run_r_script', args);
     await server.callTool('run_r_script', args);
     expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/sbx_${'a'.repeat(24)}/runs`);
     const [a, b] = calls.map((c) => JSON.parse(c.init.body));
-    expect(a).toEqual({ title: 'Markers', script: 'print(1)', requestId: expect.any(String) });
+    expect(a).toEqual({ title: 'Markers', script: 'print(1)', reason: args.reason, tab: 'deg', requestId: expect.any(String) });
     expect(a.requestId).toBe(b.requestId);
     expect(TOOLS.find((t) => t.name === 'run_r_script').annotations.readOnlyHint).toBe(false);
 
@@ -83,6 +106,33 @@ describe('traceomics MCP server', () => {
       .result.content).toEqual([{ type: 'text', text: 'gene,p\n' }]);
     expect((await server.callTool('read_sandbox_file', { projectId: 'proj_1', runId: `sbr_${'b'.repeat(24)}`, file: '../x' }))
       .result.isError).toBe(true);
+  });
+
+  it('files agent work under analysis tabs and adds notebook notes', async () => {
+    expect(NOTEBOOK_TABS).toEqual([...AGENT_NOTEBOOK_TAB_IDS]);
+    expect(MCP_INSTRUCTIONS).toMatch(/add_notebook_note/);
+    expect(TOOLS.find((t) => t.name === 'run_r_script').inputSchema.required).toContain('tab');
+
+    const { calls, fetchImpl } = recordingFetch(201, { schema: 'x', note: { id: 'nbn_1' } });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const noTab = await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 't',
+      script: 'print(1)', reason: 'No verified entry covers per-donor dot plots here.', tab: 'markers' });
+    expect(noTab.result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+
+    const note = { projectId: 'proj_1', tab: 'cluster', markdown: 'Next: name clusters from the markers in the DEG step.' };
+    await server.callTool('add_notebook_note', note);
+    await server.callTool('add_notebook_note', note);
+    expect(calls[0].url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/notebook/notes');
+    const [a, b] = calls.map((c) => JSON.parse(c.init.body));
+    expect(a).toEqual({ tab: 'cluster', markdown: note.markdown, requestId: expect.any(String) });
+    expect(a.requestId).toBe(b.requestId);
+    expect((await server.callTool('add_notebook_note', { ...note, tab: 'nope' })).result.isError).toBe(true);
+
+    await server.callTool('get_notebook', { projectId: 'proj_1', tab: 'deg' });
+    expect(calls.at(-1).url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/notebook?tab=deg');
+    await server.callTool('get_notebook', { projectId: 'proj_1' });
+    expect(calls.at(-1).url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/notebook');
   });
 
   it('writes report sections with figures', async () => {

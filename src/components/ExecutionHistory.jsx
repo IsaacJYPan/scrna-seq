@@ -4,15 +4,16 @@ import { artifactImageUrl, getArtifactVersion, previewArtifactVersion } from '..
 import ExecutionTargetEvidence from './ExecutionTargetEvidence';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
+import ExactDetails from './ExactDetails';
 
 const kinds = { all: 'All executions', guided: 'Guided jobs', workflow: 'Recipe steps', 'expert-r': 'Expert R jobs', 'live-r': 'Live R changes', 'r-console':'Private R console', provenance: 'Imported provenance' };
 const date = value => value ? new Date(value).toLocaleString() : 'Not recorded';
 const precision = value => String(value || 'unavailable').replace(/-/g, ' ');
 function ArtifactRows({ items, onInspect }) {
   return <ul className="space-y-2">{items.map((item, index) => <li key={`${item.versionId || item.analysisObjectId || item.datasetId || 'input'}-${index}`} className="rounded border border-border p-2 text-xs space-y-1">
-    <div className="font-medium">{item.name} · {precision(item.precision)}</div>
-    <div className="break-all">{item.versionId || item.analysisObjectId || item.datasetId || 'Identity unavailable'}</div>
-    {item.sha256 && <div className="break-all font-mono">SHA-256 {item.sha256}</div>}
+    <div className="font-medium">{item.name} · {precision(item.precision)}
+      <ExactDetails className="ml-1" label={`Exact identity of ${item.name}`} items={[{ label: 'Saved version', value: item.versionId || item.analysisObjectId || item.datasetId }, { label: 'SHA-256', value: item.sha256 }]} /></div>
+    {!(item.versionId || item.analysisObjectId || item.datasetId) && <div className="text-textMuted">Identity unavailable</div>}
     <div className="text-textMuted">{item.basis}</div>
     {item.reference && item.inspectable !== false && <button type="button" className="btn btn-secondary text-xs" onClick={() => onInspect(item)}>Inspect {item.name}</button>}
   </li>)}</ul>;

@@ -4,6 +4,7 @@ import { SUBMISSION_RECOVERY_MESSAGES } from './executions/submissionRecoveryMes
 const DEFAULT_PUBLIC_ERROR = 'We could not complete this request. Please review the settings and try again.';
 
 const UNSAFE_ERROR_DETAIL = /(?:[A-Za-z]:[\\/]|(?:https?|file):\/\/|\/__private_vault__\/|\bvault\/|\bstorage_?(?:uri|key)\b|\b(?:claim_?token|state_?key)\b|\b(?:rscript|plumber|postgres|docker|compose|node_modules)\b|\b(?:traceback|stack trace|execution halted|internal server|exception)\b|\b(?:job|art|ao|proj|br|rev|aud|com)_[A-Za-z0-9_-]+\b|\buser-\d+:obj-)/i;
+const ACCOUNT_FORM_MESSAGE = /^(?:(?:New )?Password (?:must|cannot|is required)|Current password (?:is required|must)|Display name must|A valid email is required\.$|An account with this email already exists\.$)/;
 const EXPERT_R_OWNER_MESSAGES = new Set([
   'The R script exceeded the per-run output storage limit.',
   'The R script could not be parsed. Check its syntax and line endings.',
@@ -42,6 +43,8 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
   const message = unpackError(value).replace(/\s+/g, ' ').trim();
   if (!message || message.length > 240 || UNSAFE_ERROR_DETAIL.test(message)) return fallback;
   if (message === 'Invalid email or password.') return message;
+  // Account form validation tells the person which field to change.
+  if (ACCOUNT_FORM_MESSAGE.test(message)) return message;
 
   if (EXPERT_R_OWNER_MESSAGES.has(message)) return message;
   if (CELLCHAT_OWNER_MESSAGES.has(message)) return message;

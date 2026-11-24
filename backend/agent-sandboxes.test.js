@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const { localTarCommand } = require('./localTar');
 const config = require('./config');
 const db = require('./pgDatabase');
 const storage = require('./storage');
@@ -108,9 +109,11 @@ async function setup({ caps = CAPS, limits = { maxOutstandingRuns: 2 }, sandbox 
   return { sponsor, project, object, base, sandbox: created.data.sandbox, agent, delegation: delegation.data.delegation };
 }
 
+const REASON = 'No verified entry covers this step: checked seurat-markers and gene-figures.';
+
 function submit(ctx, requestId = 'req-sandbox-0001', extra = {}) {
   return ctx.agent(`/sandboxes/${ctx.sandbox.id}/runs`, {
-    method: 'POST', body: { requestId, title: 'Cluster and plot', script: SCRIPT, ...extra },
+    method: 'POST', body: { requestId, title: 'Cluster and plot', script: SCRIPT, reason: REASON, tab: 'cluster', ...extra },
   });
 }
 
@@ -121,7 +124,8 @@ async function completeSandboxJob(ctx, jobId, files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbx-'));
   for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
   const archive = path.join(dir, '..', `${path.basename(dir)}.tar.gz`);
-  execFileSync('tar', ['-czf', archive, '-C', dir, '.']);
+  const tar = localTarCommand('create', archive, dir);
+  execFileSync('tar', tar.args, { cwd: tar.cwd });
   const key = allocateExpertRBundleStorageKey(ctx.project.id, jobId);
   const stored = await provider.putFileFromPath(archive, key);
   const listed = Object.entries(files).map(([name, content]) => ({
@@ -168,8 +172,18 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     expect(listed.status).toBe(200);
     expect(listed.data.sandboxes[0]).toMatchObject({ id: ctx.sandbox.id, runtime: { network: 'none' } });
 
+    // Own R needs a reason naming the verified code that was checked.
+    const noReason = await submit(ctx, 'req-sandbox-0000', { reason: undefined });
+    expect(noReason.status).toBe(400);
+    expect(noReason.data.code).toBe('REASON_REQUIRED');
+    expect((await submit(ctx, 'req-sandbox-000a', { reason: 'too short' })).data.code).toBe('REASON_REQUIRED');
+    // ...and the analysis tab it serves, for the agent notebook.
+    expect((await submit(ctx, 'req-sandbox-000b', { tab: undefined })).data.code).toBe('TAB_REQUIRED');
+    expect((await submit(ctx, 'req-sandbox-000c', { tab: 'markers' })).data.code).toBe('TAB_REQUIRED');
+
     const first = await submit(ctx);
     expect(first.status, JSON.stringify(first.data)).toBe(201);
+    expect(first.data.run).toMatchObject({ authorship: 'ai_written', reason: REASON, tab: 'cluster' });
     expect(first.data.run).toMatchObject({ state: 'queued', runNumber: 1, inputAnalysisObjectId: ctx.object.id });
     expect(first.data.run.steps.map((s) => s.title)).toEqual(['Load', 'Cluster']);
     expect(first.data.run.steps[1].readable).toBe(
@@ -193,6 +207,14 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     expect(run.data.run).toMatchObject({ state: 'draft_ready', review: { state: 'draft' }, resultAnalysisObjectId: completion.resultObject.id });
     expect(run.data.run.files.map((f) => [f.name, f.kind])).toEqual([['clusters.csv', 'text'], ['umap.png', 'image']]);
 
+    // The result object itself carries the AI-written flag and its review state.
+    const flagged = await api(server, `${ctx.base}/analysis-objects/${completion.resultObject.id}`, { token: ctx.sponsor.token });
+    expect(flagged.data.aiAuthorship).toMatchObject({
+      kind: 'ai_written_code', sandboxRunId: first.data.run.id, reviewState: 'draft', reason: REASON,
+    });
+    const plain = await api(server, `${ctx.base}/analysis-objects/${ctx.object.id}`, { token: ctx.sponsor.token });
+    expect(plain.data.aiAuthorship).toBeUndefined();
+
     const table = await ctx.agent(`/sandbox-runs/${first.data.run.id}/files/clusters.csv`);
     expect(table.data).toMatchObject({ kind: 'text', text: 'cluster\n1\n2\n' });
     const image = await ctx.agent(`/sandbox-runs/${first.data.run.id}/files/umap.png`);
@@ -215,6 +237,8 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     });
     expect(review.status, JSON.stringify(review.data)).toBe(200);
     expect(review.data.run.review).toMatchObject({ state: 'promoted', branchId: expect.stringMatching(/^br_/) });
+    const projectObjects = await api(server, `${ctx.base}/analysis-objects`, { token: collaborator.token });
+    expect(projectObjects.data.find((o) => o.id === completion.resultObject.id).aiAuthorship).toMatchObject({ reviewState: 'promoted' });
     expect(await db.getProjectAnalysisObject(collaborator.user.id, ctx.project.id, completion.resultObject.id)).toBeTruthy();
     const again = await api(server, `${ctx.base}/agent-sandbox-runs/${first.data.run.id}/review`, {
       method: 'POST', token: ctx.sponsor.token, body: { decision: 'discarded' },
@@ -223,6 +247,22 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
 
     const audit = await db.query('SELECT action, actor_kind FROM automation_audit_events ORDER BY created_at, id');
     expect(audit.rows.map((r) => r.action)).toEqual(expect.arrayContaining(['sandbox.created', 'sandbox-run.admitted', 'sandbox-run.promoted']));
+  });
+
+  it('lists verified code for the agent before it writes its own', async () => {
+    const ctx = await setup();
+    const verified = await ctx.agent('/verified-code');
+    expect(verified.status, JSON.stringify(verified.data)).toBe(200);
+    expect(verified.data.schema).toBe('traceomics.automation.verified-code.v1');
+    expect(verified.data.guidance).toMatch(/Use verified code first/);
+    const keys = verified.data.entries.map((e) => e.key);
+    expect(keys).toEqual(expect.arrayContaining(['seurat-qc-cluster', 'seurat-markers', 'doublets-scdblfinder', 'pseudobulk-de']));
+    const doublets = verified.data.entries.find((e) => e.key === 'doublets-scdblfinder');
+    expect(doublets).toMatchObject({ kind: 'trusted-method', approvedForProject: false, upstream: { url: expect.stringMatching(/^https:/) } });
+    expect(doublets.parameters.find((p) => p.key === 'sample-column')).toMatchObject({ role: 'design' });
+    expect(verified.data.entries.find((e) => e.key === 'seurat-qc-cluster').kind).toBe('built-in-workflow');
+    expect(verified.data.workflows.length).toBeGreaterThan(0);
+    expect(JSON.stringify(verified.data)).not.toMatch(/handlerFiles|r-backend[\\/]/);
   });
 
   it('enforces capability, sandbox budgets, and input pinning', async () => {
@@ -281,7 +321,7 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
     const token = delegation.data.credential.token;
     return {
       submit: (requestId) => api(server, `/api/automation/v1/projects/${ctx.project.id}/sandboxes/${sandbox.data.sandbox.id}/runs`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: { requestId, title: requestId, script: SCRIPT },
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: { requestId, title: requestId, script: SCRIPT, reason: REASON, tab: 'cluster' },
       }),
     };
   }
@@ -295,6 +335,78 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
       ...options, headers: { Authorization: `Bearer ${token}` },
     });
   }
+});
+
+describe.skipIf(!CONFIGURED)('agent notebook', () => {
+  it('files agent scripts and notes under analysis tabs, oldest first, for people who may review them', async () => {
+    const ctx = await setup();
+    const note = (requestId, tab, markdown) => ctx.agent('/notebook/notes', { method: 'POST', body: { requestId, tab, markdown } });
+
+    const intro = await note('note-0000001', 'cluster', 'Next I re-cluster at resolution 0.5 to split the T cells.');
+    expect(intro.status, JSON.stringify(intro.data)).toBe(201);
+    expect(intro.data.note).toMatchObject({ kind: 'note', tab: 'cluster', authorship: 'ai_written',
+      agent: { displayName: 'Analyst agent' } });
+    expect((await note('note-0000001', 'cluster', 'Next I re-cluster at resolution 0.5 to split the T cells.')).data)
+      .toMatchObject({ replayed: true, note: { id: intro.data.note.id } });
+    expect((await note('note-0000001', 'cluster', 'Different text')).data.code).toBe('IDEMPOTENCY_CONFLICT');
+    expect((await note('note-0000002', 'nowhere', 'x')).data.code).toBe('TAB_REQUIRED');
+    expect((await note('note-0000003', 'deg', '')).status).toBe(400);
+    expect((await note('note-0000004', 'deg', 'x'.repeat(8001))).status).toBe(400);
+
+    const run = await submit(ctx);
+    expect(run.status, JSON.stringify(run.data)).toBe(201);
+    await completeSandboxJob(ctx, await jobIdOf(run.data.run.id), { 'clusters.csv': 'cluster\n1\n2\n', 'umap.png': PNG });
+    const outro = await note('note-0000005', 'deg', 'Cluster 3 looks like NK cells; markers next.');
+    expect(outro.status).toBe(201);
+
+    const book = await api(server, `${ctx.base}/agent-notebook`, { token: ctx.sponsor.token });
+    expect(book.status, JSON.stringify(book.data)).toBe(200);
+    expect(book.data.schema).toBe('traceomics.agent-notebook.v1');
+    expect(book.data.cells.map((c) => [c.kind, c.tab])).toEqual([['note', 'cluster'], ['agent_code', 'cluster'], ['note', 'deg']]);
+    expect(book.data.cells[1]).toMatchObject({
+      id: run.data.run.id, authorship: 'ai_written', tabAssigned: true, reason: REASON, state: 'draft_ready',
+      review: { state: 'draft' }, inputAnalysisObjectId: ctx.object.id, title: 'Cluster and plot',
+    });
+    expect(book.data.cells[1].steps.map((s) => s.title)).toEqual(['Load', 'Cluster']);
+    expect(book.data.cells[1].files.map((f) => f.name)).toEqual(['clusters.csv', 'umap.png']);
+    expect(book.data.tabs.find((t) => t.id === 'cluster')).toMatchObject({ label: 'Clustering & annotation', cellCount: 2 });
+    expect(book.data.hiddenSandboxRuns).toBe(0);
+
+    const onlyDeg = await api(server, `${ctx.base}/agent-notebook?tab=deg`, { token: ctx.sponsor.token });
+    expect(onlyDeg.data.cells.map((c) => c.id)).toEqual([outro.data.note.id]);
+    expect((await api(server, `${ctx.base}/agent-notebook?tab=bogus`, { token: ctx.sponsor.token })).status).toBe(400);
+
+    // The agent reads back its own cells.
+    const own = await ctx.agent('/notebook');
+    expect(own.status, JSON.stringify(own.data)).toBe(200);
+    expect(own.data.cells.map((c) => c.kind)).toEqual(['note', 'agent_code', 'note']);
+
+    // A viewer who may not review the sponsor's sandbox sees the notes, and a
+    // count of the runs held back, but not the scripts.
+    const viewer = await createUserWithToken({ email: 'viewer@example.com', displayName: 'Viewer' });
+    await db.addProjectMember(ctx.project.id, viewer.user.id, 'viewer');
+    const viewed = await api(server, `${ctx.base}/agent-notebook`, { token: viewer.token });
+    expect(viewed.status).toBe(200);
+    expect(viewed.data.cells.map((c) => c.kind)).toEqual(['note', 'note']);
+    expect(viewed.data.hiddenSandboxRuns).toBe(1);
+
+    const outsider = await createUserWithToken({ email: 'outsider@example.com', displayName: 'Outsider' });
+    expect((await api(server, `${ctx.base}/agent-notebook`, { token: outsider.token })).status).toBe(404);
+  });
+
+  it('keeps notebook notes append-only and needs report.write to add one', async () => {
+    const ctx = await setup({ caps: ['metadata.read', 'results.read', 'development.executeCandidate'] });
+    const denied = await ctx.agent('/notebook/notes', { method: 'POST', body: { requestId: 'note-0000001', tab: 'qc', markdown: 'x' } });
+    expect(denied.status).toBe(403);
+    await db.query(
+      `INSERT INTO agent_notebook_notes (id, project_id, delegation_id, agent_principal_id, sponsor_user_id, request_id,
+         request_sha256, analysis_tab, body_markdown)
+       SELECT 'nbn_' || repeat('a', 24), $1, d.id, d.agent_principal_id, $2, 'note-0000009', repeat('b', 64), 'qc', 'Kept'
+         FROM agent_delegations d WHERE d.id = $3`,
+      [ctx.project.id, ctx.sponsor.user.id, ctx.delegation.id]);
+    await expect(db.query("UPDATE agent_notebook_notes SET body_markdown = 'changed'")).rejects.toMatchObject({ code: '55000' });
+    await expect(db.query('DELETE FROM agent_notebook_notes')).rejects.toMatchObject({ code: '55000' });
+  });
 });
 
 describe.skipIf(!CONFIGURED)('agent reports', () => {

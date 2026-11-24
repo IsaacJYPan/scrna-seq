@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronRight, FileText, Settings, Sparkles } from 'lucide-react';
+import { AlertTriangle, ChevronRight, FileText, Sparkles } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import PageHeader from '../components/PageHeader';

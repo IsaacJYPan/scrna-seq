@@ -78,12 +78,13 @@ const DEFINITIONS = [
     selectableMetrics: PIPELINE_METRICS
   },
   {
-    // A follow-on step: it runs on the accepted clustering of a source study
+    // A follow-on step: it runs on a clustering a person chose, either the
+    // accepted result of a source study or their own saved pipeline result
     // (see studies.js), never on an arbitrary object, and reads it without
     // changing it. Its output is a marker table plus a bounded summary.
     key: 'seurat-markers',
     version: '1',
-    title: 'Cluster marker genes (on an accepted clustering)',
+    title: 'Cluster marker genes (on a saved clustering)',
     jobType: 'deg.find_markers.v1',
     handlerFiles: ['backend/degFindMarkers.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R'],
     inputs: [
@@ -117,6 +118,7 @@ const DEFINITIONS = [
       'r-backend/plumber.R',
       'r-backend/lib/enrichmentGsea.R'
     ],
+    readableSource: 'r-backend/lib/enrichmentGsea.R',
     inputs: [
       {
         name: 'clustering',
@@ -154,6 +156,7 @@ const DEFINITIONS = [
       'r-backend/plumber.R',
       'r-backend/lib/cellChatInference.R'
     ],
+    readableSource: 'r-backend/lib/cellChatInference.R',
     inputs: [
       {
         name: 'clustering',
@@ -279,6 +282,7 @@ DEFINITIONS.push(
     // What the study asks (contrast, populations, condition, target group) is
     // fixed by a person. Only the displayed gene panel may vary.
     key: 'study-workbench',
+    readableSource: 'r-backend/lib/conditionStudy.R',
     version: '1',
     title: 'Multi-condition biological investigation and figures',
     jobType: 'explore.summarize.v1',
@@ -335,6 +339,9 @@ function trustedMethodDefinitions() {
     title: method.title,
     jobType: trustedMethods.JOB_TYPE,
     handlerFiles: [...TRUSTED_METHOD_HANDLER_FILES, `trusted-methods/${method.entry}`],
+    // The method's own R is what people read as its reviewed code. Not part
+    // of the digest; the file itself is pinned through handlerFiles.
+    readableSource: `trusted-methods/${method.entry}`,
     inputs: [{ name: 'analysis', kind: 'analysis_object', fromReleases: method.accepts.map(sourceReleaseKey) }],
     outputs: [{ name: 'result', kind: 'analysis_object', objectType: method.outputs.analysis ? 'seurat' : 'generic' }],
     parameterSchema: trustedMethods.releaseParameterSchema(method),

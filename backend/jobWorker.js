@@ -37,6 +37,7 @@ const {
   codedHandlerError,
   R_COMPLETION_PUBLICATION_INDETERMINATE,
   isIndeterminateRExecutionFailure,
+  definiteRFailureFrom,
   SAFE_HANDLER_DOMAIN_MESSAGES,
 } = require('./jobs/jobErrors');
 const {
@@ -1179,7 +1180,7 @@ function createJobWorker(options = {}) {
         await require('./workflowTrust/manifest').verifyJobTrust(db,job,ctx.callR,slurmExecutor);
         outcome = await handler(ctx);
       } catch (handlerErr) {
-        let effectiveHandlerErr = handlerErr;
+        let effectiveHandlerErr = await settleReturnedRFailure(job, handlerErr);
         if (
           effectiveHandlerErr &&
           effectiveHandlerErr.code === R_COMPLETION_PUBLICATION_INDETERMINATE &&
@@ -1311,6 +1312,23 @@ function createJobWorker(options = {}) {
       return asClaimLoss(err, 'fail-unsupported', jobId, jobType, reaped);
     }
     return { status: 'unsupported', jobId, jobType, reaped };
+  }
+
+  // R answered with its own error (see rHandlerReturned in rWorkerBridge), so
+  // its synchronous handler is done. Without a completion receipt there is
+  // nothing the recovery grace could adopt later: fail now instead of holding
+  // the job for minutes. A present or unreadable receipt keeps the recovery path.
+  async function settleReturnedRFailure(job, error) {
+    if (!error || error.rSideEffectsPossible !== true || error.rHandlerReturned !== true) return error;
+    if (!COMPLETION_RECEIPT_JOB_TYPES.has(job.jobType) || typeof storageProvider.readCompletionReceipt !== 'function') {
+      return error;
+    }
+    try {
+      await storageProvider.readCompletionReceipt(storage.completionReceiptKey(job.projectId, job.id));
+      return error;
+    } catch (readError) {
+      return readError && readError.code === 'STORAGE_OBJECT_MISSING' ? definiteRFailureFrom(error) : error;
+    }
   }
 
   async function failHandlerError(jobId, jobType, claimToken, handlerErr, nowTs, reaped) {

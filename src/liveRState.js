@@ -27,6 +27,22 @@ export function pipelineProbeRetryDelay(attempt, jitter = 0) {
   return Math.min(5_000, 500 * (2 ** (safeAttempt - 1))) + safeJitter;
 }
 
+// QC thresholds a queued pipeline recorded on the analysis, or null.
+export function recordedQcThresholds(value) {
+  if (!value || typeof value !== 'object') return null;
+  const read = (key, min, max) => {
+    const n = Number(Array.isArray(value[key]) ? value[key][0] : value[key]);
+    return Number.isFinite(n) && n >= min && n <= max ? n : null;
+  };
+  const thresholds = {
+    mtCutoff: read('maxPercentMt', 0, 100),
+    minFeatures: read('minFeatures', 0, 1000000),
+    maxFeatures: read('maxFeatures', 1, 1000000),
+    minCounts: read('minCounts', 0, 10000000),
+  };
+  return Object.values(thresholds).every(v => v !== null) ? thresholds : null;
+}
+
 export function serverUnsavedLiveChanges(state) {
   if (state?.exists === false) return false;
   if (typeof state?.has_unsaved_changes === 'boolean') return state.has_unsaved_changes;

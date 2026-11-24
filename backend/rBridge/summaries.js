@@ -331,7 +331,7 @@ function sanitizeExplorationSummary(body) {
   const source = body && typeof body === 'object' ? body : {};
   const recipe = sanitizeRuntimeField(source.recipe, 64);
   const out = {
-    recipe: ['overview', 'feature_by_group', 'metadata_distribution'].includes(recipe)
+    recipe: ['overview', 'feature_by_group', 'metadata_distribution', 'group_composition'].includes(recipe)
       ? recipe
       : 'overview',
     panels: [],
@@ -346,7 +346,7 @@ function sanitizeExplorationSummary(body) {
   for (const panel of panels.slice(0, 24)) {
     if (!panel || typeof panel !== 'object') continue;
     const type = sanitizeRuntimeField(panel.type, 32);
-    if (!['histogram', 'bar', 'feature_group'].includes(type)) continue;
+    if (!['histogram', 'bar', 'feature_group', 'composition'].includes(type)) continue;
     const safe = {
       type,
       title: sanitizeRuntimeField(panel.title, 160) || 'Exploratory summary',
@@ -358,7 +358,7 @@ function sanitizeExplorationSummary(body) {
     for (const row of rows.slice(0, 512)) {
       if (!row || typeof row !== 'object') continue;
       const clean = {};
-      for (const key of ['label', 'feature', 'group']) {
+      for (const key of ['label', 'feature', 'group', 'condition']) {
         const value = sanitizeRuntimeField(row[key], 128);
         if (value) clean[key] = value;
       }
@@ -371,6 +371,7 @@ function sanitizeExplorationSummary(body) {
         'q25',
         'median',
         'q75',
+        'fraction',
       ]) {
         const value = sanitizeStatNumber(row[key]);
         if (value !== null) clean[key === 'pct_detected' ? 'pctDetected' : key] = value;

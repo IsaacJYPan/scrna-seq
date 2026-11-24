@@ -16,6 +16,7 @@ import {
   pipelineProbeAction,
   pipelineProbeRetryDelay,
   reconcileRestoredSession,
+  recordedQcThresholds,
   serverUnsavedLiveChanges,
 } from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
@@ -48,6 +49,7 @@ import {
   reconcileAnalysisObjectMetadata,
 } from './backendWorkspaceModel';
 import { APP_NAME } from './brand';
+import { onProjectJobSettled } from './projectJobEvents';
 
 const Workspace = React.lazy(() => import('./pages/Workspace'));
 const ResearchAnalyses = React.lazy(() => import('./pages/ResearchAnalyses'));
@@ -71,6 +73,8 @@ const ProjectHistory = React.lazy(() => import('./pages/ProjectHistory'));
 const BatchIntegration = React.lazy(() => import('./pages/BatchIntegration'));
 const Collaborators = React.lazy(() => import('./pages/Collaborators'));
 const AgentAccess = React.lazy(() => import('./pages/AgentAccess'));
+const AgentNotebookPage = React.lazy(() => import('./pages/AgentNotebookPage'));
+const AgentWorkDock = React.lazy(() => import('./components/AgentNotebook').then((m) => ({ default: m.AgentWorkDock })));
 const Inspect = React.lazy(() => import('./pages/Inspect'));
 const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
 const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
@@ -91,6 +95,7 @@ const TAB_TITLES = {
   account: 'Account security',
   analyses: 'Analyses',
   workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators', agents: 'Agent access',
+  'agent-notebook': 'Agent notebook',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
   'expert-r': 'R console',
@@ -174,6 +179,21 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   demoGuestTtlSeconds: null,
 });
 
+// Reopens a saved analysis version in the person's R session after the
+// server lost it (a restart). Resolves true once the load job completes.
+async function reopenSavedVersion(api, projectId, objectId, { intervalMs = 2500, maxPolls = 120 } = {}) {
+  try {
+    let job = await api.createProjectJob(projectId, { jobType: 'checkpoint.load.v1', analysisObjectId: objectId, parameters: {} });
+    for (let i = 0; i < maxPolls && ['queued', 'running'].includes(job?.status); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      job = await api.getProjectJob(projectId, job.id);
+    }
+    return job?.status === 'completed';
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
   const returnToWorkspace = useCallback(() => setActiveTab('workspace'), []);
@@ -239,6 +259,10 @@ export default function App() {
   });
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
   const [liveRecoveryNotice, setLiveRecoveryNotice] = useState('');
+  // When the analysis server restarts, the selected saved version is reopened
+  // once automatically instead of leaving the person at a "not loaded" gate.
+  const [liveReopening, setLiveReopening] = useState(false);
+  const liveReopenTriedRef = React.useRef(new Set());
   const [historyPersistenceNotice, setHistoryPersistenceNotice] = useState('');
   const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
   const checkpointSaveRequestRef = React.useRef(0);
@@ -474,6 +498,27 @@ export default function App() {
       return { objects: [], selectedObjectId: null, error: err };
     }
   }, [patchActiveWorkspace, user]);
+
+  // A finished job can add or change saved versions (a pipeline run, a save,
+  // a restore). Refresh the selected project's objects when one settles, so
+  // the version list is current without a page reload. Jobs settling together
+  // share one refresh.
+  const selectedProjectIdRef = React.useRef(currentWs.selectedProjectId);
+  selectedProjectIdRef.current = currentWs.selectedProjectId;
+  useEffect(() => {
+    let timer = null;
+    const unsubscribe = onProjectJobSettled(({ projectId }) => {
+      if (projectId !== selectedProjectIdRef.current) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (projectId === selectedProjectIdRef.current) refreshAnalysisObjects(projectId);
+      }, 250);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [refreshAnalysisObjects]);
 
   const refreshProjects = useCallback(async () => {
     if (!user?.email) return;
@@ -1251,8 +1296,29 @@ export default function App() {
         pipelineProbeAttemptsRef.current = 0;
         pipelineProbeAttachedRef.current = false;
         setUnsavedLiveChanges(false);
-        setLiveRecoveryNotice('Live analysis is unavailable. Restore a saved version to continue. Any unsaved changes from the previous R session are unavailable.');
         resetPipelineState();
+        const projectId = activeProjectIdForPipeline;
+        const api = window.electronAPI || {};
+        if (/^ao_/.test(objectId) && projectId && api.createProjectJob && api.getProjectJob && !liveReopenTriedRef.current.has(objectId)) {
+          liveReopenTriedRef.current.add(objectId);
+          setLiveReopening(true);
+          setLiveRecoveryNotice('The analysis server restarted. Reopening your saved version…');
+          reopenSavedVersion(api, projectId, objectId).then((ok) => {
+            setLiveReopening(false);
+            if (ok) {
+              setLiveRecoveryNotice('');
+              pipelineProbeKeyRef.current = null;
+              patchActiveWorkspace(ws => ({
+                objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
+              }));
+              setPipelineProbeRetry(value => value + 1);
+            } else {
+              setLiveRecoveryNotice('Live analysis is unavailable and the saved version could not be reopened automatically. Open it from Runs & Results to continue.');
+            }
+          });
+        } else if (!liveReopenTriedRef.current.has(objectId)) {
+          setLiveRecoveryNotice('Live analysis is unavailable. Open a saved version from Runs & Results to continue. Unsaved changes from the previous session are gone.');
+        }
         patchActiveWorkspace(ws => ({
           objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'not_attached' } : object),
         }));
@@ -1273,6 +1339,7 @@ export default function App() {
       setPipelineState(prev => ({
         ...prev,
         qc: Boolean(state.has_qc),
+        qcThresholds: recordedQcThresholds(state.qc_thresholds),
         normalize: Boolean(state.has_normalized),
         integrate: Boolean(state.has_integrated),
         pca: Boolean(state.has_pca),
@@ -1302,7 +1369,7 @@ export default function App() {
         pipelineProbeRetryTimeoutRef.current = null;
       }
     };
-  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace]);
+  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace, activeProjectIdForPipeline]);
 
 
 
@@ -1383,6 +1450,8 @@ export default function App() {
       theme,
       rSessionId,          // let components watch session changes directly
       sessionReady,        // gate: true only after R session restore completes
+      liveUnavailable: datasetInfo?.liveState === 'not_attached',
+      liveReopening,
       resetPipelineAfterSubset,
       // For per-object parameter persistence
       userEmail: user?.email ?? null,
@@ -1484,6 +1553,15 @@ export default function App() {
         <ErrorBoundary key="team" onReturn={returnToWorkspace}><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="agents" onReturn={returnToWorkspace}><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics" onReturn={returnToWorkspace}><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="agent-notebook" onReturn={returnToWorkspace}><TabContent id="agent-notebook" activeTab={activeTab}><AgentNotebookPage {...props} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        {/* Agent work filed under the open analysis tab, in a side panel. */}
+        {activeProjectIdForPipeline && deploymentPolicy.demoMode !== true && (
+          <React.Suspense fallback={null}>
+            <AgentWorkDock projectId={activeProjectIdForPipeline} activeTab={activeTab} theme={theme}
+              role={currentWs?.projects?.find((p) => p.id === activeProjectIdForPipeline)?.role || null}
+              onOpenNotebook={() => setActiveTab('agent-notebook')} onOpenTab={setActiveTab} />
+          </React.Suspense>
+        )}
       </div>
     );
   };
@@ -1528,8 +1606,9 @@ export default function App() {
         )}
         {liveRecoveryNotice && !['analyses', 'pipeline-manager'].includes(activeTab) && !activeTab.startsWith('workflow:') && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
+            {liveReopening && <Loader2 size={12} className="mr-1 inline animate-spin" aria-hidden="true" />}
             {liveRecoveryNotice}
-            <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
+            {!liveReopening && <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>}
           </div>
         )}
         {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
