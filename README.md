@@ -55,8 +55,9 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
 - [Shared pipelines](docs/pipelines.md), [custom workflow steps](docs/workflow-pipelines.md),
   and a private R console on installations with the isolated R runtime configured.
 
-Limitations: annotation is available through the trusted methods, not yet as a
-guided step in production; cross-condition CellChat is not supported. See
+Limitations: manual cluster annotation is a guided step on the marker page,
+but reference-based annotation (SingleR) runs only as a trusted method in the
+isolated sandbox; cross-condition CellChat is not supported. See
 [analysis workflows](docs/analysis-workflows.md) for supported methods and
 the [end-to-end walkthrough](docs/analysis-workflows.md#from-raw-counts-to-a-condition-comparison).
 
