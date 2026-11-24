@@ -30,6 +30,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 // (POST /object/deg-find-markers), server.js (isInternalOnlyRProxyPath).
 // ════════════════════════════════════════════════════════════════════════════
 
+const storage = require('./storage');
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const CONFIGURED = config.hasPostgresConnection();
@@ -733,12 +734,46 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker failure / cancel', 
   beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
 
-  it('an R failure (non-200) remains indeterminate and records NO DEG artifact', async () => {
+  it('an R-returned error with no completion receipt fails at once and records NO DEG artifact', async () => {
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
     const res = await drain(degCaller([], { status: 500, body: { error: 'boom' } }), T0);
-    expect(res.status).toBe('indeterminate');
+    expect(res.status).toBe('failed');
     expect((await degArtifacts(job.id)).all).toHaveLength(0);
+    const after = await getProjectJob(alice.id, proj.id, job.id);
+    expect(after.status).toBe('failed');
+    expect(JSON.stringify(after)).not.toContain('boom');
+  });
+
+  it('an R-returned error stays indeterminate while a completion receipt exists', async () => {
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
+    const calls = [];
+    const caller = degCaller(calls, { status: 500, body: { error: 'boom' } });
+    const dispatched = () => calls.some((call) => call.path === '/object/deg-find-markers');
+    const receiptKeys = [];
+    const localStorage = storage.createLocalStorageProvider();
+    const res = await drain(caller, T0, {
+      storageProvider: {
+        ...localStorage,
+        // The receipt appears only once R has run, as if R wrote it before failing.
+        readCompletionReceipt: async (key) => {
+          if (!dispatched()) throw Object.assign(new Error('missing'), { code: 'STORAGE_OBJECT_MISSING' });
+          receiptKeys.push(key);
+          return { signed_receipt: '{}', signature: 'x' };
+        },
+      },
+    });
+    expect(res.status).toBe('indeterminate');
+    expect(receiptKeys).toEqual([`projects/${proj.id}/artifacts/${job.id}/completion-receipt.json`]);
+    expect((await getProjectJob(alice.id, proj.id, job.id)).status).toBe('running');
+  });
+
+  it('a gateway 5xx without an R error body remains indeterminate', async () => {
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
+    const res = await drain(degCaller([], { status: 502, body: 'Bad gateway' }), T0);
+    expect(res.status).toBe('indeterminate');
     expect((await getProjectJob(alice.id, proj.id, job.id)).status).toBe('running');
   });
 

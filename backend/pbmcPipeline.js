@@ -18,7 +18,7 @@ const PBMC_PIPELINE_PARAM_SPEC = Object.freeze({
   umapComponents:     { type: 'enum',   values: [2, 3],           default: 2 },
   umapNeighbors:      { type: 'int',    min: 2,    max: 200,      default: 30 },
   umapMinDist:        { type: 'number', min: 0,    max: 1,        default: 0.3 },
-  seed:               { type: 'intOrNull', min: 0, max: 2147483647, default: null },
+  seed:               { type: 'int', min: 0, max: 2147483647, default: 42, nullMeansDefault: true },
 });
 
 const PBMC_PIPELINE_PARAM_NAMES = Object.freeze(Object.keys(PBMC_PIPELINE_PARAM_SPEC));

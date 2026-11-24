@@ -201,7 +201,7 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await openArtifactInspector(page);
     const region = page.getByRole('region', { name: 'Artifact versions', exact: true });
-    await region.getByRole('button', { name: /^Dataset/ }).click();
+    await region.getByRole('button', { name: /^Saved analysis/ }).click();
     // A checkpoint has no browser preview: since 10-20 it is shown metadata-only
     // and explicitly not described as read or checksum-verified in the browser.
     await region.getByText(/Only its saved metadata is shown; its contents have not been read or verified here\./).waitFor();

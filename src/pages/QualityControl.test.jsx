@@ -45,6 +45,15 @@ describe('QualityControl', () => {
     expect(await screen.findByText('Quality control')).toBeInTheDocument();
   });
 
+  it('starts from the thresholds the queued pipeline recorded on the analysis', async () => {
+    localStorage.clear();
+    const qcThresholds = { mtCutoff: 10, minFeatures: 200, maxFeatures: 6000, minCounts: 0 };
+    render(<QualityControl {...baseProps({ objectId: 'ao_recorded', pipelineState: { qc: true, qcThresholds } })} />);
+    await waitFor(() => expect(screen.getByLabelText('Max Features')).toHaveValue(6000));
+    expect(screen.getByLabelText('Max MT %')).toHaveValue(10);
+    expect(screen.getByText(/filtered at: mitochondrial RNA ≤ 10% · genes 200–6000/)).toBeInTheDocument();
+  });
+
   it('uses the reference QC thresholds only for the PBMC3k tutorial', async () => {
     render(<QualityControl {...baseProps({ objectId:'ao_reference', datasetInfo:{...datasetInfo,source:'pbmc3k_demo'} })} />);
     expect(await screen.findByLabelText('Max Features')).toHaveValue(2500);

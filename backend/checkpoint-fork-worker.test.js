@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const db = require('./pgDatabase');
 const { createJobWorker, checkpointForkHandler, DEFAULT_HANDLERS } = require('./jobWorker');
@@ -58,7 +59,7 @@ function caller(record, loadResponse = { status: 200, body: loadBody() }) {
   return async (request) => {
     record.push(request);
     if (request.path === '/object/pbmc-pipeline') {
-      return { status: 200, body: pipelineBody() };
+      return { status: 200, body: withEffectiveParameters(request, pipelineBody()) };
     }
     if (request.path === '/object/checkpoint-load') return loadResponse;
     return { status: 200, body: {} };
@@ -232,7 +233,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.fork.v1', () => {
     })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
   });
 
-  it('keeps an R checkpoint rejection indeterminate without durable fork records', async () => {
+  it('fails an R checkpoint rejection without durable fork records once R has answered and left no receipt', async () => {
     const { project, source } = await seedProject();
     const carol = await db.createUser('carol@example.com', 'password123', 'Carol');
     await db.addProjectMemberByEmail(project.id, carol.email, 'analyst', 'owner');
@@ -244,7 +245,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.fork.v1', () => {
 
     const result = await drain(caller([], { status: 500, body: { error: 'rejected' } }));
 
-    expect(result.status).toBe('indeterminate');
+    expect(result.status).toBe('failed');
     expect((await db.getProjectJob(carol.id, project.id, job.id)).resultAnalysisObjectId)
       .toBeFalsy();
     expect(await db.listProjectJobArtifacts(carol.id, project.id, job.id)).toHaveLength(0);

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const {
@@ -82,7 +83,7 @@ function pipelineBody() {
 }
 
 function recordingCaller(calls, body = pipelineBody()) {
-  return async (req) => { calls.push(req); return { status: 200, body }; };
+  return async (req) => { calls.push(req); return { status: 200, body: withEffectiveParameters(req, body) }; };
 }
 
 async function drain(callR) {
@@ -214,10 +215,10 @@ describe.skipIf(!CONFIGURED)('seurat.pipeline.v1 bridge and worker outputs', () 
     expect(JSON.stringify(publicArtifacts)).not.toContain('storageUri');
   });
 
-  it('ambiguous worker response creates no successful outputs and logs safe R diagnostics', async () => {
+  it('an R-returned error creates no successful outputs, fails at once, and logs safe R diagnostics', async () => {
     const { alice, proj, job } = await seedUploadedTenxH5Job({});
     const res = await drain(async () => ({ status: 500, body: { error: 'raw path /vault/x', code: 'missing_hdf5r' } }));
-    expect(res.status).toBe('indeterminate');
+    expect(res.status).toBe('failed');
     const failed = await getProjectJob(alice.id, proj.id, job.id);
     expect(failed.resultAnalysisObjectId).toBeFalsy();
     expect(JSON.stringify(failed.logs)).toContain('status=500');

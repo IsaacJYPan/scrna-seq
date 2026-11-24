@@ -557,16 +557,19 @@ function sanitizeIdSegment(value) {
 
 // Store an uploaded dataset under a server-owned project key. The client never
 // controls the key or final path.
-async function storeDatasetFile(file, projectId, datasetId) {
-  const safeName = (db.sanitizeDatasetFilename(file.originalname) || 'upload.bin')
+function datasetStorageKey(originalname, projectId, datasetId) {
+  const safeName = (db.sanitizeDatasetFilename(originalname) || 'upload.bin')
     .replace(/[^a-zA-Z0-9._-]/g, '_');
-  const key = storage.projectStorageFileKey(
-    sanitizeIdSegment(projectId),
-    'datasets',
-    sanitizeIdSegment(datasetId),
-    safeName
-  );
-  const stored = await durableStorage.putFileFromPath(file.path, key);
+  return storage.projectStorageFileKey(sanitizeIdSegment(projectId), 'datasets', sanitizeIdSegment(datasetId), safeName);
+}
+
+// Moves an uploaded temporary file into project storage. A server-folder
+// source passes an open handle instead: its bytes are copied, never moved.
+async function storeDatasetFile(file, projectId, datasetId) {
+  const key = datasetStorageKey(file.originalname, projectId, datasetId);
+  const stored = file.handle
+    ? await durableStorage.putFileFromHandle(file.handle, key, { maxBytes: file.maxBytes, expectedStat: file.expectedStat })
+    : await durableStorage.putFileFromPath(file.path, key);
   return {
     internalStorageKey: stored.key,
     sha256: stored.checksumSha256,
@@ -724,6 +727,9 @@ const passwordChangeRateLimiter = createRateLimiter();
 // while the first one was still consuming the single shared R process.
 const R_PROXY_ADMISSION_STATE = Symbol('rProxyAdmissionState');
 const R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS = new Set(['/health', '/session-id']);
+// Constant-size, read-only state reads that pages repeat on every navigation.
+// They count against their own budget, not the analysis request budget.
+const R_PROXY_STATE_POLL_GET_PATHS = new Set(['/health', '/session-id', '/pipeline-state']);
 
 function markRProxyAdmissionIndeterminate(req) {
   const state = req && req[R_PROXY_ADMISSION_STATE];
@@ -745,7 +751,26 @@ function markRProxyUpstreamError(req) {
   if (state) state.markProxyError();
 }
 
-function createRProxyAdmission() {
+// After a browser abort the proxy destroys the upstream request, so admission
+// can no longer observe R finishing and must keep the slot fenced. The v1 R
+// service is one Plumber process that evaluates handlers sequentially (no
+// promises/future), so a later direct /health reply proves every earlier
+// handler has returned. `drainProbe` uses that to release the fence early;
+// without a probe (or when it keeps failing) the fence lasts until the R
+// deadline exactly as before.
+const R_PROXY_DRAIN_PROBE_INTERVAL_MS = 1000;
+
+// True once the client connection has gone away. `req.destroyed` alone is not
+// enough: Node also marks a request destroyed after its body has been read,
+// which is the normal state of every proxied POST.
+function rProxyClientGone(req, res) {
+  return Boolean(req.aborted || req.socket?.destroyed || res.destroyed || res.writableEnded);
+}
+
+function createRProxyAdmission(options = {}) {
+  const drainProbe = typeof options.drainProbe === 'function' ? options.drainProbe : null;
+  const drainProbeIntervalMs = Number.isInteger(options.drainProbeIntervalMs) && options.drainProbeIntervalMs > 0
+    ? options.drainProbeIntervalMs : R_PROXY_DRAIN_PROBE_INTERVAL_MS;
   const hits = new Map();
   const activeByUser = new Map();
   let activeTotal = 0;
@@ -754,11 +779,14 @@ function createRProxyAdmission() {
     const userKey = String(req.user?.id || 'unknown');
     const now = Date.now();
     const windowMs = config.rProxyRateLimitWindowMs();
-    const maxRequests = config.rProxyRateLimitMax();
-    let entry = hits.get(userKey);
+    const statePoll = String(req.method || '').toUpperCase() === 'GET'
+      && R_PROXY_STATE_POLL_GET_PATHS.has(normalizeRProxyPath(req.path));
+    const maxRequests = statePoll ? config.rProxyStatePollRateLimitMax() : config.rProxyRateLimitMax();
+    const bucketKey = statePoll ? `${userKey}:state` : userKey;
+    let entry = hits.get(bucketKey);
     if (!entry || now >= entry.resetAt) {
       entry = { count: 0, resetAt: now + windowMs };
-      hits.set(userKey, entry);
+      hits.set(bucketKey, entry);
     }
     entry.count += 1;
     if (entry.count > maxRequests) {
@@ -774,6 +802,12 @@ function createRProxyAdmission() {
         && R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS.has(normalizeRProxyPath(req.path))) {
       return next();
     }
+
+    // The browser can abandon a request (a page re-render or navigation aborts
+    // it) while earlier asynchronous checks run. Its 'close' event has then
+    // already fired, so a slot taken now would never be released. Nothing has
+    // been sent to R, so there is nothing to wait for.
+    if (rProxyClientGone(req, res)) return undefined;
 
     const maxConcurrent = config.rProxyMaxConcurrent();
     const userActive = activeByUser.get(userKey) || 0;
@@ -803,6 +837,23 @@ function createRProxyAdmission() {
       if (remaining === 0) activeByUser.delete(userKey);
       else activeByUser.set(userKey, remaining);
     };
+    const startDrainProbe = () => {
+      // Only a single-process R service gives the sequential-handler guarantee.
+      if (!drainProbe || config.rProxyMaxConcurrent() !== 1) return;
+      const attempt = () => {
+        if (released) return;
+        Promise.resolve()
+          .then(() => drainProbe())
+          .then(() => { release(); }, () => {
+            if (released) return;
+            const retry = setTimeout(attempt, drainProbeIntervalMs);
+            if (typeof retry.unref === 'function') retry.unref();
+          });
+      };
+      // The first probe queues directly behind the aborted handler in R, so it
+      // answers as soon as that handler returns.
+      attempt();
+    };
     const scheduleConservativeRelease = () => {
       if (released || conservativeReleaseTimer) return;
       indeterminate = true;
@@ -810,6 +861,7 @@ function createRProxyAdmission() {
       if (typeof conservativeReleaseTimer.unref === 'function') {
         conservativeReleaseTimer.unref();
       }
+      startDrainProbe();
     };
     activeTotal += 1;
     activeByUser.set(userKey, userActive + 1);
@@ -1051,7 +1103,7 @@ function handleBoundedRProxyResponse(proxyRes, req, res) {
   });
 }
 
-const rProxyAdmission = createRProxyAdmission();
+const rProxyAdmission = createRProxyAdmission({ drainProbe: () => probeRHealth(config.rProxyTimeoutMs()) });
 
 // ── R proxy path-field validation allowlist ─────────────────────────────────
 // Single source of truth for which request fields validateRProxyPaths treats as
@@ -1100,6 +1152,12 @@ app.get('/readyz', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.status(result.httpStatus).json(result.body);
 });
+// Operational metrics for the private network: absent unless METRICS_TOKEN is
+// set, and only for callers presenting it (backend/observability/metrics.js).
+app.get('/metrics', require('./backend/observability/metrics').createMetricsHandler({
+  db,
+  storageRoot: () => storage.storageRoot(),
+}));
 
 // Public, non-secret UI policy. Keep this ahead of database initialization so
 // the login page can accurately hide registration during a database outage.
@@ -1640,6 +1698,9 @@ app.use('/api/organizations', requireAuth);
 // ordinary project parser so other project APIs retain their smaller limit.
 app.use('/api/projects/:projectId/analyses/:analysisId/documents', requireAuth,
   require('./backend/notebookDocuments').notebookDocumentRoutes({ database: db }));
+// Saved figures carry a bounded preview image; authenticate before accepting
+// the larger body. The ordinary parser below skips an already parsed body.
+app.use('/api/projects/:projectId/figures', requireAuth, express.json({ limit: '3mb' }));
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/projects/:projectId/analyses', researchAnalysisRoutes({ database: db }));
@@ -1669,6 +1730,9 @@ const agentServices = {
 agentServices.reports = require('./backend/agentReports/reports').createReportService({
   db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes,
 });
+agentServices.notebook = require('./backend/agentNotebook/notebook').createAgentNotebookService({
+  db, withTransaction: agentDelegations.withTransaction, admission: agentAdmission, sandboxes: agentServices.sandboxes,
+});
 app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
 app.use('/api/automation/v1', automationRoutes({
   ...agentServices,
@@ -1676,7 +1740,8 @@ app.use('/api/automation/v1', automationRoutes({
 }));
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
-app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));
+const serverDataImports = require('./backend/serverDataImports').createServerDataImportService(db, durableStorage);
+app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth, service: serverDataImports }));
 app.use('/api/execution-history', require('./backend/executionHistoryRoutes').executionHistoryRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/run-monitoring', require('./backend/runMonitoringRoutes').runMonitoringRoutes({ db, requireAuth,
   serviceOptions: require('./backend/runMonitoringResources').createRunResourceObservers() }));
@@ -2203,6 +2268,49 @@ app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, 
   } catch (e) {
     cleanupDatasetReqFile(req);
     sendDatasetError(res, e);
+  }
+});
+
+// Adds a pipeline input file from a server folder this person was granted
+// (SERVER_DATA_IMPORT_ROOTS), for files too large or too remote to upload from
+// the browser. The bytes are copied into project storage like an upload.
+app.post('/api/projects/:projectId/datasets/from-server-folder', requireDatasetWriterBeforeUpload, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const fileType = body.fileType;
+  const meta = coerceDatasetJsonField(body.metadata);
+  if (!meta.ok) return res.status(400).json({ error: 'metadata must be valid JSON.' });
+  let opened;
+  try {
+    opened = await serverDataImports.openForDataset(req.user.id, req.params.projectId, body.source);
+  } catch (error) {
+    const status = error?.status || 500;
+    return res.status(status).json({ error: status < 500 ? error.message : 'The server folder is unavailable.', ...(status < 500 && error.code ? { code: error.code } : {}) });
+  }
+  let dataset;
+  let stored = null;
+  try {
+    if (opened.sizeBytes > config.maxUploadBytes()) {
+      return res.status(413).json({ error: 'That file is larger than this server accepts for input files.' });
+    }
+    dataset = await db.createDatasetForProject(req.user.id, req.params.projectId, { fileType, originalFilename: opened.name, metadata: meta.value });
+    stored = await storeDatasetFile({ handle: opened.handle, expectedStat: opened.stat, maxBytes: config.maxUploadBytes(), originalname: opened.name }, req.params.projectId, dataset.id);
+    await opened.revalidate?.();
+    if (stored.fileSizeBytes !== opened.sizeBytes) throw Object.assign(new Error('changed'), { code: 'SERVER_IMPORT_SOURCE_CHANGED' });
+    dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
+    const validation = await validateStoredDataset(durableStorage, dataset);
+    if (validation.validationStatus !== 'pending') {
+      dataset = await db.setDatasetValidationResult(req.params.projectId, dataset.id, validation.validationStatus, validation.validationErrors);
+    }
+    return res.status(201).json(db.toPublicDataset(dataset));
+  } catch (error) {
+    if (stored?.internalStorageKey) { try { durableStorage.remove(stored.internalStorageKey); } catch { /* best effort */ } }
+    if (dataset) await db.markDatasetUploadFailed(req.params.projectId, dataset.id).catch(() => {});
+    if (error?.code === 'SERVER_IMPORT_SOURCE_CHANGED') return res.status(409).json({ error: 'The source file changed while it was copied. Refresh the folder and choose it again.' });
+    if (!dataset) return sendDatasetError(res, error);
+    console.error('[Datasets] Server folder copy failed:', error);
+    return res.status(500).json({ error: 'Dataset file storage failed.' });
+  } finally {
+    await opened.close();
   }
 });
 
@@ -3296,6 +3404,12 @@ rProxyTransport.on('error', handleRProxyTransportError);
 // Express removes the /api/r mount prefix. No pattern matcher is needed for
 // this single, authenticated upstream; admission owns the exact path policy.
 app.use('/api/r', (req, res) => {
+  // An abandoned incoming request never ends, so the forwarded request would
+  // never be completed and R would never answer it. Nothing reached R.
+  if (rProxyClientGone(req, res)) {
+    markRProxyAdmissionSettled(req);
+    return;
+  }
   rProxyTransport.web(req, res).catch((error) => handleRProxyTransportError(error, req, res));
 });
 

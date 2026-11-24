@@ -11,7 +11,7 @@ const { humanActorContext } = require('../actors/actorContext');
 const { READ_ROLES, MANAGE_ROLES } = require('../policy/agentCapabilities');
 const { listAutomationEvents } = require('./automationAudit');
 
-function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports }) {
+function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports, notebook }) {
   const router = express.Router({ mergeParams: true });
 
   const route = (handler, { status = 200 } = {}) => async (req, res) => {
@@ -74,13 +74,21 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
   router.get('/workflow-releases/:releaseId/steps', route(async (req, actor) => {
     await db.requireProjectRole(actor.userId, req.params.projectId, READ_ROLES);
     const releases = await approvals.ensureCatalog();
-    const release = releases.find((r) => r.id === req.params.releaseId);
+    let release = releases.find((r) => r.id === req.params.releaseId);
+    if (!release && /^rel_[0-9a-f]{24}$/.test(String(req.params.releaseId))) {
+      // A superseded release (older runs in the agent notebook): read the same
+      // source file, but only while its bytes still match what that release pinned.
+      const { rows } = await db.query('SELECT id, release_key, definition_json FROM workflow_releases WHERE id = $1', [req.params.releaseId]);
+      const current = rows[0] && releases.find((r) => r.key === rows[0].release_key);
+      if (rows[0] && current) release = { id: rows[0].id, readableSource: current.readableSource, definition: rows[0].definition_json };
+    }
     if (!release) throw Object.assign(new Error('Workflow release not found.'), { code: 'NOT_FOUND' });
     if (!release.readableSource) return { schema: 'traceomics.release-steps.v1', releaseId: release.id, source: null, steps: [] };
     const pinned = release.definition.handler.find((h) => h.path === release.readableSource);
     const bytes = require('fs').readFileSync(require('path').join(__dirname, '..', '..', release.readableSource));
     const sha = require('crypto').createHash('sha256').update(bytes).digest('hex');
-    if (!pinned || pinned.sha256 !== sha) throw Object.assign(new Error('The release source changed.'), { code: 'RELEASE_SOURCE_CHANGED', status: 409 });
+    if (!pinned || pinned.sha256 !== sha)
+      throw Object.assign(new Error('The release source changed.'), { code: 'RELEASE_SOURCE_CHANGED', status: 409 });
     const { readableSteps } = require('../../shared/readableR.mjs');
     return { schema: 'traceomics.release-steps.v1', releaseId: release.id, source: { path: release.readableSource, sha256: sha },
       steps: readableSteps(bytes.toString('utf8')) };
@@ -97,12 +105,25 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
   router.post('/agent-runs/:runId/accept', route(
     (req, actor) => admission.acceptByHuman(actor, req.params.projectId, req.params.runId, req.body || {})));
 
+  // Everything agents did, as notebook cells filed by analysis tab.
+  if (notebook) {
+    router.get('/agent-notebook', route((req, actor) => notebook.readForHuman(actor, req.params.projectId, {
+      tab: typeof req.query.tab === 'string' ? req.query.tab : undefined,
+    })));
+  }
+
   // Agent sandboxes and their draft outputs (docs/spec.md phase 4).
   if (sandboxes) {
     router.get('/agent-sandboxes', route((req, actor) => sandboxes.listForHuman(actor, req.params.projectId)));
     router.post('/agent-sandboxes', route((req, actor) => sandboxes.create(actor, req.params.projectId, req.body || {}), { status: 201 }));
-    router.get('/agent-sandboxes/:sandboxId', route((req, actor) => sandboxes.getForHuman(actor, req.params.projectId, req.params.sandboxId)));
-    router.post('/agent-sandboxes/:sandboxId/close', route((req, actor) => sandboxes.close(actor, req.params.projectId, req.params.sandboxId)));
+    router.get(
+      '/agent-sandboxes/:sandboxId',
+      route((req, actor) => sandboxes.getForHuman(actor, req.params.projectId, req.params.sandboxId))
+    );
+    router.post(
+      '/agent-sandboxes/:sandboxId/close',
+      route((req, actor) => sandboxes.close(actor, req.params.projectId, req.params.sandboxId))
+    );
     router.post('/agent-sandbox-runs/:runId/review', route(
       (req, actor) => sandboxes.reviewRun(actor, req.params.projectId, req.params.runId, req.body || {})));
     // Raw file from a run's output bundle, for the review screen.
@@ -146,7 +167,13 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
         res.end(exported.markdown);
       } catch (error) {
         const status = Number(error.status) || (error.code === 'NOT_FOUND' ? 404 : error.code === 'FORBIDDEN' ? 403 : 500);
-        res.status(status).json(status >= 500 ? { error: 'The report is unavailable.', code: 'INTERNAL' } : { error: error.message, code: error.code });
+        res
+          .status(status)
+          .json(
+            status >= 500
+              ? { error: 'The report is unavailable.', code: 'INTERNAL' }
+              : { error: error.message, code: error.code }
+          );
       }
     });
   }

@@ -274,6 +274,7 @@ export default function PipelineManager({
                 setActiveTab={setActiveTab}
                 datasetUploadsEnabled={deploymentPolicy.datasetUploadsEnabled !== false}
                 canWriteProject={canWriteProject}
+                userId={userId}
               />
             )}
 

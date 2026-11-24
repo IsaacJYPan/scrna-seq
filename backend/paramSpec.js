@@ -50,7 +50,10 @@ function validateParamsAgainstSpec(input, paramSpec, paramNames) {
   const defaultsApplied = [];
   for (const name of paramNames) {
     const spec = paramSpec[name];
-    if (!Object.prototype.hasOwnProperty.call(raw, name) || raw[name] === undefined) {
+    // nullMeansDefault: an explicit null asks for the default (for example, the
+    // fixed default seed), which is then recorded as the value that ran.
+    if (!Object.prototype.hasOwnProperty.call(raw, name) || raw[name] === undefined
+        || (raw[name] === null && spec.nullMeansDefault)) {
       params[name] = spec.default;
       defaultsApplied.push(name);
     } else {

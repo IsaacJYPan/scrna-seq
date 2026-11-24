@@ -200,3 +200,9 @@ it('aborts a native-disconnected listing and requires fresh metadata after recon
   act(() => notify(target)); await screen.findByRole('button', { name: 'Select server file results.csv' });
   expect(listServerDataImports).toHaveBeenCalledTimes(2);
 });
+
+it('lists server files under StrictMode, which mounts components twice in development', async () => {
+  render(<React.StrictMode><ServerDataFilePicker {...props()} /></React.StrictMode>);
+  expect(await screen.findByRole('button', { name: 'Select server file results.csv' })).toBeInTheDocument();
+  expect(screen.queryByText('Loading server folders…')).not.toBeInTheDocument();
+});

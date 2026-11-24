@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Loader2, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react';
+import { AlertTriangle, Loader2, Trash2, UserPlus, Users } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 import RefreshButton from '../components/RefreshButton';

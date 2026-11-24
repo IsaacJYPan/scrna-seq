@@ -12,25 +12,54 @@ const WRITE_ROLES = Object.freeze(['owner', 'admin', 'analyst']);
 const MANAGE_ROLES = Object.freeze(['owner', 'admin']);
 
 const CAPABILITIES = Object.freeze({
-  'metadata.read': { availability: 'delegable', sponsorRoles: READ_ROLES,
-    description: 'Read bounded project and dataset metadata.' },
-  'results.read': { availability: 'delegable', sponsorRoles: READ_ROLES,
-    description: 'Read bounded summaries of completed managed runs.' },
-  'results.inspect': { availability:'delegable',sponsorRoles:READ_ROLES,description:'Inspect bounded scientific diagnostics, result table pages and approved figure previews for own runs.' },
-  'proposal.create': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
-    description: 'Submit inert code or method proposals for human review.' },
+  'metadata.read': {
+    availability: 'delegable',
+    sponsorRoles: READ_ROLES,
+    description: 'Read bounded project and dataset metadata.'
+  },
+  'results.read': {
+    availability: 'delegable',
+    sponsorRoles: READ_ROLES,
+    description: 'Read bounded summaries of completed managed runs.'
+  },
+  'results.inspect': {
+    availability: 'delegable',
+    sponsorRoles: READ_ROLES,
+    description: 'Inspect bounded scientific diagnostics, result table pages and approved figure previews for own runs.'
+  },
+  'proposal.create': {
+    availability: 'delegable',
+    sponsorRoles: WRITE_ROLES,
+    description: 'Submit inert code or method proposals for human review.'
+  },
   // Planned agent capabilities. They exist in the catalog so that requests for
   // them fail with an explicit reason instead of an unknown-capability error.
-  'workflow.plan': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
-    description: "Plan runs of approved workflows inside the sponsor's open studies." },
-  'workflow.executeApproved': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
-    description: 'Submit planned runs of approved workflows, within study and compute budgets.' },
-  'run.cancelOwn': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
-    description: "Cancel this agent's own runs." },
-  'development.executeCandidate': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
-    description: "Run the agent's own R scripts in the sponsor's sandboxes: no network, read-only inputs, draft outputs." },
-  'report.write': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
-    description: 'Draft report sections and attach figures from sandbox runs, for people to review.' },
+  'workflow.plan': {
+    availability: 'delegable',
+    sponsorRoles: WRITE_ROLES,
+    description: "Plan runs of approved workflows inside the sponsor's open studies."
+  },
+  'workflow.executeApproved': {
+    availability: 'delegable',
+    sponsorRoles: WRITE_ROLES,
+    description: 'Submit planned runs of approved workflows, within study and compute budgets.'
+  },
+  'run.cancelOwn': {
+    availability: 'delegable',
+    sponsorRoles: WRITE_ROLES,
+    description: "Cancel this agent's own runs."
+  },
+  'development.executeCandidate': {
+    availability: 'delegable',
+    sponsorRoles: WRITE_ROLES,
+    description:
+      "Run the agent's own R scripts in the sponsor's sandboxes: no network, read-only inputs, draft outputs."
+  },
+  'report.write': {
+    availability: 'delegable',
+    sponsorRoles: WRITE_ROLES,
+    description: 'Draft report sections and attach figures from sandbox runs, for people to review.'
+  },
   'artifact.export': { availability: 'planned', phase: 5 },
   // Human-only governance. Agent credentials are rejected even when the sponsor
   // holds the corresponding project role.
@@ -41,7 +70,7 @@ const CAPABILITIES = Object.freeze({
   'delegation.manage': { availability: 'human-only' },
   'security.manage': { availability: 'never' },
   'target.manage': { availability: 'never' },
-  'budget.increase': { availability: 'never' },
+  'budget.increase': { availability: 'never' }
 });
 
 const DELEGATION_POLICY_SCHEMA = 'traceomics.delegation-policy.v1';

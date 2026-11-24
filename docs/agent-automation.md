@@ -77,11 +77,14 @@ choose the profile with that in mind.
 ## Approved workflow execution (phase 2)
 
 **Releases.** The only operations an agent can run are listed in
-`backend/workflowTrust/catalog.js`. A release digest covers its handler files
-(`backend/seuratPipeline.js`, `backend/jobs/pipelineHandlers.js`,
-`r-backend/plumber.R`), parameter schema, resources, inputs, and outputs. When
-any of those bytes change, the release gets a new id, the old one is marked
-superseded, and it must be approved again. The first release,
+`backend/workflowTrust/catalog.js`; [workflow-releases.md](workflow-releases.md)
+is generated from it and lists every release with its design parameters and
+selectable metrics. A release digest covers its handler files, parameter schema,
+resources, inputs, outputs and selectable metrics, plus the trust manifest: the
+hash of every production source file under `backend/`, `r-backend/`, `shared/`,
+`cli/` and `trusted-methods/methods/`, the lockfiles and Dockerfiles, and the
+pinned runtime image. When any of those bytes change, every release gets a new
+id, the old ones are marked superseded, and they must be approved again. The first release,
 `seurat-qc-cluster` v1, runs the existing `seurat.pipeline.v1` job on an
 uploaded 10x HDF5 dataset.
 
@@ -110,7 +113,8 @@ upstream provenance and declared deviations), and the shared executor files.
 Approval shows the upstream tutorial, citation and deviations.
 
 - **Inputs.** A method runs on the accepted result of a study whose release it
-  lists in `accepts` (for example `doublets-scdblfinder` → `subset-cells` →
+  lists in `accepts`, or on the person's own saved result of a built-in pipeline
+  it accepts (see *Follow-on studies*) (for example `doublets-scdblfinder` → `subset-cells` →
   `recluster-integrate` → `label-clusters`). Every link is a person's
   acceptance. `seurat-markers` also accepts any method that produces an
   analysis.
@@ -193,8 +197,12 @@ choices, the result's cells and clusters, and any summary field that differs
 between trials) so the candidates can be compared before one is accepted.
 
 **Selection rules.** A study may declare `selectionRule: { metric, goal }`
-(goal `max` or `min`) on a result summary field, for example
-`{ "metric": "nClusters", "goal": "max" }`. The rule is fixed with the study.
+(goal `max` or `min`), for example `{ "metric": "nClusters", "goal": "max" }`.
+The metric must be one the release declares in `selectableMetrics`, and its
+kind must be `descriptive` or `quality`. Inferential metrics, such as counts of
+significant genes or test statistics, are refused: ranking trials by them would
+reward trying analyses until one reaches significance. The rule is fixed with
+the study.
 `GET …/studies/:studyId` then reports `selection`: the finished trial the rule
 ranks first (earliest on ties), and the comparison table marks it *Best by
 rule*. It is a recommendation: nothing is accepted automatically. Agents
@@ -203,8 +211,8 @@ without `results.read` see the rule but not trial summaries or the pick.
 inspection.
 
 **Follow-on studies.** A study of a release whose input is an analysis object
-(today `seurat-markers`) is created with `sourceStudyId` instead of
-`datasetIds`. The source study must run the release the follow-on declares as
+(today `seurat-markers`) is created with `sourceStudyId` or
+`sourceAnalysisObjectId` instead of `datasetIds`. The source study must run the release the follow-on declares as
 its input (`seurat-qc-cluster`), must have an accepted result, and must have
 been created by the same person (runs execute as the study creator, who must
 own the result). The study pins that exact result object, the run it came from,
@@ -212,9 +220,18 @@ and the acceptance version; accepting a different result in the source study
 later does not change it. Agents plan follow-on trials as usual, passing the
 `datasetId` listed in the study's `inputs`. A follow-on run is
 `candidate_ready` once its job completed and recorded the declared summary
-artifact, and acceptance records that artifact. In the UI, choose the marker
-release under *New study* and pick the source study under *Builds on the
-accepted result of*. Follow-on studies run locally only.
+artifact, and acceptance records that artifact.
+
+**Building on your own result.** With `sourceAnalysisObjectId` a study runs on
+a result you saved from a built-in pipeline you ran yourself (Seurat, multi-
+sample or spatial), with no agent study first. It must be yours, from a
+completed run of a pipeline the release accepts, past clustering when the
+release needs clusters, and its dataset must have a recorded checksum. The
+study pins that object, the job that produced it and the dataset version.
+
+In the UI, choose the release under *New study* and pick the source under
+*Builds on*: your saved results and accepted study results are listed
+separately. Follow-on studies run locally only.
 
 **What is and is not enforced.** Budgets are enforced at admission. The local
 worker runs one job at a time, and physical CPU and memory limits come from the
@@ -280,6 +297,30 @@ Slurm; agent sandbox runs can also use it once the target is qualified (see
 Slurm and container configuration for isolation. Remote commands are built from
 validated tokens and single-quoted; no caller text reaches the remote shell.
 
+## Verified code first
+
+Agents are steered to reviewed code before they write their own:
+
+- `GET …/projects/:projectId/verified-code` (`metadata.read`, MCP
+  `list_verified_code`) lists every built-in workflow release and trusted
+  library method, whether this project approved it, its upstream source,
+  declared deviations and parameter roles, and the reviewed multi-step chains in
+  `trusted-methods/workflows.json`. It returns no handler files or paths.
+- The MCP server's instructions tell agents to call `list_verified_code`
+  first, run what fits through a study, ask a person or `create_proposal` when
+  an entry fits but is not approved, and write their own R only as a last
+  resort. `run_r_script` is described as the last resort.
+- An agent's own script must carry a `reason` (20-1000 characters) naming
+  the verified entries it checked and why none fits; without it the run is
+  refused with `REASON_REQUIRED`. The reviewer sees the reason on the run.
+- Everything an agent's own script produces is flagged as AI-written code.
+  Sandbox runs report `authorship: "ai_written"`. The result analysis object
+  carries `aiAuthorship` (agent, sandbox run, reason, script digest and the
+  run's current review state) on every project object read, and the app shows
+  an "AI-written code · Needs review" badge on the run, in the saved-version
+  list, and in the status bar of every analysis page while that result is
+  open. The badge stays after promotion, reading "Reviewed and promoted".
+
 ## Isolated development (phase 4)
 
 An agent with `development.executeCandidate` can write and run its own R
@@ -293,7 +334,7 @@ active runs, and a CPU-second budget. Content is immutable; a sandbox can only
 be closed. An agent sees only open sandboxes its sponsor created.
 
 **Runs.** `POST …/sandboxes/:sandboxId/runs` with `{ requestId, title, script,
-inputAnalysisObjectId? }` runs the script once as an ordinary Expert R job owned
+reason, tab, inputAnalysisObjectId? }` runs the script once as an ordinary Expert R job owned
 by the sponsor. In the local target that is the ephemeral Expert R container:
 no network, a read-only copy of the pinned checkpoint available as `obj`, no
 project storage mount, 2 CPUs, 8 GiB, 15 minutes, and at most 50 output files
@@ -387,6 +428,88 @@ compute targets list (`GET …/compute-targets`, `traceomics targets list`) show
 configuration, not a proof of isolation: kernel and scheduler vulnerabilities,
 shared filesystems outside the run directory, and site policy still matter.
 
+### Remote folders on the cluster
+
+A person creating a cluster sandbox can pin up to five named folders on the
+cluster, for example `raw = /scratch/lab/pbmc_runs`. The agent can then work
+with the data that lives there without ever holding an SSH key or a shell:
+
+- `GET …/sandboxes/:id/remote/:root?path=` lists a folder (names, types, sizes;
+  at most 500 entries) and `GET …/sandboxes/:id/remote/:root/file?path=&offset=`
+  reads a file: text in pages of 256 KiB, PNG/SVG images up to 2 MiB, binary
+  files as metadata only.
+- `run_r_script` takes `remoteInputs: [{ root, path }]` (at most five). The
+  worker copies each file on the cluster into the run's read-only
+  `work/input/files/`, records its size and SHA-256 in
+  `agent_sandbox_remote_inputs`, and the script reads it with
+  `input_path("raw/filtered/matrix.h5")` or `read_input(...)`.
+
+Enforcement is on the server, below the MCP and CLI: paths are relative, use a
+fixed character set and contain no `.`/`..` parts; every path is resolved with
+`realpath -e` on the cluster and accepted only inside the folder's real path,
+so symbolic links cannot lead out; only `realpath`, `stat`, `find`, `dd`, `cp`,
+`chmod` and `sha256sum` are run, with every argument quoted; after a copy the
+source must still resolve to the same file. Agents see folder names, not their
+cluster paths. Each listing and read is an `automation_audit_events` row
+(`sandbox.remote-listed`, `sandbox.remote-read`), and a refused escape is
+recorded as `denied` with `REMOTE_PATH_OUTSIDE_ROOT`. The folders are fixed
+when the sandbox is created; close it and make another to change them. The
+MCP server also refuses absolute paths and `..` before sending anything.
+
+The boundary is TraceOmics' SSH account on the login node: it must be able to
+read the pinned folders, and anything that account can read inside them can be
+shown to the agent. Someone with write access to a pinned folder could swap a
+path component for a link between the check and the copy; the post-copy check
+narrows but does not close that window, so pin folders only that people you
+trust can write.
+
+### Review flags for custom code
+
+Every sandbox run shows its reviewer a list of lines to check before promoting
+(`reviewFlags` on the run, from `shared/scriptReviewFlags.mjs`): shell, native
+or dynamically built code; network or package-install attempts (which the
+sandbox blocks anyway); file deletion; writes outside the output helpers; and
+scientific changes that alter later results: removing cells or features,
+overwriting metadata or identities, and random steps before any `set.seed()`.
+Flags are guidance for the person, not a security control: isolation comes from
+the sandbox, and nothing is accepted until a person promotes it.
+
+## Agent notebook
+
+Everything agents do in a project reads top to bottom like a notebook, filed
+under the analysis tab each step serves. The tabs are fixed
+(`shared/agentNotebookTabs.mjs`): `qc`, `normalize`, `pca`, `integrate`,
+`cluster`, `umap`, `deg`, `enrichment`, `cellchat`, `explore`.
+
+- **Verified cells** are runs of reviewed code through a study. They are
+  placed automatically: built-in workflows by job type (markers and pseudobulk
+  DE under `deg`, GSEA under `enrichment`, and so on), trusted library methods
+  by catalog category (`qc`, `integration` → `integrate`, `annotation` →
+  `cluster`, `differential` → `deg`, the rest → `explore`). A cell shows the
+  release and version, the study's objective, the agent's parameter choices,
+  the saved version read and produced, and the reviewed R on request
+  (`GET …/workflow-releases/:releaseId/steps`). Library methods show their own
+  R file. A run whose release was later superseded still shows its R while the
+  file's bytes match what that release pinned; otherwise the endpoint answers
+  `409 RELEASE_SOURCE_CHANGED`.
+- **AI-written cells** are sandbox runs. `run_r_script` requires a `tab`
+  (`400 TAB_REQUIRED` otherwise); runs from before tabs were required are filed
+  under `explore`. A cell shows the agent's reason, the script as numbered
+  readable steps with each output under the step that wrote it, and the review
+  state. A person sees the runs of sandboxes they may review (their own, or
+  all for owners and admins); others are only counted.
+- **Notes** are short Markdown cells an agent places between steps
+  (`POST …/notebook/notes` with `{ requestId, tab, markdown }`, `report.write`,
+  at most 8000 characters and 500 per delegation). They are idempotent by
+  `requestId` and append-only in the database.
+
+Cells are records: agents only append, and nothing edits or reorders a cell
+once written. People read the notebook at `GET /api/projects/:projectId/agent-notebook`
+(`?tab=` for one tab) on the **Agent notebook** page, and each analysis tab
+shows its own cells in an **Agent work in this step** side panel. An agent
+reads back its own cells with `GET …/projects/:projectId/notebook`
+(`metadata.read`).
+
 ## Agent reports (phase 5)
 
 An agent with `report.write` can draft a report (for example a paper) section by
@@ -445,6 +568,9 @@ Errors use `{ error, code, retry, correlationId }`; `retry` is `never`,
 | Completed project runs, or `?scope=mine` for this agent's runs | `GET /api/automation/v1/projects/:projectId/runs` | `results.read` |
 | Submit a proposal | `POST /api/automation/v1/projects/:projectId/proposals` | `proposal.create` |
 | This agent's proposals | `GET /api/automation/v1/projects/:projectId/proposals[/:proposalId]` | `proposal.create` |
+| Verified code: every reviewed release and library method, approved here or not | `GET …/projects/:projectId/verified-code` | `metadata.read` |
+| This agent's notebook cells, by analysis tab | `GET …/projects/:projectId/notebook` | `metadata.read` |
+| Add a notebook note | `POST …/projects/:projectId/notebook/notes` | `report.write` |
 | Approved releases | `GET …/projects/:projectId/workflows` | `workflow.plan` |
 | Sponsor's open studies, with full trial history | `GET …/projects/:projectId/studies[/:studyId]` | `workflow.plan` |
 | Create or read a plan | `POST …/plans`, `GET …/plans/:planId` | `workflow.plan` |
@@ -464,7 +590,7 @@ Human routes (session only) under `/api/projects/:projectId`:
 `agent-sandboxes`, `agent-sandboxes/:id`, `agent-sandboxes/:id/close`,
 `agent-sandbox-runs/:runId/review`, `agent-sandbox-runs/:runId/files/<name>`,
 `agent-reports`, `agent-reports/:id`, `agent-reports/:id/reviews`,
-`agent-reports/:id/finalize`, and `agent-reports/:id/export`.
+`agent-reports/:id/finalize`, `agent-reports/:id/export`, and `agent-notebook`.
 
 A proposal request is:
 
@@ -534,13 +660,24 @@ from `TRACEOMICS_AGENT_TOKEN` or `TRACEOMICS_AGENT_TOKEN_FILE`; tools never take
 a credential argument.
 
 Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
-`list_workflows`, `list_targets`, `list_studies`, `get_study`, `create_plan`,
+`list_verified_code`, `list_workflows`, `list_targets`, `list_studies`, `get_study`, `create_plan`,
 `get_plan`, `submit_run`, `get_run`, `get_run_results`, `cancel_run`,
 `create_proposal`, `list_proposals`, `get_proposal`, `list_sandboxes`,
 `get_sandbox`, `run_r_script`, `get_sandbox_run`, `read_sandbox_file`,
-`cancel_sandbox_run`, `create_report`, `list_reports`, `get_report`, and
-`write_report_section`. `read_sandbox_file` returns PNG figures as MCP image
-content, so a multimodal agent can look at its own plots. A refusal from the
+`cancel_sandbox_run`, `get_notebook`, `add_notebook_note`, `list_remote_files`, `read_remote_file`, `list_figures`,
+`view_figure`, `get_figure_history`, `create_report`, `list_reports`,
+`get_report`, and `write_report_section`. `read_sandbox_file`,
+`read_remote_file` and `view_figure` return PNG images as MCP image content, so
+a multimodal agent can look at its own plots, at figures people saved in the
+project gallery, and at plots in a pinned cluster folder. `get_figure_history`
+returns the dependency-ordered steps behind selected figures (see
+[analysis workflows](analysis-workflows.md#figure-gallery-and-history-export)).
+
+An agent can therefore work three ways, each enforced by the server: run
+certified pipelines and trusted methods inside studies (`create_plan`,
+`submit_run`); run its own R in a sandbox, where every run is flagged for and
+held until a person's review; and read the evidence (figures, results, pinned
+remote data) it needs to decide what to do next. A refusal from the
 server (for example `BUDGET_EXCEEDED`) comes back as a tool error with the
 server's JSON. Tools that create something derive their request id from the
 content, so a repeated call after a lost reply returns the original.
@@ -613,3 +750,30 @@ sessions.
 - `cli/traceomics.test.mjs`, `cli/traceomics-mcp.test.mjs`,
   `src/pages/AgentAccess.test.jsx`, `src/pages/AgentWorkflows.test.jsx`,
   `src/pages/AgentSandboxes.test.jsx`, `src/pages/AgentReports.test.jsx`.
+
+## Running agents on your own computer
+
+Agents run approved workflows only when the R runtime is pinned, and they run
+their own R only in a no-network container. Locally:
+
+- **Approved workflows without a container.** Pin your R installation:
+
+  ```powershell
+  node scripts/pin-local-runtime.js --out .traceomics-runtime.json
+  ```
+
+  Then set `TRACEOMICS_WORKFLOW_RUNTIME_FILE` to that file and
+  `TRACEOMICS_RUNTIME_LOCAL_INSTALL=1`, and restart. The identity is a digest of
+  the R home, R version and every installed package with its library path, so
+  installing, removing or upgrading a package changes it and pending runs are
+  refused until you pin again and reapprove.
+- **Agent sandboxes and Expert R.** With Docker running, build the R image and
+  set `EXPERT_R_SANDBOX_IMAGE` to its `sha256:…` id. `npm run dev` then also
+  starts the sandbox broker on `127.0.0.1:8090` and enables Expert R for the web
+  service and worker with a generated token (`APP_DEPLOYMENT_MODE` defaults to
+  `private` and `EXPERT_R_ACCESS_POLICY` to `project-roles`, so project writers
+  need no separate operator approval). Each run is a fresh container with no network.
+
+  ```powershell
+  docker build --target runtime -t traceomics-r:local r-backend
+  ```

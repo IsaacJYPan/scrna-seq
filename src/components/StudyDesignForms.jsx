@@ -1,5 +1,6 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
+import { formatDate, parseServerTime } from './analysisRunDisplay';
 
 export function ConditionsForm({ conditions, conditionName, setConditionName, busy, onSubmit }) {
   return (
@@ -377,7 +378,78 @@ export function ComparisonForm({
   );
 }
 
-export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContrast }) {
+function formatStat(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'NA';
+  if (value !== 0 && Math.abs(value) < 0.001) return value.toExponential(2);
+  return Number.isInteger(value) ? String(value) : value.toFixed(3);
+}
+
+export function ContrastResult({ result }) {
+  if (result?.failure) {
+    return (
+      <p role="alert" className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-700 dark:text-red-300">
+        Latest run did not finish{result.completedAt ? ` (${formatDate(result.completedAt)})` : ''}: {result.failure}
+      </p>
+    );
+  }
+  const summary = result?.summary;
+  if (!summary) return null;
+  const rows = Array.isArray(summary.topResults) ? summary.topResults.slice(0, 15) : [];
+  return (
+    <div className="mt-3 rounded border border-border bg-background/60 p-3" data-testid="contrast-result">
+      <p className="text-xs font-semibold text-text">
+        Latest result{result.completedAt ? ` · ${formatDate(result.completedAt)}` : ''}
+      </p>
+      <p className="mt-1 text-xs text-textMuted">
+        {summary.method || 'Pseudobulk'} · {summary.sampleCount ?? 'NA'} samples · {summary.testedCellTypeCount ?? 0} cell
+        types tested · {summary.significantResultCount ?? 0} gene–cell type results at FDR ≤ 0.05
+      </p>
+      {Array.isArray(summary.skippedCellTypes) && summary.skippedCellTypes.length > 0 && (
+        <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+          Skipped (too few cells or replicates): {summary.skippedCellTypes.join(', ')}
+        </p>
+      )}
+      {rows.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full min-w-[480px] text-left text-xs">
+            <thead className="text-textMuted">
+              <tr>
+                <th className="py-1 pr-3">Cell type</th>
+                <th className="py-1 pr-3">Gene</th>
+                <th className="py-1 pr-3">log2FC</th>
+                <th className="py-1 pr-3">p</th>
+                <th className="py-1 pr-3">FDR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${row.cellType}-${row.gene}-${index}`} className="border-t border-border/40">
+                  <td className="py-1 pr-3">{row.cellType}</td>
+                  <td className="py-1 pr-3 font-semibold">{row.gene}</td>
+                  <td className="py-1 pr-3 font-mono">{formatStat(row.logFc)}</td>
+                  <td className="py-1 pr-3 font-mono">{formatStat(row.pValue)}</td>
+                  <td className="py-1 pr-3 font-mono">{formatStat(row.fdr)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="mt-2 text-xs text-textMuted">
+        Download the complete table from Runs &amp; Results (Condition comparison results).
+      </p>
+    </div>
+  );
+}
+
+// A run started from this page is pending until a result completed after it.
+function runIsPending(queuedAt, result) {
+  if (!queuedAt) return false;
+  const finished = parseServerTime(result?.completedAt);
+  return !(finished && finished.getTime() >= new Date(queuedAt).getTime() - 1000);
+}
+
+export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContrast, results = {}, pendingRuns = {}, versionNames = {} }) {
   return (
     <div className="card p-4">
       <h3 className="font-semibold mb-3">Saved contrasts</h3>
@@ -399,6 +471,9 @@ export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContra
                 {item.numeratorConditionName} vs {item.denominatorConditionName} ·{' '}
                 {item.unitOfReplication}-level · {item.cellTypeColumn}
               </p>
+              {versionNames[item.analysisObjectId] && (
+                <p className="mt-1 text-xs text-textMuted">Saved version: {versionNames[item.analysisObjectId]}</p>
+              )}
               <p className="mt-1 text-xs text-textMuted">
                 Model:{' '}
                 <code>
@@ -418,11 +493,17 @@ export function SavedContrasts({ contrasts, canWriteStudyDesign, busy, runContra
               <button
                 type="button"
                 className="btn btn-secondary text-xs mt-2"
-                disabled={!canWriteStudyDesign || item.status === 'invalid' || !!busy}
+                disabled={!canWriteStudyDesign || item.status === 'invalid' || !!busy || runIsPending(pendingRuns[item.id], results[item.id])}
                 onClick={() => runContrast(item)}
               >
                 Run edgeR pseudobulk
               </button>
+              {runIsPending(pendingRuns[item.id], results[item.id]) && (
+                <p role="status" className="mt-2 text-xs text-textMuted">
+                  Run started at {new Date(pendingRuns[item.id]).toLocaleTimeString()}. The result appears here when it finishes; progress is in Runs &amp; Results.
+                </p>
+              )}
+              <ContrastResult result={results[item.id]} />
             </div>
           ))}
         </div>

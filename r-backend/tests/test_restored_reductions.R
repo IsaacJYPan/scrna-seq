@@ -60,6 +60,17 @@ main <- function() {
   stopifnot(identical(pca$result$stdevs, c(4, 2)), length(pca$result$gene_loadings) == 2L)
   stopifnot(pca$result$n_points == runtime$MAX_PUBLIC_CELL_VALUES)
 
+  # Colouring by a categorical metadata column (e.g. sample) for batch checks.
+  runtime$global_obj$sample_id <- rep(c("S1", "S2", "S3"), length.out = cells)
+  by_sample <- preview(response(), "umap", "sample_id")
+  stopifnot(identical(sort(vapply(by_sample$result$trace_data, function(x) x$name, character(1))), c("S1", "S2", "S3")))
+  stopifnot(identical(by_sample$result$group_by, "sample_id"), "sample_id" %in% unlist(by_sample$result$group_by_options))
+  stopifnot(!"nCount_RNA" %in% unlist(by_sample$result$group_by_options))
+  unknown_column_response <- response()
+  unknown_column <- preview(unknown_column_response, "umap", "nCount_RNA")
+  stopifnot(identical(unknown_column_response$status, 400L), !is.null(unknown_column$error))
+  runtime$global_obj$sample_id <- NULL
+
   # Missing reductions do not trigger analysis, and invalid selectors do not
   # allow inspection of arbitrary metadata or unknown reduction names.
   runtime$global_obj[["umap"]] <- NULL

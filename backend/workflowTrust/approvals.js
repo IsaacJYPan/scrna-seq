@@ -26,6 +26,8 @@ function publicRelease(release, approval = null) {
     resources: release.definition.resources,
     inputs: release.definition.inputs,
     outputs: release.definition.outputs,
+    // Metrics a study may rank trials by; inferential ones are listed but not selectable.
+    selectableMetrics: release.definition.selectableMetrics || [],
     readableSource: release.readableSource || null,
     // Library methods: upstream source, citation, declared deviations, metrics.
     method: release.definition.method || null,
@@ -140,7 +142,15 @@ function createApprovalService({ db, withTransaction }) {
     });
   }
 
-  return { ensureCatalog, listForHuman, listApprovedForProject, approve, revoke };
+  // Every current release, marked with whether this project approved it, for
+  // agents deciding what verified code exists before writing their own.
+  async function listCatalogForProject(projectId) {
+    const releases = await ensureCatalog();
+    const approvals = await activeApprovals(db, projectId);
+    return releases.map((r) => ({ release: r, approved: approvals.has(r.id) }));
+  }
+
+  return { ensureCatalog, listForHuman, listApprovedForProject, listCatalogForProject, approve, revoke };
 }
 
 module.exports = { createApprovalService, publicRelease };

@@ -168,7 +168,12 @@ store_active_session <- function(sid, global_value, raw_value) {
   size_bytes <- active_session_size_bytes(global_value, raw_value)
   if (size_bytes > limits$per_session_bytes || size_bytes > limits$per_user_bytes ||
       size_bytes > limits$global_bytes) {
-    stop("Live R session exceeds configured memory capacity.")
+    # Raised before anything is replaced, so callers can report a definite
+    # rejection instead of an unknown outcome.
+    stop(structure(
+      class = c("live_session_capacity_error", "error", "condition"),
+      list(message = "Live R session exceeds configured memory capacity.", call = NULL)
+    ))
   }
 
   # Plan every eviction against a snapshot before mutating the environment. An

@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const storage = require('./storage');
+const { localTarCommand } = require('./localTar');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const { brokerResourceLimits, createBrokerReadinessProbe } = require('./expertRuntimeReadiness');
 const { probeStorageReadiness } = require('./runtimeReadiness');
@@ -909,7 +910,8 @@ function createExpertSandboxBroker(env = process.env) {
       phase = 'archive';
       await assertFreeSpace(workRoot, MAX_ARCHIVE_BYTES + minFreeBytes);
       const archive = path.join(jobDirectory, 'expert-r-outputs.tar.gz');
-      await runProcess('tar', ['-czf', archive, '-C', outputDirectory, '.'], { timeoutMs: 120000 });
+      const tar = localTarCommand('create', archive, outputDirectory);
+      await runProcess('tar', tar.args, { timeoutMs: 120000, cwd: tar.cwd });
       const archiveStat = await fsp.stat(archive);
       if (!archiveStat.isFile() || archiveStat.size > MAX_ARCHIVE_BYTES) {
         throw new Error('Sandbox archive exceeds limits.');

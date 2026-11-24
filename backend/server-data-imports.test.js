@@ -238,6 +238,28 @@ describe.skipIf(!configured)('server data imports with PostgreSQL and immutable 
     held.release.resolve(); await service.waitForIdle(); expect(held.copies()).toBe(1);
     expect((await artifacts.list(user.id, project.id)).items).toEqual([]);
   });
+  it('adds a pipeline input file from a granted server folder as a project dataset', async () => {
+    const bytes = Buffer.from('\x89HDF\r\n\x1a\nnot-a-real-matrix');
+    await fs.writeFile(path.join(source, 'sample.h5'), bytes);
+    await fs.writeFile(path.join(source, 'notes.csv'), 'a,b\n1,2\n');
+    const listing = await http.api(server, url('/roots/study/files'), { token });
+    const h5 = listing.data.items.find(item => item.name === 'sample.h5');
+    expect(h5).toMatchObject({ kind: 'file', sizeBytes: bytes.length });
+    const add = body => http.api(server, `/api/projects/${project.id}/datasets/from-server-folder`, { token, method: 'POST', body });
+    const created = await add({ fileType: 'tenx_h5', source: { rootId: 'study', relativePath: 'sample.h5', selectionToken: h5.selectionToken } });
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    expect(created.data).toMatchObject({ originalFilename: 'sample.h5', sha256: sha(bytes), uploadStatus: 'uploaded' });
+    expect(JSON.stringify(created.data)).not.toContain(directory);
+    // The source is copied, never moved or changed.
+    expect(await fs.readFile(path.join(source, 'sample.h5'))).toEqual(bytes);
+
+    const forged = await add({ fileType: 'tenx_h5', source: { rootId: 'study', relativePath: 'sample.h5', selectionToken: 'f'.repeat(64) } });
+    expect(forged.status).toBe(409);
+    const csv = listing.data.items.find(item => item.name === 'notes.csv');
+    expect((await add({ fileType: 'tenx_h5', source: { rootId: 'study', relativePath: 'notes.csv', selectionToken: csv.selectionToken } })).status).toBe(400);
+    expect((await add({ fileType: 'tenx_h5', source: { rootId: 'study', relativePath: '../outside.h5', selectionToken: h5.selectionToken } })).status).toBe(400);
+  });
+
   it('serves authenticated bounded metadata through real HTTP and distinguishes missing receipts from revoked access', async () => {
     const request = await selected();
     const roots = await http.api(server, url('/roots'), { token }); expect(roots.status).toBe(200); expect(JSON.stringify(roots.data)).not.toContain(directory);

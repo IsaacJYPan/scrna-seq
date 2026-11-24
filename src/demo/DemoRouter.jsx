@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { readDemoPolicy } from './demoApi';
 import { preloadPlotlyRenderer } from '../components/Plot';
-import DemoLoading from './DemoLoading';
+import DemoLoading, { AppLoading } from './DemoLoading';
 
 const App = React.lazy(() => import('../App'));
 const DemoExperience = React.lazy(() => import('./DemoExperience'));
@@ -17,10 +17,10 @@ export default function DemoRouter() {
       if (value.demoMode && value.guidedDemoEnabled !== false) preloadPlotlyRenderer().catch(() => {});
       setPolicy(value);
     })
-      .catch(() => { if (active) setError('The demo could not connect. Please try again.'); });
+      .catch(() => { if (active) setError('The app could not connect to the analysis server. Please try again.'); });
     return () => { active = false; };
   }, [attempt]);
-  if (!policy) return <DemoLoading error={error} message="Connecting to the analysis server…" onRetry={() => { setError(''); setAttempt(value => value + 1); }} />;
+  if (!policy) return <AppLoading error={error} message="Connecting to the analysis server…" onRetry={() => { setError(''); setAttempt(value => value + 1); }} />;
   if (policy.demoMode && policy.guidedDemoEnabled !== false) return <React.Suspense fallback={<DemoLoading />}><DemoExperience /></React.Suspense>;
-  return <React.Suspense fallback={<DemoLoading />}><App /></React.Suspense>;
+  return <React.Suspense fallback={<AppLoading />}><App /></React.Suspense>;
 }

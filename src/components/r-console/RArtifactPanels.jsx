@@ -1,6 +1,7 @@
 import React from 'react';
 import { artifactImageUrl } from '../../artifacts/artifactApi';
 import { artifactBytesLabel } from '../../artifacts/privateRArtifactPolicy';
+import ExactDetails from '../ExactDetails';
 
 export function SavedPreview({ projectId, value, onImageError }) {
   if (!value) return null;
@@ -23,7 +24,7 @@ export function SavedPreview({ projectId, value, onImageError }) {
           ? ` · ${version.sizeBytes.toLocaleString()} bytes`
           : ''}
       </div>
-      <div className="text-xs break-all font-mono">SHA-256 {version.sha256}</div>
+      <div className="text-xs">Exact version <ExactDetails label="Exact saved version" items={[{ label: 'SHA-256', value: version.sha256 }]} /></div>
       {preview?.integrityVerified && (
         <p role="status" className="text-xs">
           Checksum verified for this saved version
@@ -198,7 +199,7 @@ export function SaveOutputForm({
       {publicationForm.type === 'figure' && figureSelection && (
         <p className="text-xs break-all">
           Selected figure {figureSelection.index + 1} from command {figureSelection.order} ·{' '}
-          {figureSelection.executionId} · PNG SHA-256 {figureSelection.sha256}
+          <ExactDetails label="Exact figure" items={[{ label: 'Command', value: figureSelection.executionId }, { label: 'PNG SHA-256', value: figureSelection.sha256 }]} />
         </p>
       )}
       <button

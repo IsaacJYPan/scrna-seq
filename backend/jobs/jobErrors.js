@@ -1,11 +1,15 @@
 // Error classification for worker handlers and job recovery. Only marked messages may reach job logs.
 
+const { codedError } = require('../codedError');
+
 const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   WORKFLOW_SOURCE_CHANGED: 'Approved analysis source changed. An operator must restart and reapprove before retrying.',
   WORKFLOW_RUNTIME_UNAVAILABLE: 'Analysis runtime attestation is unavailable. Ask the operator to check and restart the runtime.',
   WORKFLOW_RUNTIME_MISMATCH: 'The analysis runtime differs from the approved package or image inventory. Reapproval is required.',
   WORKFLOW_INPUT_CHANGED: 'A pinned study input changed. A new study approval is required.',
   WORKFLOW_DESIGN_CHANGED: 'The pinned condition design changed. A new plan and approval are required.',
+  WORKFLOW_TRUST_UNAVAILABLE: 'The approved plan of this agent run could not be checked, so it did not run.',
+  WORKFLOW_TRUST_MISSING: 'This agent run has no approved plan, so it did not run.',
   ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
   SLURM_UNAVAILABLE: 'The Slurm target is not configured for this installation.',
   SLURM_SUBMIT_FAILED: 'The cluster did not accept the job. Check the Slurm partition and account settings.',
@@ -67,6 +71,19 @@ function isIndeterminateRExecutionFailure(error) {
   );
 }
 
+// A side-effect-possible R failure becomes definite once R's handler is known
+// to have returned (rHandlerReturned) and no completion receipt exists: R writes
+// the receipt as the last step of a successful run, so nothing can adopt it.
+// Returns a copy without the recovery flag, keeping the public code and R codes.
+function definiteRFailureFrom(error) {
+  const definite = error.publicSafeHandlerError === true
+    ? codedHandlerError(error.code, error.message)
+    : codedError(error.code, error.message);
+  if (error.rStatus !== undefined) definite.rStatus = error.rStatus;
+  if (error.rCode !== undefined) definite.rCode = error.rCode;
+  return definite;
+}
+
 function publicationIndeterminateError(error) {
   if (error && (error.code === 'CLAIM_LOST' || error.code === 'JOB_NOT_FOUND')) return error;
   return codedHandlerError(
@@ -81,5 +98,6 @@ module.exports = {
   codedHandlerError,
   safeDiagnosticCode,
   isIndeterminateRExecutionFailure,
+  definiteRFailureFrom,
   publicationIndeterminateError,
 };

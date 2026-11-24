@@ -8,7 +8,7 @@ const NOW = '2030-01-01 00:00:00';
 const logger = { info() {}, warn() {}, error() {} };
 function fixture({ job = {}, db = {}, ...options } = {}) {
   const claimed = { id: 'job_owned', jobType: 'generic', ownerUserId: 1, projectId: 'proj_owned',
-    attempts: 1, claimToken: 'private-claim', parameters: {}, ...job };
+    attempts: 1, claimToken: 'private-claim', parameters: {}, agentRun: false, ...job };
   const database = { reapExpiredJobs: vi.fn(async () => ({ requeued: [], failed: [] })),
     claimNextJob: vi.fn(async () => claimed), heartbeatJob: vi.fn(async () => claimed),
     appendJobLogByWorker: vi.fn(async () => {}), completeJobByWorker: vi.fn(async () => {}),

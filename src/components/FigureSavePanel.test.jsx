@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import FigureSavePanel from './FigureSavePanel';
+import { FigureProjectProvider } from '../figures/FigureProjectContext';
 
 describe('FigureSavePanel component', () => {
   beforeEach(() => {
@@ -240,7 +241,7 @@ describe('FigureSavePanel component', () => {
 
     const saveButton = screen.getByRole('button', { name: /save to figure gallery/i });
     expect(saveButton).toBeDisabled();
-    expect(screen.getByText(/Figures remain in this private gallery/i)).toBeInTheDocument();
+    expect(screen.getByText(/file export is not available in this deployment/i)).toBeInTheDocument();
     await waitFor(() => expect(global.window.electronAPI.apiRequest).toHaveBeenCalledWith(
       '/export-preview', expect.any(Object)
     ));
@@ -248,5 +249,42 @@ describe('FigureSavePanel component', () => {
       '/export-figure', expect.any(Object)
     );
     expect(global.window.electronAPI.saveFigure).not.toHaveBeenCalled();
+  });
+
+  it('saves into the project gallery, linked to the analysis object, even without file export', async () => {
+    vi.useFakeTimers();
+    const createProjectFigure = vi.fn(async () => ({ id: 'fig_1' }));
+    const notifySaved = vi.fn();
+    window.electronAPI = {
+      createProjectFigure,
+      saveFigure: vi.fn(),
+      apiRequest: vi.fn(async () => ({ result: { base64: 'data:image/png;base64,AAAA' } })),
+    };
+    render(
+      <FigureProjectProvider value={{ projectId: 'proj_1', projectName: 'Atlas', canWrite: true, collections: ['Figure 1'], notifySaved }}>
+        <FigureSavePanel isOpen onClose={() => {}} plotType="UMAP" baseParams={{}} objectId="ao_abc"
+          initialParams={{ title: 'Clusters', pt_size: 0.4 }} revisionOf="fig_0" />
+      </FigureProjectProvider>
+    );
+    expect(screen.getByRole('dialog', { name: 'Edit figure' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Title')).toHaveValue('Clusters');
+    fireEvent.change(screen.getByLabelText('Collection'), { target: { value: 'Figure 1' } });
+    fireEvent.change(screen.getByLabelText('Tags (comma-separated)'), { target: { value: 'main, Main, umap' } });
+    await act(async () => { vi.advanceTimersByTime(900); });
+    vi.useRealTimers();
+    const save = screen.getByRole('button', { name: /save as new version/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    await act(async () => { fireEvent.click(save); });
+    await waitFor(() => expect(createProjectFigure).toHaveBeenCalled());
+    const [projectId, payload] = createProjectFigure.mock.calls[0];
+    expect(projectId).toBe('proj_1');
+    expect(payload).toMatchObject({
+      analysisObjectId: 'ao_abc', plotType: 'UMAP', title: 'Clusters', collection: 'Figure 1',
+      tags: ['main', 'umap'], thumbnailB64: 'data:image/png;base64,AAAA',
+    });
+    expect(payload.params).toMatchObject({ pt_size: 0.4, revision_of: 'fig_0' });
+    expect(window.electronAPI.saveFigure).not.toHaveBeenCalled();
+    expect(notifySaved).toHaveBeenCalled();
+    expect(await screen.findByText(/Saved to the Atlas gallery/)).toBeInTheDocument();
   });
 });

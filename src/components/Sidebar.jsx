@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, FileText, FolderOpen, GitBranch, History, Images,
-  Bot, ListChecks, Lock, LogOut, Menu, Microscope, Moon, Network, SquareTerminal, Sun, TestTubes,
+  Bot, ListChecks, Lock, LogOut, Menu, Microscope, Moon, Network, NotebookPen, SquareTerminal, Sun, TestTubes,
   UserRound, Users, Workflow,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
@@ -23,6 +23,14 @@ function researcherLabel(value) {
   if (/seurat/i.test(String(value || ''))) return 'Standard scRNA-seq workflow';
   return value;
 }
+
+// Synchronous batch integration runs inside the shared R session, and a run
+// that times out cannot be stopped there, so the installation policy turns it
+// off until it runs as a recorded job. Say so, and what the researcher already
+// has, rather than leaving the step greyed out without a reason.
+export const INTEGRATION_UNAVAILABLE_REASON = 'Batch integration runs inside the shared R session, where a long run cannot be stopped, so this installation turns it off. '
+  + 'Multi-condition preparation merges samples without batch correction and keeps sample_id, condition and batch for each cell; '
+  + 'Study Design pseudobulk tests use each donor as the unit.';
 
 function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }) {
   const Icon = item.icon;
@@ -302,6 +310,7 @@ export default function Sidebar({
             <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: TestTubes, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: Workflow, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: History }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'agent-notebook', label: 'Agent notebook', icon: NotebookPen, status: deploymentPolicy.demoMode ? 'Unavailable in public demo' : hasProject ? 'Agent work by step' : 'Select project' }} disabled={!hasProject || deploymentPolicy.demoMode === true} />
             <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'expert-r', label: 'R console', icon: SquareTerminal, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
           </NavSection>
@@ -321,7 +330,7 @@ export default function Sidebar({
                 const blockedExpertR = (deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled')
                   && item.id === 'expert-r';
                 const visibleItem = blockedLegacyMutation
-                  ? { ...item, status: 'Unavailable in this workspace' }
+                  ? { ...item, status: 'Unavailable in this workspace', lockReason: INTEGRATION_UNAVAILABLE_REASON }
                   : blockedExpertR
                     ? { ...item, status: 'Not configured' }
                     : item;

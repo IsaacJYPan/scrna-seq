@@ -12,6 +12,7 @@ const run = {
   steps: [{ number: 1, title: 'Cluster', code: 'stopifnot(TRUE)\nobj <- FindClusters(obj)\nsave_figure(p, "umap.png")', readable: 'obj <- FindClusters(obj)', hiddenLines: 1 }],
   files: [{ name: 'umap.png', kind: 'image', sizeBytes: 10 }, { name: 'markers.csv', kind: 'text', sizeBytes: 20 }],
   console: [], review: { state: 'draft' }, resultAnalysisObjectId: 'obj_2',
+  reason: 'No verified method draws per-donor dot plots; checked gene-figures.',
 };
 
 describe('AgentSandboxes', () => {
@@ -46,16 +47,21 @@ describe('AgentSandboxes', () => {
     render(<AgentSandboxes projectId="proj_1" role="owner" userId={7} />);
     fireEvent.click(await screen.findByRole('button', { name: /markers/i }));
     const article = await screen.findByRole('article', { name: 'Run 1' });
+    // Agent-written code is flagged for review, with the agent's reason.
+    expect(within(article).getByTestId('ai-authorship-badge')).toHaveTextContent('AI-written code · Needs review');
+    expect(article).toHaveTextContent('Why not verified code: No verified method draws per-donor dot plots');
     const notebook = within(article).getByLabelText('Notebook for run 1');
-    expect(within(notebook).getByRole('region', { name: 'Markdown cell 1' })).toHaveTextContent('1. Cluster');
-    const code = within(notebook).getByRole('region', { name: 'R cell 2' });
-    expect(within(code).getByLabelText('R cell 2 source')).toHaveTextContent('obj <- FindClusters(obj)');
+    // One cell per step: its title, its code and its outputs together.
+    expect(within(notebook).getAllByRole('region')).toHaveLength(1);
+    const code = within(notebook).getByRole('region', { name: 'Step 1: Cluster' });
+    expect(code).toHaveTextContent('1. Cluster');
+    expect(within(code).getByLabelText('R code of Step 1: Cluster')).toHaveTextContent('obj <- FindClusters(obj)');
     expect(code).toHaveTextContent('1 line of error handling hidden');
     expect(within(code).getByRole('img', { name: 'umap.png' })).toHaveAttribute('src', '/files/sbr_1/umap.png');
     fireEvent.click(within(code).getByRole('button', { name: 'Show table' }));
     expect(await within(code).findByText(/CD3E/)).toBeInTheDocument();
     fireEvent.click(within(notebook).getByRole('button', { name: 'Exact code' }));
-    expect(within(notebook).getByLabelText('R cell 2 source')).toHaveTextContent('stopifnot(TRUE)');
+    expect(within(notebook).getByLabelText('R code of Step 1: Cluster')).toHaveTextContent('stopifnot(TRUE)');
     fireEvent.change(within(article).getByLabelText(/review note/i), { target: { value: 'Looks right' } });
     fireEvent.click(within(article).getByRole('button', { name: 'Promote' }));
     await waitFor(() => expect(window.electronAPI.reviewAgentSandboxRun).toHaveBeenCalledWith('proj_1', 'sbr_1', 'promoted', 'Looks right'));
@@ -94,6 +100,27 @@ describe('AgentSandboxes', () => {
     fireEvent.click(within(form).getByRole('button', { name: /create sandbox/i }));
     await waitFor(() => expect(window.electronAPI.createAgentSandbox).toHaveBeenCalledWith('proj_1', expect.objectContaining({
       executionTarget: 'slurm', cpusPerRun: 8, memoryGiBPerRun: 32, hoursPerRun: 4 })));
+  });
+
+  it('pins cluster folders to a sandbox and shows reviewers what to check', async () => {
+    window.electronAPI.listComputeTargets = vi.fn(async () => ({ targets: [{ name: 'slurm', configured: true, sandbox: { ready: true } }] }));
+    const flagged = { ...run, remoteInputs: [{ root: 'raw', path: 'filtered/matrix.h5' }],
+      reviewFlags: [{ id: 'shell', severity: 'high', label: 'Runs a shell command', line: 3, excerpt: 'system("ls")' }] };
+    window.electronAPI.getAgentSandbox = vi.fn(async () => ({ sandbox: { ...sandbox, remoteRoots: [{ name: 'raw', path: '/scratch/lab/pbmc' }], runs: [flagged] } }));
+    render(<AgentSandboxes projectId="proj_1" role="owner" userId={7} />);
+    const form = await screen.findByRole('form', { name: /create a sandbox/i });
+    fireEvent.change(await within(form).findByLabelText(/runs on/i), { target: { value: 'slurm' } });
+    fireEvent.change(within(form).getByLabelText(/cluster folders/i), { target: { value: 'raw = /scratch/lab/pbmc\nref=/scratch/ref/genomes' } });
+    fireEvent.change(within(form).getByLabelText(/^name/i), { target: { value: 'Remote' } });
+    fireEvent.click(within(form).getByLabelText('Clustered PBMC'));
+    fireEvent.click(within(form).getByRole('button', { name: /create sandbox/i }));
+    await waitFor(() => expect(window.electronAPI.createAgentSandbox).toHaveBeenCalledWith('proj_1', expect.objectContaining({
+      remoteRoots: [{ name: 'raw', path: '/scratch/lab/pbmc' }, { name: 'ref', path: '/scratch/ref/genomes' }] })));
+    fireEvent.click(await screen.findByRole('button', { name: /markers/i }));
+    const article = await screen.findByRole('article', { name: 'Run 1' });
+    expect(within(article).getByText(/Copied from cluster folders: raw\/filtered\/matrix.h5/)).toBeInTheDocument();
+    expect(within(article).getByLabelText('Review flags')).toHaveTextContent('Line 3: Runs a shell command');
+    expect(screen.getByText(/Cluster folders: raw \(\/scratch\/lab\/pbmc\)/)).toBeInTheDocument();
   });
 
   it('explains why an unqualified cluster cannot be chosen', async () => {

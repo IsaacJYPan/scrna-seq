@@ -22,6 +22,10 @@ const ephemeralSigningKey = crypto.randomBytes(32).toString('hex');
 const time = value => new Date(value).toISOString();
 const missing = () => importError('SERVER_IMPORT_NOT_FOUND', 'Server data source or import request not found.', 404);
 const changed = () => importError('SERVER_IMPORT_SOURCE_CHANGED', 'The source file changed. Refresh the server file list and select it again.', 409);
+// Analysis input files (10x HDF5, Visium bundles) are listed so they can be
+// added as pipeline datasets; they are never imported as result artifacts.
+const DATASET_EXTENSIONS = new Set(['.h5', '.zip']);
+const datasetInput = name => DATASET_EXTENSIONS.has(path.extname(String(name)).toLowerCase());
 const unsafe = () => importError('SERVER_IMPORT_PATH_UNSAFE', 'Only ordinary files inside the authorized data root can be imported.', 400);
 function identity(stat) {
   return { dev: String(stat.dev), ino: String(stat.ino), size: Number(stat.size), mtimeNs: String(stat.mtimeNs ?? Math.round(stat.mtimeMs * 1e6)),
@@ -177,7 +181,7 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
         if (!stat || stat.isSymbolicLink() || (!stat.isDirectory() && (!stat.isFile() || Number(stat.nlink) !== 1))) continue;
         if (items.length === limit) { hasMore = true; examined = index; break; }
         if (stat.isDirectory()) items.push({ name: entry.name, relativePath: selected, kind: 'directory' });
-        else if (Number.isSafeInteger(Number(stat.size)) && previews.fileFormat(entry.name).id !== 'org.traceomics.opaque-file') items.push({ name: entry.name, relativePath: selected, kind: 'file', sizeBytes: Number(stat.size), modifiedAt: time(Number(stat.mtimeMs)), selectionToken: selectionToken(root, userId, projectId, selected, identity(stat)) });
+        else if (Number.isSafeInteger(Number(stat.size)) && (previews.fileFormat(entry.name).id !== 'org.traceomics.opaque-file' || datasetInput(entry.name))) items.push({ name: entry.name, relativePath: selected, kind: 'file', sizeBytes: Number(stat.size), modifiedAt: time(Number(stat.mtimeMs)), selectionToken: selectionToken(root, userId, projectId, selected, identity(stat)) });
       }
       await opened.revalidate?.();
       const current = opened.handle ? identity(await opened.handle.stat({ bigint: true })) : identity(await fs.promises.lstat(opened.absolutePath, { bigint: true }));
@@ -455,7 +459,27 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
       ? (await connection.query("SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=ANY($3::uuid[]) AND status='failed'", [projectId, userId, requestIds])).rows : []);
     for (const row of failed) await cleanupFailed(row);
   }
-  return { roots, list, start, get, listImports, hasSourceGrant, inspectSelection, settleImports, canImportPolicy: permitted,
+  // Opens one listed analysis input file for copying into a project dataset.
+  // The caller copies it and closes the handle; the selection token binds the
+  // exact file a person chose in this project.
+  async function openForDataset(userId, projectId, input = {}) {
+    await access(userId, projectId, true);
+    if (!input || typeof input !== 'object' || Object.keys(input).some(key => !['rootId', 'relativePath', 'selectionToken'].includes(key))) {
+      throw importError('SERVER_DATASET_SELECTION_INVALID', 'Choose one file from a server folder.', 400);
+    }
+    const relativePath = relativeSelection(input.relativePath);
+    if (!datasetInput(relativePath)) throw importError('SERVER_DATASET_SELECTION_INVALID', 'Choose a 10x .h5 file or a Visium .zip bundle.', 400);
+    const root = authorizedRoot(userId, projectId, input.rootId);
+    const opened = await openSelection(root, relativePath);
+    try {
+      if (!matches(input.selectionToken, selectionToken(root, userId, projectId, relativePath, opened.identity))) throw changed();
+      return { ...opened, name: path.basename(relativePath), sizeBytes: Number(opened.stat.size) };
+    } catch (error) {
+      await opened.close();
+      throw error;
+    }
+  }
+  return { roots, list, start, get, listImports, openForDataset, hasSourceGrant, inspectSelection, settleImports, canImportPolicy: permitted,
     journalAcceptance: acceptance, journalSummary: summary, serializeJournal: display, displayLabel: plainLabel,
     waitForIdle: async () => { await Promise.all([...tasks]); } };
 }

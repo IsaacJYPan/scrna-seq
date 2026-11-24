@@ -231,8 +231,12 @@ describe('CellChat durable worker UI', () => {
       {},
       { useCache: false },
     ));
-    expect(await screen.findByText('CD4 T cells')).toBeInTheDocument();
-    expect(screen.getByText('B cells')).toBeInTheDocument();
+    expect((await screen.findAllByText('CD4 T cells')).length).toBeGreaterThan(1);
+    expect(screen.getAllByText('B cells').length).toBeGreaterThan(1);
+    // The candidate tables name each opaque group with its private label.
+    const interactionRow = screen.getAllByRole('row').find(row => /IL7R/.test(row.textContent));
+    expect(interactionRow).toHaveTextContent('Group 1CD4 T cells');
+    expect(interactionRow).toHaveTextContent('Group 2B cells');
     expect(screen.getByText(/not saved with the shared result/i)).toBeInTheDocument();
     expect(window.electronAPI.listProjectJobArtifacts.mock.calls[0]).toBeDefined();
   });

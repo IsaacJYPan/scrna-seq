@@ -7,6 +7,7 @@ const EXPLORATORY_ANALYSIS_RECIPES = Object.freeze([
   'overview',
   'feature_by_group',
   'metadata_distribution',
+  'group_composition',
   'study_composition','study_expression','study_qc','study_de','study_pathways','study_communication',
 ]);
 const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
@@ -16,8 +17,20 @@ const EXPLORATORY_ANALYSIS_PARAM_NAMES = Object.freeze([
   'metadataField',
   'maxGroups',
   'histogramBins',
-  'featureNames','groupMap','conditionName','numerator','denominator','targetGroup',
+  'featureNames',
+  'groupMap',
+  'conditionName',
+  'contrastId',
+  'targetGroup',
+  'species',
 ]);
+// Recipes that test a condition contrast. They run on a person-registered
+// contrast (resolved and pinned server side), never on labels in cell metadata.
+const CONTRAST_RECIPES = Object.freeze(['study_de', 'study_pathways']);
+// Recipes that use an organism's annotation (GO, ligand-receptor databases).
+// The organism is never assumed.
+const SPECIES_RECIPES = Object.freeze(['study_pathways', 'study_communication']);
+const SPECIES = Object.freeze(['human', 'mouse']);
 
 function requirePlainObject(value) {
   if (value === undefined || value === null) return {};
@@ -55,7 +68,7 @@ function validateExploratoryAnalysisParams(input) {
 
   const recipe = raw.recipe === undefined ? 'overview' : String(raw.recipe).trim();
   if (!EXPLORATORY_ANALYSIS_RECIPES.includes(recipe)) {
-    throw codedError('INVALID_PARAMETER', 'recipe must be overview, feature_by_group, or metadata_distribution.');
+    throw codedError('INVALID_PARAMETER', 'recipe must be overview, feature_by_group, metadata_distribution, or group_composition.');
   }
 
   const params = {
@@ -63,18 +76,48 @@ function validateExploratoryAnalysisParams(input) {
     maxGroups: boundedInteger(raw.maxGroups, 'maxGroups', 24, 2, 32),
     histogramBins: boundedInteger(raw.histogramBins, 'histogramBins', 24, 8, 50),
   };
-  for(const [name,kind] of [['featureNames','geneList'],['groupMap','groupMap']])if(raw[name]!==undefined)params[name]=require('./scientificChoices').scientificText(kind,raw[name]);
-  for(const name of ['conditionName','numerator','denominator','targetGroup'])if(raw[name]!==undefined){if(typeof raw[name]!=='string'||(raw[name]!==''&&!/^[A-Za-z0-9_.-]{1,80}$/.test(raw[name])))throw codedError('INVALID_PARAMETER',`Invalid ${name}.`);params[name]=raw[name];}
-
-  if (recipe === 'feature_by_group') {
-    if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {
-      throw codedError('INVALID_PARAMETER', 'feature_by_group requires 1-12 feature names.');
+  for (const [name, kind] of [
+    ['featureNames', 'geneList'],
+    ['groupMap', 'groupMap']
+  ])
+    if (raw[name] !== undefined) params[name] = require('./scientificChoices').scientificText(kind, raw[name]);
+  for (const name of ['conditionName', 'targetGroup'])
+    if (raw[name] !== undefined) {
+      if (typeof raw[name] !== 'string' || (raw[name] !== '' && !/^[A-Za-z0-9_.-]{1,80}$/.test(raw[name])))
+        throw codedError('INVALID_PARAMETER', `Invalid ${name}.`);
+      params[name] = raw[name];
     }
-    params.features = [...new Set(raw.features.map((value) => safeFieldName(value, 'features')))].slice(0, 12);
+  if (CONTRAST_RECIPES.includes(recipe)) {
+    if (typeof raw.contrastId !== 'string' || !/^contrast_[a-f0-9]+$/.test(raw.contrastId)) {
+      throw codedError('INVALID_PARAMETER', `${recipe} requires contrastId, a registered condition contrast.`);
+    }
+    params.contrastId = raw.contrastId;
+  } else if (raw.contrastId !== undefined) {
+    throw codedError('INVALID_PARAMETER', `contrastId applies only to ${CONTRAST_RECIPES.join(' and ')}.`);
+  }
+  if (SPECIES_RECIPES.includes(recipe)) {
+    if (!SPECIES.includes(raw.species)) {
+      throw codedError('INVALID_PARAMETER', `${recipe} requires species: ${SPECIES.join(' or ')}.`);
+    }
+    params.species = raw.species;
+  } else if (raw.species !== undefined) {
+    throw codedError('INVALID_PARAMETER', `species applies only to ${SPECIES_RECIPES.join(' and ')}.`);
+  }
+
+  if (recipe === 'feature_by_group' || recipe === 'group_composition') {
     params.groupBy = raw.groupBy === undefined ? 'seurat_clusters' : String(raw.groupBy).trim();
     if (!['seurat_clusters', 'ident'].includes(params.groupBy)) {
       throw codedError('INVALID_PARAMETER', 'groupBy must be seurat_clusters or ident.');
     }
+  }
+  if (recipe === 'group_composition') {
+    // The categorical column that splits cells, usually the sample or condition.
+    params.metadataField = safeFieldName(raw.metadataField, 'metadataField');
+  } else if (recipe === 'feature_by_group') {
+    if (!Array.isArray(raw.features) || raw.features.length < 1 || raw.features.length > 12) {
+      throw codedError('INVALID_PARAMETER', 'feature_by_group requires 1-12 feature names.');
+    }
+    params.features = [...new Set(raw.features.map((value) => safeFieldName(value, 'features')))].slice(0, 12);
   } else if (recipe === 'metadata_distribution') {
     params.metadataField = safeFieldName(raw.metadataField, 'metadataField');
   }
@@ -83,6 +126,8 @@ function validateExploratoryAnalysisParams(input) {
 }
 
 module.exports = {
+  CONTRAST_RECIPES,
+  SPECIES_RECIPES,
   EXPLORATORY_ANALYSIS_RECIPES,
   EXPLORATORY_ANALYSIS_PARAM_NAMES,
   validateExploratoryAnalysisParams,

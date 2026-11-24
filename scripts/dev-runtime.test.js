@@ -88,3 +88,26 @@ describe('local development runtime memory admission', () => {
     await runtime.stop();
   });
 });
+
+describe('local development sandbox broker', () => {
+  it('starts no broker unless a sandbox image is configured', () => {
+    const { launches } = startRuntime();
+    expect(launches.some((l) => String(l.args[0]).includes('expertSandboxBroker'))).toBe(false);
+    expect(launches.find((l) => String(l.args[0]).includes('server.js')).options.env.EXPERT_R_ENABLED).toBeUndefined();
+  });
+
+  it('starts the broker with the pinned image and points web and worker at it with one token', () => {
+    const image = `traceomics-r@sha256:${'a'.repeat(64)}`;
+    const { launches } = startRuntime({ EXPERT_R_SANDBOX_IMAGE: image });
+    const broker = launches.find((l) => String(l.args[0]).includes('expertSandboxBroker'));
+    const web = launches.find((l) => String(l.args[0]).includes('server.js'));
+    const worker = launches.find((l) => String(l.args[0]).includes('worker.js'));
+    expect(broker.options.env).toMatchObject({ EXPERT_R_SANDBOX_IMAGE: image, EXPERT_R_SANDBOX_HOST: '127.0.0.1', EXPERT_R_SANDBOX_PORT: '8090' });
+    const token = broker.options.env.EXPERT_R_SANDBOX_TOKEN;
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    for (const child of [web, worker]) {
+      expect(child.options.env).toMatchObject({ EXPERT_R_ENABLED: 'true', EXPERT_R_SANDBOX_URL: 'http://127.0.0.1:8090',
+        EXPERT_R_SANDBOX_TOKEN: token, APP_DEPLOYMENT_MODE: 'private', EXPERT_R_ACCESS_POLICY: 'project-roles' });
+    }
+  });
+});

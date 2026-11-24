@@ -16,6 +16,7 @@ import {
   pipelineProbeAction,
   pipelineProbeRetryDelay,
   reconcileRestoredSession,
+  recordedQcThresholds,
   serverUnsavedLiveChanges,
 } from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
@@ -25,6 +26,8 @@ import { originalHistoryScopeChanged, prepareOriginalObjectHistory } from './ana
 import { openWorkflowSnapshot } from './analyses/researchAnalysisApi';
 import { validateWorkflowRestoration } from './analyses/workflowSnapshotClient';
 import { buildProjectProvenancePayload } from './projectProvenance';
+import { FigureProjectProvider, FIGURE_WRITE_ROLES } from './figures/FigureProjectContext';
+import { carryTabParams } from './hooks/useTabParams';
 
 import {
   saveProvenance,
@@ -48,6 +51,7 @@ import {
   reconcileAnalysisObjectMetadata,
 } from './backendWorkspaceModel';
 import { APP_NAME } from './brand';
+import { onProjectJobSettled } from './projectJobEvents';
 
 const Workspace = React.lazy(() => import('./pages/Workspace'));
 const ResearchAnalyses = React.lazy(() => import('./pages/ResearchAnalyses'));
@@ -71,6 +75,8 @@ const ProjectHistory = React.lazy(() => import('./pages/ProjectHistory'));
 const BatchIntegration = React.lazy(() => import('./pages/BatchIntegration'));
 const Collaborators = React.lazy(() => import('./pages/Collaborators'));
 const AgentAccess = React.lazy(() => import('./pages/AgentAccess'));
+const AgentNotebookPage = React.lazy(() => import('./pages/AgentNotebookPage'));
+const AgentWorkDock = React.lazy(() => import('./components/AgentNotebook').then((m) => ({ default: m.AgentWorkDock })));
 const Inspect = React.lazy(() => import('./pages/Inspect'));
 const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
 const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
@@ -91,6 +97,7 @@ const TAB_TITLES = {
   account: 'Account security',
   analyses: 'Analyses',
   workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators', agents: 'Agent access',
+  'agent-notebook': 'Agent notebook',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
   'expert-r': 'R console',
@@ -174,6 +181,21 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   demoGuestTtlSeconds: null,
 });
 
+// Reopens a saved analysis version in the person's R session after the
+// server lost it (a restart). Resolves true once the load job completes.
+async function reopenSavedVersion(api, projectId, objectId, { intervalMs = 2500, maxPolls = 120 } = {}) {
+  try {
+    let job = await api.createProjectJob(projectId, { jobType: 'checkpoint.load.v1', analysisObjectId: objectId, parameters: {} });
+    for (let i = 0; i < maxPolls && ['queued', 'running'].includes(job?.status); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      job = await api.getProjectJob(projectId, job.id);
+    }
+    return job?.status === 'completed';
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
   const returnToWorkspace = useCallback(() => setActiveTab('workspace'), []);
@@ -239,6 +261,10 @@ export default function App() {
   });
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
   const [liveRecoveryNotice, setLiveRecoveryNotice] = useState('');
+  // When the analysis server restarts, the selected saved version is reopened
+  // once automatically instead of leaving the person at a "not loaded" gate.
+  const [liveReopening, setLiveReopening] = useState(false);
+  const liveReopenTriedRef = React.useRef(new Set());
   const [historyPersistenceNotice, setHistoryPersistenceNotice] = useState('');
   const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
   const checkpointSaveRequestRef = React.useRef(0);
@@ -312,19 +338,33 @@ export default function App() {
   }, [authRetry]);
 
   const [figuresCount, setFiguresCount] = useState(0);
+  const [figureCollections, setFigureCollections] = useState([]);
+  const [figureRefreshToken, setFigureRefreshToken] = useState(0);
+  const [figureProjectId, setFigureProjectId] = useState(null);
 
-  // Refresh the gallery badge on login and when entering/leaving the Figure
-  // Gallery, rather than firing getFigures on every unrelated tab navigation.
+  // Refresh the gallery badge on login, when entering/leaving the Figure
+  // Gallery, and after a save, rather than on every unrelated tab navigation.
+  // Within a project the badge and collection suggestions come from the
+  // project's shared gallery; otherwise from the private gallery.
   const onPublicationTab = activeTab === 'publication';
   useEffect(() => {
-    if (window.electronAPI && window.electronAPI.getFigures && user?.email) {
-      window.electronAPI.getFigures(user.email).then(figures => {
-        setFiguresCount(figures.length);
-      }).catch(err => {
-        console.error('[App] Failed to load figures count:', err);
-      });
-    }
-  }, [onPublicationTab, user?.email]);
+    if (!user?.email) return undefined;
+    let cancelled = false;
+    const api = window.electronAPI;
+    const load = figureProjectId && api?.listProjectFigures
+      ? api.listProjectFigures(figureProjectId)
+      : api?.getFigures?.(user.email);
+    if (!load) return undefined;
+    load.then((figures) => {
+      if (cancelled) return;
+      const list = Array.isArray(figures) ? figures : [];
+      setFiguresCount(list.length);
+      setFigureCollections([...new Set(list.map((figure) => figure.collection).filter(Boolean))].sort());
+    }).catch(err => {
+      if (!cancelled && err.status !== 401) console.error('[App] Failed to load figures count:', err);
+    });
+    return () => { cancelled = true; };
+  }, [onPublicationTab, user?.email, figureProjectId, figureRefreshToken]);
 
   // Local workspace shell. Backend projects/analysis objects are loaded after
   // login; localStorage is no longer a durable project/object source.
@@ -374,6 +414,9 @@ export default function App() {
   const [computeStatus, setComputeStatus] = useState({ status: 'unknown', updatedAt: null });
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
+  // Session provenance id -> project provenance id, so the project history
+  // keeps each step's parent links (used to export only what figures need).
+  const projectProvenanceIds = React.useRef(new Map());
   const [drawerChain, setDrawerChain] = useState(null);
   // R process session ID — changes on every restart, busting the pipeline cache
   // so that all stateful steps re-execute in R and rebuild global_obj.
@@ -474,6 +517,27 @@ export default function App() {
       return { objects: [], selectedObjectId: null, error: err };
     }
   }, [patchActiveWorkspace, user]);
+
+  // A finished job can add or change saved versions (a pipeline run, a save,
+  // a restore). Refresh the selected project's objects when one settles, so
+  // the version list is current without a page reload. Jobs settling together
+  // share one refresh.
+  const selectedProjectIdRef = React.useRef(currentWs.selectedProjectId);
+  selectedProjectIdRef.current = currentWs.selectedProjectId;
+  useEffect(() => {
+    let timer = null;
+    const unsubscribe = onProjectJobSettled(({ projectId }) => {
+      if (projectId !== selectedProjectIdRef.current) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (projectId === selectedProjectIdRef.current) refreshAnalysisObjects(projectId);
+      }, 250);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [refreshAnalysisObjects]);
 
   const refreshProjects = useCallback(async () => {
     if (!user?.email) return;
@@ -719,6 +783,8 @@ export default function App() {
       await refreshAnalysisObjects(projectId);
       if (checkpointSaveRequestRef.current !== requestId) return;
       checkpointSaveOpenedObjectRef.current = saved.resultAnalysisObjectId;
+      // The saved version continues this analysis: keep its step settings.
+      carryTabParams(user?.email, objectId, saved.resultAnalysisObjectId);
       handleSelectAnalysisObject(projectId, saved.resultAnalysisObjectId);
       handleLiveObjectAttached(projectId, saved.resultAnalysisObjectId);
       setUnsavedLiveChanges(false);
@@ -742,7 +808,7 @@ export default function App() {
         durableSaved,
       });
     }
-  }, [checkpointSaveBusy, currentWs.selectedProjectId, datasetInfo?.id, datasetInfo?.projectId,
+  }, [checkpointSaveBusy, currentWs.selectedProjectId, datasetInfo?.id, datasetInfo?.projectId, user?.email,
     handleLiveObjectAttached, handleSelectAnalysisObject, refreshAnalysisObjects]);
 
   /**
@@ -1021,8 +1087,15 @@ export default function App() {
             && ['owner', 'admin', 'analyst'].includes(projectRole)
             && typeof window.electronAPI?.createProjectProvenance === 'function') {
           const projectPayload = buildProjectProvenancePayload(data.provenance, datasetInfo.id);
+          const projectParents = (parentIds || [])
+            .map((id) => projectProvenanceIds.current.get(`${projectId}:${id}`))
+            .filter(Boolean);
+          if (projectPayload && projectParents.length > 0) projectPayload.parentIds = projectParents;
           try {
-            await window.electronAPI.createProjectProvenance(projectId, projectPayload);
+            const created = await window.electronAPI.createProjectProvenance(projectId, projectPayload);
+            if (created?.id && data.provenance.id) {
+              projectProvenanceIds.current.set(`${projectId}:${data.provenance.id}`, created.id);
+            }
           } catch {
             // The scientific operation has already completed in R. Project-level
             // provenance persistence is best-effort here so a transient history
@@ -1251,8 +1324,29 @@ export default function App() {
         pipelineProbeAttemptsRef.current = 0;
         pipelineProbeAttachedRef.current = false;
         setUnsavedLiveChanges(false);
-        setLiveRecoveryNotice('Live analysis is unavailable. Restore a saved version to continue. Any unsaved changes from the previous R session are unavailable.');
         resetPipelineState();
+        const projectId = activeProjectIdForPipeline;
+        const api = window.electronAPI || {};
+        if (/^ao_/.test(objectId) && projectId && api.createProjectJob && api.getProjectJob && !liveReopenTriedRef.current.has(objectId)) {
+          liveReopenTriedRef.current.add(objectId);
+          setLiveReopening(true);
+          setLiveRecoveryNotice('The analysis server restarted. Reopening your saved version…');
+          reopenSavedVersion(api, projectId, objectId).then((ok) => {
+            setLiveReopening(false);
+            if (ok) {
+              setLiveRecoveryNotice('');
+              pipelineProbeKeyRef.current = null;
+              patchActiveWorkspace(ws => ({
+                objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
+              }));
+              setPipelineProbeRetry(value => value + 1);
+            } else {
+              setLiveRecoveryNotice('Live analysis is unavailable and the saved version could not be reopened automatically. Open it from Runs & Results to continue.');
+            }
+          });
+        } else if (!liveReopenTriedRef.current.has(objectId)) {
+          setLiveRecoveryNotice('Live analysis is unavailable. Open a saved version from Runs & Results to continue. Unsaved changes from the previous session are gone.');
+        }
         patchActiveWorkspace(ws => ({
           objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'not_attached' } : object),
         }));
@@ -1273,6 +1367,7 @@ export default function App() {
       setPipelineState(prev => ({
         ...prev,
         qc: Boolean(state.has_qc),
+        qcThresholds: recordedQcThresholds(state.qc_thresholds),
         normalize: Boolean(state.has_normalized),
         integrate: Boolean(state.has_integrated),
         pca: Boolean(state.has_pca),
@@ -1302,7 +1397,7 @@ export default function App() {
         pipelineProbeRetryTimeoutRef.current = null;
       }
     };
-  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace]);
+  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace, activeProjectIdForPipeline]);
 
 
 
@@ -1315,6 +1410,19 @@ export default function App() {
   // allowed to change these live-state controls. Provenance remains available
   // for history, script viewing, and parent links without changing R state.
   // ────────────────────────────────────────────────────────────────
+
+  // Project context for the figure editor on every plot page, and the
+  // project whose shared gallery the badge counts.
+  const activeFigureProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || null;
+  const activeFigureProject = currentWs?.projects?.find(project => project.id === activeFigureProjectId);
+  useEffect(() => { setFigureProjectId(activeFigureProjectId); }, [activeFigureProjectId]);
+  const figureProjectValue = React.useMemo(() => ({
+    projectId: activeFigureProjectId,
+    projectName: activeFigureProject?.name || '',
+    canWrite: FIGURE_WRITE_ROLES.includes(activeFigureProject?.role),
+    collections: figureCollections,
+    notifySaved: () => setFigureRefreshToken((token) => token + 1),
+  }), [activeFigureProjectId, activeFigureProject?.name, activeFigureProject?.role, figureCollections]);
 
   if (!isLoggedIn && authResolution !== 'resolved') return (
     <div className="login-bg flex min-h-dvh items-center justify-center p-6 text-text">
@@ -1357,6 +1465,8 @@ export default function App() {
 
   const renderContent = () => {
     const objKey = datasetInfo?.id ?? 'none';
+    const galleryProjectId = datasetInfo?.projectId || currentWs.selectedProjectId || null;
+    const galleryProject = currentWs.projects?.find(p => p.id === galleryProjectId);
     const getLatestId = (op) => provenanceRecords.find(r => r.operation === op)?.id;
 
     const activeProjectId = datasetInfo?.projectId || currentWs.selectedProjectId || currentWs.projects?.[0]?.id || null;
@@ -1383,6 +1493,8 @@ export default function App() {
       theme,
       rSessionId,          // let components watch session changes directly
       sessionReady,        // gate: true only after R session restore completes
+      liveUnavailable: datasetInfo?.liveState === 'not_attached',
+      liveReopening,
       resetPipelineAfterSubset,
       // For per-object parameter persistence
       userEmail: user?.email ?? null,
@@ -1479,11 +1591,23 @@ export default function App() {
         <ErrorBoundary key="enrichment" onReturn={returnToWorkspace}><TabContent id="enrichment" activeTab={activeTab} contextKey={objKey}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat" onReturn={returnToWorkspace}><TabContent id="cellchat" activeTab={activeTab} contextKey={objKey}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate" onReturn={returnToWorkspace}><TabContent id="integrate" activeTab={activeTab} contextKey={objKey}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="publication" onReturn={returnToWorkspace}><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="publication" onReturn={returnToWorkspace}><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'}
+          projectId={galleryProjectId} projectName={galleryProject?.name || ''} projectRole={galleryProject?.role || null}
+          figureRefreshToken={figureRefreshToken}
+          onOpenAnalysisObject={(projectId, objectId) => handleSelectAnalysisObject(projectId, objectId)} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation" onReturn={returnToWorkspace}><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="team" onReturn={returnToWorkspace}><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="agents" onReturn={returnToWorkspace}><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics" onReturn={returnToWorkspace}><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="agent-notebook" onReturn={returnToWorkspace}><TabContent id="agent-notebook" activeTab={activeTab}><AgentNotebookPage {...props} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        {/* Agent work filed under the open analysis tab, in a side panel. */}
+        {activeProjectIdForPipeline && deploymentPolicy.demoMode !== true && (
+          <React.Suspense fallback={null}>
+            <AgentWorkDock projectId={activeProjectIdForPipeline} activeTab={activeTab} theme={theme}
+              role={currentWs?.projects?.find((p) => p.id === activeProjectIdForPipeline)?.role || null}
+              onOpenNotebook={() => setActiveTab('agent-notebook')} onOpenTab={setActiveTab} />
+          </React.Suspense>
+        )}
       </div>
     );
   };
@@ -1528,14 +1652,17 @@ export default function App() {
         )}
         {liveRecoveryNotice && !['analyses', 'pipeline-manager'].includes(activeTab) && !activeTab.startsWith('workflow:') && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
+            {liveReopening && <Loader2 size={12} className="mr-1 inline animate-spin" aria-hidden="true" />}
             {liveRecoveryNotice}
-            <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
+            {!liveReopening && <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>}
           </div>
         )}
         {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
           checkpointSaveState={checkpointSaveState} checkpointSaveBusy={checkpointSaveBusy}
           onSave={() => void handleSaveLiveAnalysis()} onOpenHistory={() => setActiveTab('history')} />}
-        <div className="min-h-0 flex-1">{renderContent()}</div>
+        <FigureProjectProvider value={figureProjectValue}>
+          <div className="min-h-0 flex-1">{renderContent()}</div>
+        </FigureProjectProvider>
       </main>
 
       <ProvenanceDrawer

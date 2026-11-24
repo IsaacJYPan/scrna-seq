@@ -1,5 +1,82 @@
 # Analysis workflows
 
+## From raw counts to a condition comparison
+
+This is the standard path for a study with several samples in two or more
+conditions. Each step runs Seurat on your private analysis; queued steps run on
+the saved version.
+
+1. **Create a project**, then choose **Add dataset → 10X H5 analysis workflow →
+   Multiple conditions**. Upload one Cell Ranger `filtered_feature_bc_matrix.h5`
+   per biological sample. Enter each sample's condition, and its donor code and
+   batch if known. The files are checked when the run starts.
+2. Set QC, normalization, PCA, clustering, and UMAP settings and choose
+   **Prepare multi-condition analysis**. When it completes, choose
+   **Open saved version**.
+3. Inspect **Quality control**, **PCA**, **Cluster**, and **UMAP**. Re-run a step
+   with different settings if needed.
+4. Open **Markers / DEG** and choose **Run marker analysis**.
+5. In **Annotate clusters** on the same page, name every cluster from its top
+   markers. Several clusters can share a label. Keep **Use these labels as the
+   current identities** selected and choose **Apply**. This adds a metadata column
+   (default `cell_type`) and leaves `seurat_clusters` unchanged. Then choose
+   **Save analysis**; queued runs only see saved changes.
+6. UMAP, dot plots, and analyses run with **Group by → Current identities**
+   (markers, pathway enrichment, CellChat) now use the cell-type labels.
+7. Open **Study design**. Under **Samples recorded when this analysis was
+   prepared**, choose **Use recorded samples** to register the conditions and
+   samples you entered at upload and map their cells by `sample_id`.
+8. Add a comparison: numerator and denominator conditions, **Cell type column**
+   `cell_type`, and the replication unit. Save it and choose **Run edgeR
+   pseudobulk**. The newest result appears under the saved contrast. Download
+   the complete table from **Runs & Results → Condition comparison results**.
+
+Cluster labels are your interpretation of marker genes, not an automated or
+reference-validated annotation. Cell types with too few cells or replicates per
+sample are skipped and listed with the result.
+
+Other views along the way:
+
+- **Quality control** opens with the thresholds the pipeline actually applied
+  and states them, so the page does not suggest a different filter.
+- **UMAP → Cell groups → Colour by** colours cells by any categorical metadata
+  column (for example `sample_id` or `condition`) to check mixing across
+  samples.
+- **Exploratory analysis → Group composition by sample** shows the share of
+  each cluster or identity in each value of a metadata column (usually
+  `sample_id` or `condition`). Samples are grouped by condition. This view is
+  descriptive: one bar per sample, with no statistical test.
+- **Pathway enrichment** previews the strongest pathways in both directions,
+  higher and lower in the target group. The complete table is in the export.
+- **CellChat** names each opaque group with its private label while the
+  owner's analysis is open. Its pathway preview lists distinct pathways, each
+  with its strongest sender and receiver pair.
+
+### Worked example: COVID-19 BALF (GSE145926)
+
+The path above was run end to end on GSE145926 (Liao et al., 2020): 12
+bronchoalveolar lavage samples (3 healthy, 3 mild, 6 severe), QC 200–6000
+genes and ≤ 10% mitochondrial RNA, 2000 variable genes, 30 PCs, resolution 0.8.
+That gave 74,861 cells in 29 clusters, which were annotated into 14 cell types
+from their markers. Composition by condition reproduced the paper's main
+finding:
+
+| Cell type | Healthy | Mild | Severe |
+|---|---|---|---|
+| Alveolar macrophages | 88% | 47% | 1.4% |
+| SPP1+ macrophages | 0.2% | 8% | 34% |
+| FCN1+ macrophages | <0.1% | 0.5% | 27% |
+| Neutrophils | 0% | 0.3% | 7.8% |
+| CD8 T cells | 1.3% | 21% | 2.3% |
+
+edgeR pseudobulk, severe versus healthy with donor as the unit, tested the six
+cell types with enough cells in both groups. Interferon-stimulated genes
+(for example `RSAD2`, `IFITM1`, `USP18`) were higher in severe disease. CellChat
+on the labelled cells named CCL and CXCL signalling from FCN1+ macrophages and
+SPP1 signalling from SPP1+ macrophages among its candidates. These are
+descriptive reproductions. The author knew the paper's headline findings before
+running the analysis.
+
 ## Recover an accepted analysis submission
 
 Analysis jobs and recipe steps retain a small submission identifier on this
@@ -174,6 +251,45 @@ automatically submits that import again. If the server process stops or the
 deadline expires, inspect the failed request, refresh the source folder, and start
 a new import explicitly. Public demos disable this feature; a private deployment
 with no authorized data roots shows an empty picker until an operator grants one.
+
+## Figure gallery and history export
+
+**Save Figure** in any plot (UMAP, feature, dot, heatmap, violin) saves the
+figure to the current project's gallery, linked to the analysis it was drawn
+from, with its settings and a preview. This works even where server file
+export is off. Without a project, figures go to your private gallery as before.
+
+In **Figure Gallery** you can:
+
+- search titles, tags and captions, filter by plot type or collection, and see
+  figures grouped by collection (for example "Figure 2");
+- open a figure to see the full preview and its saved settings, and edit its
+  title, collection, tags and caption (owners and admins can edit any figure,
+  analysts the ones they saved; viewers can look and export);
+- choose **Edit figure** to reopen the figure editor with the saved settings on
+  the analysis it came from, and save a new version; the gallery shows the
+  latest version and lists earlier ones;
+- select figures and **Move** them into a collection, or **Export with
+  history**.
+
+**Export with history** keeps only what the selected figures depend on. Each
+recorded step reads and writes parts of the Seurat object (cells, counts,
+normalized data, variable features, scaled data, PCA, clusters, UMAP, markers).
+Working backwards from each figure, a step is kept only when it writes a part
+that the figure, or another kept step, reads: a UMAP keeps load, QC,
+normalization, PCA, clustering and UMAP, but not marker tables computed later
+or a clustering that was overwritten. Checkpoints and forks are followed into
+the parent analysis up to the moment they were taken; a server job that
+produced an analysis keeps everything before it. Steps recorded after a figure
+was saved are not used for it. Code whose effects are unknown (console or
+custom R) is kept, and marked, because it might have changed anything.
+
+The kept objects, jobs and steps are ordered so that each comes after
+everything it reads, and the export contains one R script (each recorded
+step's code in that order, then the plotting code for each figure) plus a JSON
+manifest listing what was kept, what was left out, and any state that has no
+recorded step. The same export is `POST /api/projects/:id/figures/bundles`
+(`format=r` for the script alone) and is recorded in the project audit log.
 
 ## Ranked Pathway Enrichment
 

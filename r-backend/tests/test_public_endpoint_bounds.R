@@ -96,6 +96,8 @@ stopifnot(inherits(
   "try-error"
 ))
 stopifnot(identical(active_sessions[["user-1:obj-c"]], prior_replacement))
+capacity_error <- tryCatch(store_active_session("user-1:obj-c", list(value = 1:10), NULL), error = function(e) e)
+stopifnot(inherits(capacity_error, "live_session_capacity_error"))
 stopifnot(identical(ls(envir = active_sessions, all.names = TRUE), before_empty))
 stopifnot(inherits(
   try(store_active_session("user-3:obj-too-large", list(value = 1:10), NULL), silent = TRUE),
@@ -585,6 +587,56 @@ expect_bad_request(
   ))),
   "uniquely named entries"
 )
+
+# Cluster annotation: a complete mapping can become the active identities;
+# incomplete mappings and computed columns are rejected without mutation.
+bounds_obj_before_annotation <- global_obj
+global_obj <- suppressMessages(CreateSeuratObject(
+  counts = Matrix::Matrix(matrix(1, nrow = 3, ncol = 6, dimnames = list(paste0("G", 1:3), paste0("C", 1:6))), sparse = TRUE),
+  min.cells = 0, min.features = 0
+))
+global_obj$seurat_clusters <- factor(c("0", "0", "1", "1", "2", "2"))
+Idents(global_obj) <- "seurat_clusters"
+response <- new_response()
+expect_bad_request(
+  response,
+  add_meta_mapping_endpoint(response, list(body = list(
+    source_col = "seurat_clusters", new_col = "cell_type", set_identity = TRUE,
+    mapping = list("0" = "T cells", "1" = "B cells")
+  ))),
+  "Add a label for every"
+)
+stopifnot(!("cell_type" %in% colnames(global_obj@meta.data)))
+stopifnot(identical(levels(Idents(global_obj)), c("0", "1", "2")))
+response <- new_response()
+expect_bad_request(
+  response,
+  add_meta_mapping_endpoint(response, list(body = list(
+    source_col = "seurat_clusters", new_col = "seurat_clusters",
+    mapping = list("0" = "T cells", "1" = "B cells", "2" = "Monocytes")
+  ))),
+  "holds computed values"
+)
+response <- new_response()
+expect_bad_request(
+  response,
+  add_meta_mapping_endpoint(response, list(body = list(
+    source_col = "seurat_clusters", new_col = "cell type", set_identity = TRUE,
+    mapping = list("0" = "T cells", "1" = "B cells", "2" = "Monocytes")
+  ))),
+  "starts with a letter"
+)
+annotated <- add_meta_mapping_endpoint(new_response(), list(body = list(
+  source_col = "seurat_clusters", new_col = "cell_type", set_identity = TRUE,
+  mapping = list("2" = "Monocytes", "0" = "T cells", "1" = "T cells")
+)))
+stopifnot(is.null(annotated$error), identical(annotated$active_identity, "cell_type"))
+stopifnot(identical(unlist(annotated$identity_levels), c("Monocytes", "T cells")))
+stopifnot(identical(as.character(global_obj$cell_type), c("T cells", "T cells", "T cells", "T cells", "Monocytes", "Monocytes")))
+stopifnot(identical(levels(Idents(global_obj)), c("Monocytes", "T cells")))
+stopifnot(identical(unname(as.character(Idents(global_obj))), as.character(global_obj$cell_type)))
+stopifnot(identical(as.character(global_obj$seurat_clusters), c("0", "0", "1", "1", "2", "2")))
+global_obj <- bounds_obj_before_annotation
 
 # Render errors after opening a device must close it and unlink the temp image.
 forced_render_path <- file.path(tempdir(), "traceomics-public-render-cleanup.png")

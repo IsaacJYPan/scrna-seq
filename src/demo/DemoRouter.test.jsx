@@ -37,3 +37,13 @@ it('retries a failed policy check without showing an unrelated login screen', as
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   expect(await screen.findByText('Automatic guided demo')).toBeVisible();
 });
+it('does not show the demo splash to a private deployment while loading', async () => {
+  let resolve;
+  readDemoPolicy.mockReturnValue(new Promise((r) => { resolve = r; }));
+  render(<DemoRouter />);
+  expect(screen.getByRole('status')).toHaveTextContent('Connecting to the analysis server');
+  expect(screen.queryByText('Demo')).not.toBeInTheDocument();
+  expect(screen.queryByText('Loading PBMC3k')).not.toBeInTheDocument();
+  resolve({ demoMode: false });
+  expect(await screen.findByText('Full private workbench')).toBeVisible();
+});

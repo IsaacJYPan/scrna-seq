@@ -9,6 +9,10 @@ const release = {
   parameterSchema: { clusterResolution: { type: 'number', min: 0.01, max: 10, default: 0.8 },
     normalizationMethod: { type: 'enum', values: ['LogNormalize', 'SCTransform'], default: 'LogNormalize' } },
   resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 }, inputs: [], outputs: [], approval: null,
+  selectableMetrics: [
+    { key: 'nClusters', label: 'clusters', kind: 'descriptive' },
+    { key: 'postFilterCells', label: 'cells kept after QC', kind: 'quality' },
+  ],
 };
 const run = {
   id: 'run_1', studyId: 'study_1', studyName: 'Sweep', trialNumber: 1, agent: { displayName: 'Runner' },
@@ -28,6 +32,11 @@ describe('AgentWorkflows', () => {
     };
   });
   afterEach(() => { delete window.electronAPI; vi.restoreAllMocks(); });
+
+  it('finishes loading under StrictMode, which mounts components twice in development', async () => {
+    render(<React.StrictMode><AgentWorkflows projectId="proj_1" role="owner" /></React.StrictMode>);
+    expect(await screen.findByRole('button', { name: /approve this exact release/i })).toBeInTheDocument();
+  });
 
   it('approves the exact reviewed digest', async () => {
     render(<AgentWorkflows projectId="proj_1" role="owner" />);
@@ -59,7 +68,7 @@ describe('AgentWorkflows', () => {
 
   it('creates a follow-on study on the accepted result of a clustering study', async () => {
     const markers = { ...release, id: 'rel_2', key: 'seurat-markers', title: 'Markers', jobType: 'deg.find_markers.v1',
-      inputs: [{ name: 'clustering', kind: 'analysis_object', fromRelease: 'seurat-qc-cluster' }],
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster'] }],
       parameterSchema: { logfcThreshold: { type: 'number', min: 0, max: 10, default: 0.25 } }, approval: { id: 'wfa_2' } };
     window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, markers] }));
     window.electronAPI.listStudies = vi.fn(async () => ({ studies: [
@@ -70,14 +79,90 @@ describe('AgentWorkflows', () => {
     fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Markers' } });
     fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_2' } });
     expect(screen.queryByText('pbmc.h5')).not.toBeInTheDocument();
-    const source = screen.getByLabelText(/Builds on the accepted result of/);
-    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a study…', 'Sweep']);
+    const source = screen.getByLabelText(/^Builds on/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a result…', 'Sweep']);
     expect(screen.getByRole('button', { name: /create study/i })).toBeDisabled();
     fireEvent.change(source, { target: { value: 'study_1' } });
     fireEvent.click(screen.getByRole('button', { name: /create study/i }));
     await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
       name: 'Markers', releaseId: 'rel_2', sourceStudyId: 'study_1' })));
     expect(window.electronAPI.createStudy.mock.calls[0][1].datasetIds).toBeUndefined();
+  });
+
+  it('offers accepted studies of every source release of a multi-source follow-on release', async () => {
+    const multi = { ...release, id: 'rel_m', key: 'seurat-multisample', title: 'Multi-sample', approval: { id: 'wfa_m' } };
+    const workbench = { ...release, id: 'rel_w', key: 'study-workbench', title: 'Workbench', jobType: 'explore.summarize.v1',
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster', 'seurat-multisample'] }],
+      parameterSchema: { featureNames: { type: 'geneList' } }, approval: { id: 'wfa_w' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({
+      canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, multi, workbench],
+    }));
+    window.electronAPI.listStudies = vi.fn(async () => ({ studies: [
+      { id: 'study_1', name: 'Single sweep', releaseId: 'rel_1', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: 'run_1' },
+      { id: 'study_2', name: 'Donor sweep', releaseId: 'rel_m', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: 'run_2' },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Investigate' } });
+    fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_w' } });
+    const source = screen.getByLabelText(/^Builds on/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a result…', 'Single sweep', 'Donor sweep']);
+    fireEvent.change(source, { target: { value: 'study_2' } });
+    fireEvent.click(screen.getByRole('button', { name: /create study/i }));
+    await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
+      releaseId: 'rel_w', sourceStudyId: 'study_2' })));
+  });
+
+  it('offers only declared non-inferential metrics as selection rules', async () => {
+    const de = { ...release, id: 'rel_de', key: 'condition-pseudobulk', title: 'Condition DE', jobType: 'condition.pseudobulk_de.v1',
+      selectableMetrics: [
+        { key: 'testedGeneCount', label: 'genes tested', kind: 'descriptive' },
+        { key: 'significantResultCount', label: 'significant results', kind: 'inferential' },
+      ], approval: { id: 'wfa_de' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [de] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    const metric = await screen.findByLabelText('Selection metric');
+    const options = [...metric.options].map((o) => o.value);
+    expect(options).toContain('testedGeneCount');
+    expect(options).not.toContain('significantResultCount');
+  });
+
+  it('lets a person build a study on their own saved pipeline result', async () => {
+    const markers = { ...release, id: 'rel_2', key: 'seurat-markers', title: 'Markers', jobType: 'deg.find_markers.v1',
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromReleases: ['seurat-qc-cluster'], requiresStage: 'cluster' }],
+      parameterSchema: {}, approval: { id: 'wfa_2' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, markers] }));
+    window.electronAPI.listStudies = vi.fn(async () => ({ studies: [], ownResults: [
+      { analysisObjectId: 'ao_own', name: 'Seurat pipeline result', datasetName: 'C144.h5', jobType: 'seurat.pipeline.v1', stopAfter: 'umap' },
+      { analysisObjectId: 'ao_pca', name: 'Stopped at PCA', jobType: 'seurat.pipeline.v1', stopAfter: 'pca' },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Markers' } });
+    fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_2' } });
+    const source = screen.getByLabelText(/^Builds on/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a result…', 'Seurat pipeline result · C144.h5']);
+    fireEvent.change(source, { target: { value: 'ao_own' } });
+    fireEvent.click(screen.getByRole('button', { name: /create study/i }));
+    await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({ sourceAnalysisObjectId: 'ao_own' })));
+    expect(window.electronAPI.createStudy.mock.calls[0][1].sourceStudyId).toBeUndefined();
+  });
+
+  it('searches releases and keeps the exact digest out of sight until asked', async () => {
+    const other = { ...release, id: 'rel_3', key: 'pathway-gsea', title: 'Pathway enrichment', jobType: 'enrichment.gsea.v1', digest: 'c'.repeat(64) };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: true, releases: [release, other] }));
+    render(<AgentWorkflows projectId="proj_1" role="owner" />);
+    expect(await screen.findByText('Pathway enrichment')).toBeInTheDocument();
+    // The digest sits behind the fingerprint control, not in the card text.
+    const exact = screen.getByRole('button', { name: 'Exact release of Seurat QC' });
+    expect(exact).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(exact);
+    expect(exact).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('a'.repeat(64))).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search releases' }), { target: { value: 'pathway' } });
+    expect(screen.queryByText('Seurat QC')).not.toBeInTheDocument();
+    expect(screen.getByText('Pathway enrichment')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search releases' }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Approved' }));
+    expect(screen.getByText('No release matches.')).toBeInTheDocument();
   });
 
   it('opens a candidate result in the workspace', async () => {

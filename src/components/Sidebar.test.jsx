@@ -1,7 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import Sidebar from './Sidebar';
+import Sidebar, { INTEGRATION_UNAVAILABLE_REASON } from './Sidebar';
 
 describe('Sidebar component', () => {
   const mockWorkspaces = [{
@@ -174,17 +174,23 @@ describe('Sidebar component', () => {
     expect(project).toHaveAttribute('aria-expanded', 'true');
   });
 
-  it('disables the legacy live integration action under the production policy', () => {
+  it('disables the legacy live integration action under the production policy and says why', () => {
+    const setActiveTab = vi.fn();
     render(
       <Sidebar
         activeTab="workspace"
         {...baseProps}
+        setActiveTab={setActiveTab}
         selectedObjects={[{ id: 'ao_abc123' }]}
         deploymentPolicy={{ legacyLiveMutationToolsEnabled: false }}
       />
     );
 
-    expect(screen.getByRole('button', { name: /Integration, Unavailable in this workspace/i })).toBeDisabled();
+    const integration = screen.getByRole('button', { name: /Integration, Unavailable in this workspace/i });
+    expect(integration).toHaveAttribute('aria-disabled', 'true');
+    expect(integration).toHaveAccessibleDescription(INTEGRATION_UNAVAILABLE_REASON);
+    fireEvent.click(integration);
+    expect(setActiveTab).not.toHaveBeenCalledWith('integrate');
   });
 
   it('lets a private project open R setup when its runtime is not configured', () => {

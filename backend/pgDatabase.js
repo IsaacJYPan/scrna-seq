@@ -72,6 +72,12 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
+// Ordered forward migrations applied after the frozen baseline (schema.sql).
+// Files are named NNNN_snake_case.sql; each is applied once and recorded with
+// its checksum in schema_migrations. Do not add inline ALTER statements to the
+// baseline; add a migration instead (backend/pg/migrations/README.md).
+const MIGRATIONS_DIR = path.join(__dirname, 'pg', 'migrations');
+const MIGRATION_FILE = /^(\d{4})_[a-z0-9_]+\.sql$/;
 const SCHEMA_CONTRACT_VERSION = 20261036;
 
 let pool = null;
@@ -231,7 +237,7 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_save', 'checkpoint_load',
   'checkpoint_fork', 'deg_markers', 'deg_summary', 'result_checkpoint',
   'enrichment_results', 'enrichment_summary',
-  'cellchat_results', 'cellchat_summary', 'exploration_summary',
+  'cellchat_results', 'cellchat_summary', 'exploration_summary', 'study_inference_summary',
   'condition_de_results', 'condition_de_summary',
   'expert_r_bundle', 'expert_r_summary', 'expert_r_environment'
 ]);
@@ -500,7 +506,83 @@ async function query(text, params = []) {
   return p.query(text, params);
 }
 
-async function verifySchemaContract() {
+function loadMigrations(dir = MIGRATIONS_DIR) {
+  if (!fs.existsSync(dir)) return [];
+  const migrations = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (name === 'README.md') continue;
+    const match = MIGRATION_FILE.exec(name);
+    if (!match) throw codedError('DATABASE_MIGRATION_INVALID', `Unexpected file in migrations: ${name}.`);
+    const sql = fs.readFileSync(path.join(dir, name), 'utf8');
+    migrations.push({
+      version: Number(match[1]),
+      name,
+      sql,
+      checksum: crypto.createHash('sha256').update(sql).digest('hex'),
+    });
+  }
+  for (let i = 1; i < migrations.length; i += 1) {
+    if (migrations[i].version === migrations[i - 1].version) {
+      throw codedError('DATABASE_MIGRATION_INVALID', `Duplicate migration version ${migrations[i].version}.`);
+    }
+  }
+  return migrations;
+}
+
+const SCHEMA_MIGRATIONS_DDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  checksum_sha256 TEXT NOT NULL CHECK (checksum_sha256 ~ '^[0-9a-f]{64}$'),
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`;
+
+// Every applied migration must still exist unchanged: an edited or removed
+// migration means this database and this build disagree about the schema.
+function checkAppliedMigrations(appliedRows, migrations) {
+  for (const row of appliedRows) {
+    const known = migrations.find((m) => m.version === Number(row.version));
+    if (!known) {
+      throw codedError('DATABASE_MIGRATION_UNKNOWN', `Migration ${row.name} is applied but not part of this build.`);
+    }
+    if (known.checksum !== row.checksum_sha256) {
+      throw codedError('DATABASE_MIGRATION_CHANGED', `Migration ${row.name} changed after it was applied.`);
+    }
+  }
+}
+
+async function applyPendingMigrations(client, migrations) {
+  await client.query(SCHEMA_MIGRATIONS_DDL);
+  const { rows } = await client.query('SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version');
+  checkAppliedMigrations(rows, migrations);
+  const applied = new Set(rows.map((row) => Number(row.version)));
+  const appliedNow = [];
+  for (const migration of migrations) {
+    if (applied.has(migration.version)) continue;
+    await client.query(migration.sql);
+    await client.query(
+      'INSERT INTO schema_migrations (version, name, checksum_sha256) VALUES ($1, $2, $3)',
+      [migration.version, migration.name, migration.checksum]
+    );
+    appliedNow.push(migration.name);
+  }
+  return appliedNow;
+}
+
+async function verifySchemaContract(options = {}) {
+  const migrations = loadMigrations(options.migrationsDir);
+  if (migrations.length) {
+    const ledger = await query("SELECT to_regclass('schema_migrations') AS ledger");
+    const rows = ledger.rows[0].ledger
+      ? (await query('SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version')).rows
+      : [];
+    checkAppliedMigrations(rows, migrations);
+    if (rows.length !== migrations.length) {
+      throw codedError(
+        'DATABASE_SCHEMA_MISMATCH',
+        'The production database has pending migrations; apply them before starting this build.'
+      );
+    }
+  }
   const result = await query(
     'SELECT schema_version FROM app_schema_contract WHERE schema_key = $1',
     ['traceomics.runtime']
@@ -516,8 +598,9 @@ async function verifySchemaContract() {
 
 async function initSchema(options = {}) {
   if (options.force !== true && process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY === 'true') {
-    return verifySchemaContract();
+    return verifySchemaContract(options);
   }
+  const migrations = loadMigrations(options.migrationsDir);
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8');
   const p = await connect();
   const client = await p.connect();
@@ -527,8 +610,12 @@ async function initSchema(options = {}) {
     // PostgreSQL's IF NOT EXISTS DDL is not catalog-race-safe across sessions, so
     // serialize the idempotent schema bootstrap with one transaction-scoped lock.
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [0x5343524e, 5]);
+    // Baseline first (idempotent, frozen), then pending migrations in order, all
+    // in this one transaction: an upgrade applies completely or not at all.
     await client.query(sql);
+    const applied = await applyPendingMigrations(client, migrations);
     await client.query('COMMIT');
+    return { appliedMigrations: applied };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -740,15 +827,34 @@ async function acquireStandaloneWorkerLock(options = {}) {
   });
 }
 
+// A database is disposable when its name marks it as one (scrna_test, ci_db,
+// ...), matching scripts/require-test-database.js, or when the caller opts in
+// explicitly for a throwaway database with another name.
+const TEST_DATABASE_NAME = /(?:^|[_-])(test|ci)(?:$|[_-])/i;
+
+function isDisposableTestDatabase(databaseName, env = process.env) {
+  return TEST_DATABASE_NAME.test(String(databaseName || '')) || env.TRACEOMICS_ALLOW_SCHEMA_RESET === '1';
+}
+
 // TEST-ONLY: drop the app tables so a contract run starts from a clean schema.
-// Guarded so it can never run against a production database.
-async function resetSchemaForTests() {
+// Guarded so it can never run against a production or development database.
+async function resetSchemaForTests({ migrationsDir } = {}) {
   if (config.isProduction()) {
     throw new Error('resetSchemaForTests must not run in production.');
   }
+  const { rows: current } = await query('SELECT current_database() AS name');
+  const databaseName = current[0]?.name;
+  if (!isDisposableTestDatabase(databaseName)) {
+    throw new Error(
+      `resetSchemaForTests refuses to drop tables in "${databaseName}". `
+      + 'Point DATABASE_URL at a test database (for example scrna_test), '
+      + 'or set TRACEOMICS_ALLOW_SCHEMA_RESET=1 for a disposable one.',
+    );
+  }
   await query(`
     DROP TABLE IF EXISTS
-      agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
+      agent_notebook_notes, agent_report_reviews, agent_report_sections, agent_reports, agent_sandbox_remote_inputs,
+      agent_sandbox_runs, agent_sandboxes, hpc_qualifications,
       hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
@@ -760,7 +866,7 @@ async function resetSchemaForTests() {
       research_analysis_revisions, research_analyses,
       server_data_imports, private_r_publications, private_r_executions, private_r_kernel_restarts, private_r_kernels,
       workflow_snapshots, workflow_artifacts, workflow_runs, workflow_instances,
-      app_schema_contract,
+      app_schema_contract, schema_migrations,
       project_pipeline_selections, pipeline_definitions,
       project_audit_events,
       project_canonical_analyses, analysis_branch_review_comments,
@@ -775,7 +881,7 @@ async function resetSchemaForTests() {
       account_security_events, operator_audit_events, users
     CASCADE;
   `);
-  await initSchema();
+  await initSchema({ migrationsDir });
 }
 
 async function close() {
@@ -1554,7 +1660,11 @@ async function deleteExpiredDemoGuest(userId) {
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
-      for (const table of ['agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
+      await client.query(
+        'DELETE FROM agent_sandbox_remote_inputs WHERE run_id IN (SELECT id FROM agent_sandbox_runs WHERE project_id = ANY($1::text[]))',
+        [projectIds]
+      );
+      for (const table of ['agent_notebook_notes', 'agent_report_reviews', 'agent_report_sections', 'agent_reports', 'agent_sandbox_runs', 'agent_sandboxes']) {
         await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
       }
       for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {
@@ -2391,7 +2501,36 @@ function rowToAnalysisObject(row) {
     objectHash: row.object_hash,
     metadata: JSON.parse(row.metadata_json || '{}'),
     createdByProvenanceId: row.created_by_provenance_id,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    // Present only on reads that join it (AI_AUTHORSHIP_SELECT).
+    ...(row.ai_authorship ? { aiAuthorship: aiAuthorshipFromRow(row.ai_authorship) } : {}),
+  };
+}
+
+// An object produced by an agent's own sandbox script is the output of
+// AI-written code. The flag travels with the object, with the run's current
+// review state, so every view can show that a person must (or did) review it.
+const AI_AUTHORSHIP_SELECT = `(
+  SELECT jsonb_build_object('sandboxRunId', sr.id, 'sandboxId', sr.sandbox_id, 'agentName', ap.display_name,
+           'reviewState', sr.review_state, 'reviewedAt', sr.reviewed_at, 'reason', sr.agent_reason,
+           'scriptSha256', sr.script_sha256)
+    FROM agent_sandbox_runs sr
+    JOIN jobs j ON j.id = sr.job_id
+    JOIN agent_principals ap ON ap.id = sr.agent_principal_id
+   WHERE j.result_analysis_object_id = ao.id
+   ORDER BY sr.created_at DESC LIMIT 1) AS ai_authorship`;
+
+function aiAuthorshipFromRow(value) {
+  const data = typeof value === 'string' ? JSON.parse(value) : value;
+  return {
+    kind: 'ai_written_code',
+    sandboxRunId: data.sandboxRunId,
+    sandboxId: data.sandboxId,
+    agentName: data.agentName,
+    reviewState: data.reviewState,
+    reviewedAt: data.reviewedAt || null,
+    reason: data.reason || null,
+    scriptSha256: data.scriptSha256,
   };
 }
 
@@ -2670,7 +2809,7 @@ async function listProjectAnalysisObjects(userId, projectId, filters = {}) {
     if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
   }
   const { rows } = await query(
-    `SELECT ao.* FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
+    `SELECT ao.*, ${AI_AUTHORSHIP_SELECT} FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
     params
   );
   return rows.map(rowToAnalysisObject);
@@ -2680,7 +2819,7 @@ async function getProjectAnalysisObject(userId, projectId, objectId) {
   const membership = await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
   if (typeof objectId !== 'string' || objectId === '') return null;
   const { rows } = await query(
-    `SELECT ao.* FROM analysis_objects ao
+    `SELECT ao.*, ${AI_AUTHORSHIP_SELECT} FROM analysis_objects ao
       WHERE ao.id = $1 AND ao.project_id = $2
         AND ${expertRAnalysisObjectVisibilitySql('ao', '$3')}`,
     [objectId, String(projectId), Number(membership.userId)]
@@ -3609,8 +3748,51 @@ function rowToProjectFigure(row) {
     params: parseJson(row.params_json, {}),
     fileFormat: row.file_format,
     thumbnailB64: row.thumbnail_b64,
-    createdAt: row.created_at
+    collection: row.collection_name || '',
+    tags: parseJson(row.tags_json, []),
+    notes: row.notes || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at || null
   };
+}
+
+const MAX_FIGURE_TAGS = 20;
+const MAX_FIGURE_TAG_CHARS = 40;
+const MAX_FIGURE_COLLECTION_CHARS = 80;
+const MAX_FIGURE_TITLE_CHARS = 200;
+const MAX_FIGURE_NOTES_CHARS = 4000;
+const MAX_FIGURE_THUMBNAIL_CHARS = 2 * 1024 * 1024;
+
+// Normalise the organisation fields a figure can carry.
+function normalizeFigureOrganization(input = {}) {
+  const out = {};
+  if (input.title !== undefined) {
+    if (typeof input.title !== 'string') throw codedError('INVALID_FIGURE', 'title must be a string.');
+    out.title = input.title.trim().slice(0, MAX_FIGURE_TITLE_CHARS);
+  }
+  if (input.collection !== undefined) {
+    if (input.collection !== null && typeof input.collection !== 'string') {
+      throw codedError('INVALID_FIGURE', 'collection must be a string.');
+    }
+    out.collection = String(input.collection || '').trim().replace(/\s+/g, ' ').slice(0, MAX_FIGURE_COLLECTION_CHARS);
+  }
+  if (input.tags !== undefined) {
+    if (!Array.isArray(input.tags) || input.tags.some((tag) => typeof tag !== 'string')) {
+      throw codedError('INVALID_FIGURE', 'tags must be an array of strings.');
+    }
+    const tags = [];
+    for (const raw of input.tags) {
+      const tag = raw.trim().replace(/\s+/g, ' ').slice(0, MAX_FIGURE_TAG_CHARS);
+      if (tag && !tags.some((existing) => existing.toLowerCase() === tag.toLowerCase())) tags.push(tag);
+    }
+    if (tags.length > MAX_FIGURE_TAGS) throw codedError('INVALID_FIGURE', `A figure can have at most ${MAX_FIGURE_TAGS} tags.`);
+    out.tags = tags;
+  }
+  if (input.notes !== undefined) {
+    if (typeof input.notes !== 'string') throw codedError('INVALID_FIGURE', 'notes must be a string.');
+    out.notes = input.notes.slice(0, MAX_FIGURE_NOTES_CHARS);
+  }
+  return out;
 }
 
 async function resolveSameProjectRefs(pid, input, { allowResult = false, allowProvenanceRef = false, allowParents = false } = {}) {
@@ -3715,13 +3897,22 @@ async function createProjectFigure(userId, projectId, input = {}) {
   assertPlainObject(params, 'INVALID_PARAMETERS', 'params must be a plain JSON object.');
   const plotType = input.plotType === undefined || input.plotType === null ? 'Unknown' : input.plotType;
   if (typeof plotType !== 'string' || plotType === '') throw codedError('INVALID_PLOT_TYPE', 'plotType must be a non-empty string.');
+  const thumbnail = input.thumbnailB64 != null ? String(input.thumbnailB64) : '';
+  if (thumbnail && (thumbnail.length > MAX_FIGURE_THUMBNAIL_CHARS
+      || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(thumbnail))) {
+    throw codedError('INVALID_FIGURE', 'Figure previews must be a PNG, JPEG or WebP data URL under 2 MB.');
+  }
   const refs = await resolveSameProjectRefs(pid, input, { allowProvenanceRef: true });
+  const organization = normalizeFigureOrganization({
+    collection: input.collection, tags: input.tags, notes: input.notes,
+  });
   const id = generateFigureId();
   const { rows } = await query(
     `INSERT INTO figure_collection
        (id, user_email, project_id, created_by_user_id, analysis_object_id, job_id, provenance_id,
-        dataset_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64)
-     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, $12)
+        dataset_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64,
+        collection_name, tags_json, notes)
+     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, $12, $13, $14, $15)
      RETURNING *`,
     [
       id, pid, Number(actor), refs.analysisObjectId || null, refs.jobId || null,
@@ -3729,7 +3920,10 @@ async function createProjectFigure(userId, projectId, input = {}) {
       input.title != null ? String(input.title) : '',
       JSON.stringify(params),
       input.fileFormat != null ? String(input.fileFormat) : 'png',
-      input.thumbnailB64 != null ? String(input.thumbnailB64) : ''
+      thumbnail,
+      organization.collection || '',
+      JSON.stringify(organization.tags || []),
+      organization.notes || ''
     ]
   );
   return rowToProjectFigure(rows[0]);
@@ -3756,6 +3950,45 @@ async function listProjectFigures(userId, projectId, filters = {}) {
 async function getProjectFigure(userId, projectId, figureId) {
   await requireProjectRole(userId, projectId, FIGURE_READ_ROLES);
   return getProjectFigureRow(figureId, projectId);
+}
+
+// Organise a project figure: rename, caption, file into a collection, tag.
+// Owners/admins may edit any figure; analysts may edit the figures they saved.
+async function requireFigureEditor(userId, projectId, figureId, verb) {
+  const membership = await requireProjectRole(userId, projectId, FIGURE_WRITE_ROLES);
+  const existing = await getProjectFigureRow(figureId, projectId);
+  if (!existing) throw codedError('FIGURE_NOT_FOUND', 'Figure not found.');
+  if (!['owner', 'admin'].includes(membership.role) && existing.createdByUserId !== Number(membership.userId)) {
+    throw codedError('FORBIDDEN', `Only the person who saved this figure, or a project owner or admin, can ${verb} it.`);
+  }
+  return existing;
+}
+
+async function updateProjectFigure(userId, projectId, figureId, input = {}) {
+  const existing = await requireFigureEditor(userId, projectId, figureId, 'edit');
+  const changes = normalizeFigureOrganization(input);
+  const columns = { title: 'title', collection: 'collection_name', tags: 'tags_json', notes: 'notes' };
+  const sets = [];
+  const params = [String(figureId), String(projectId)];
+  for (const [field, column] of Object.entries(columns)) {
+    if (changes[field] === undefined) continue;
+    params.push(field === 'tags' ? JSON.stringify(changes[field]) : changes[field]);
+    sets.push(`${column} = $${params.length}`);
+  }
+  if (sets.length === 0) return existing;
+  const { rows } = await query(
+    `UPDATE figure_collection SET ${sets.join(', ')}, updated_at = now()
+      WHERE id = $1 AND project_id = $2 RETURNING *`,
+    params
+  );
+  return rowToProjectFigure(rows[0]);
+}
+
+async function removeProjectFigure(userId, projectId, figureId) {
+  await requireFigureEditor(userId, projectId, figureId, 'remove');
+  const result = await query('DELETE FROM figure_collection WHERE id = $1 AND project_id = $2',
+    [String(figureId), String(projectId)]);
+  return result.rowCount > 0;
 }
 
 const CHECKPOINT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
@@ -4470,7 +4703,10 @@ function rowToWorkerJob(row) {
     attempts: Number(row.attempts || 0),
     maxAttempts: Number(row.max_attempts || 1),
     priority: Number(row.priority || 0),
-    lastWorkerError: row.last_worker_error ? parseJson(row.last_worker_error, null) : null
+    lastWorkerError: row.last_worker_error ? parseJson(row.last_worker_error, null) : null,
+    // Set by the claim: whether an agent run owns this job. Agent jobs must
+    // pass the workflow trust recheck; it is never skipped for them.
+    ...(typeof row.is_agent_job === 'boolean' ? { agentRun: row.is_agent_job } : {})
   };
 }
 
@@ -4654,15 +4890,30 @@ async function getExpertRPrivateInputsForJobByWorker(jobId, workerId, claimToken
 }
 
 async function getConditionComparisonInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
-  const row = await requireClaimedJobRowByWorker(
-    jobId, workerId, claimToken, opts, 'condition.pseudobulk_de.v1'
-  );
+  // Condition DE and the workbench's contrast recipes resolve the same
+  // person-registered contrast snapshot; neither reads design from cell labels.
+  const row = await requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts);
+  let contrastId;
+  if (row.job_type === 'condition.pseudobulk_de.v1') {
+    contrastId = validateConditionComparisonParams(parseJson(row.parameters_json, {})).params.contrastId;
+  } else if (row.job_type === 'explore.summarize.v1') {
+    const { CONTRAST_RECIPES, validateExploratoryAnalysisParams } = require('./exploratoryAnalysis');
+    const { params } = validateExploratoryAnalysisParams(parseJson(row.parameters_json, {}));
+    if (!CONTRAST_RECIPES.includes(params.recipe)) {
+      throw codedError('INVALID_JOB_TYPE', 'This exploratory recipe does not test a condition contrast.');
+    }
+    contrastId = params.contrastId;
+  } else {
+    throw codedError('INVALID_JOB_TYPE', 'A claimed condition-contrast job is required.');
+  }
   const object = await resolveOwnedAnalysisObjectForClaimedJob(row);
-  const { params } = validateConditionComparisonParams(parseJson(row.parameters_json, {}));
   const contrastResult = await query(
-    `SELECT * FROM condition_contrasts
-     WHERE id = $1 AND project_id = $2 AND analysis_object_id = $3`,
-    [params.contrastId, row.project_id, object.id]
+    `SELECT contrast.*, numerator.name AS numerator_name, denominator.name AS denominator_name
+     FROM condition_contrasts contrast
+     JOIN study_conditions numerator ON numerator.id = contrast.numerator_condition_id
+     JOIN study_conditions denominator ON denominator.id = contrast.denominator_condition_id
+     WHERE contrast.id = $1 AND contrast.project_id = $2 AND contrast.analysis_object_id = $3`,
+    [contrastId, row.project_id, object.id]
   );
   const contrast = contrastResult.rows[0];
   if (!contrast) throw codedError('CONTRAST_NOT_FOUND', 'Condition contrast not found.');
@@ -4709,6 +4960,8 @@ async function getConditionComparisonInputsForJobByWorker(jobId, workerId, claim
     contrast: {
       id: contrast.id,
       name: contrast.name,
+      numeratorName: contrast.numerator_name,
+      denominatorName: contrast.denominator_name,
       unitOfReplication: contrast.unit_of_replication,
       paired: contrast.paired === true,
       cellTypeColumn: contrast.cell_type_column,
@@ -5042,7 +5295,7 @@ async function claimNextJob(workerId, opts = {}) {
          started_at = COALESCE(started_at, $3),
          updated_at = $3
        WHERE id = $5 AND status = 'queued' AND attempts < max_attempts
-       RETURNING *`,
+       RETURNING *, EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.job_id = jobs.id) AS is_agent_job`,
       [wid, claimToken, now, addSeconds(now, leaseSeconds), id]
     );
     await client.query('COMMIT');
@@ -6983,12 +7236,15 @@ async function getAgentRunTrustForJob(jobId) {
 }
 
 module.exports = {
+  isDisposableTestDatabase,
   getAgentRunTrustForJob,
   // lifecycle
   isConfigured,
   connect,
   query,
   initSchema,
+  loadMigrations,
+  verifySchemaContract,
   checkHealth,
   reportStandaloneWorkerRuntimeState,
   getStandaloneWorkerRuntimeStatus,
@@ -7191,6 +7447,8 @@ module.exports = {
   createProjectFigure,
   listProjectFigures,
   getProjectFigure,
+  updateProjectFigure,
+  removeProjectFigure,
   // artifacts
   createArtifact,
   createResultCheckpoint,

@@ -6,11 +6,14 @@ import ExecutionHistory from '../components/ExecutionHistory';
 import RunMonitor from '../components/RunMonitor';
 import SubmissionRecovery from '../components/SubmissionRecovery';
 import PageHeader from '../components/PageHeader';
+import { SUBMISSION_RECOVERY_MESSAGES } from '../executions/submissionRecoveryMessages';
 import RefreshButton from '../components/RefreshButton';
 import { formatDate } from '../components/analysisRunDisplay';
 
 const SAFE_RESEARCHER_ERROR_MESSAGES = new Set([
   'Project not found.',
+  // These say what to do next (check a saved receipt, sign in again, ...).
+  ...Object.values(SUBMISSION_RECOVERY_MESSAGES),
 ]);
 
 function safeApiErrorMessage(error) {
@@ -39,7 +42,7 @@ function formatJobError(job) {
     'spatial.seurat.v1': 'Spatial preprocessing could not use this Visium bundle. Review dataset validation and the required Space Ranger files before trying again.',
     'condition.pseudobulk_de.v1': 'Condition comparison could not use the registered design. Review sample bindings, replication, and the selected contrast before trying again.',
   };
-  if (job?.jobType === 'expert.r.v1' || job?.jobType === 'cellchat.infer.v1') {
+  if (job?.jobType === 'expert.r.v1' || job?.jobType === 'cellchat.infer.v1' || job?.jobType === 'condition.pseudobulk_de.v1') {
     return publicErrorMessage(job.error, jobFallbacks[job.jobType] || fallback);
   }
   return formatApiError(job?.error, jobFallbacks[job?.jobType] || fallback);

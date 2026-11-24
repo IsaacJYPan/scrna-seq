@@ -59,7 +59,9 @@ function createRateLimiter() {
   };
 }
 
-function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports }) {
+function automationRoutes({
+  db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports, notebook
+}) {
   const inspection = require('./inspection').createRunInspection({ db, admission });
   const router = express.Router();
   const rateLimit = createRateLimiter();
@@ -174,6 +176,12 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
     schema: 'traceomics.automation.workflows.v1',
     releases: await approvals.listApprovedForProject(actor.delegation.projectId),
   })));
+  // Verified code first: every reviewed workflow and library method, approved
+  // here or not, so an agent checks it before writing its own R.
+  router.get('/projects/:projectId/verified-code', route('metadata.read', async (req, actor) => ({
+    schema: 'traceomics.automation.verified-code.v1',
+    ...(await require('./verifiedCode').listVerifiedCode(approvals, actor.delegation.projectId)),
+  })));
   router.get('/projects/:projectId/targets', route('metadata.read', () => targets.list()));
   router.get('/projects/:projectId/studies', route('workflow.plan', async (req, actor) => ({
     schema: 'traceomics.automation.studies.v1',
@@ -202,11 +210,94 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
   router.post('/projects/:projectId/runs/:runId/cancel', route('run.cancelOwn', async (req, actor) => ({
     schema: 'traceomics.automation.run.v1', run: await admission.cancelForAgent(actor, req.params.runId),
   })));
-  router.get('/projects/:projectId/runs/:runId/inspection',route('results.inspect',async(req,actor)=>({schema:'traceomics.automation.inspection.v1',...(await inspection.inspect(actor,req.params.runId))})));
-  router.get('/projects/:projectId/runs/:runId/artifacts/:artifactId',route('results.inspect',async(req,actor)=>({schema:'traceomics.automation.artifact-preview.v1',...(await inspection.artifact(actor,req.params.runId,req.params.artifactId,{offset:req.query.offset===undefined?0:Number(req.query.offset),limit:req.query.limit===undefined?50:Number(req.query.limit),format:req.query.format||'png',table:req.query.table,group:req.query.group}))})));
+  router.get(
+    '/projects/:projectId/runs/:runId/inspection',
+    route('results.inspect', async (req, actor) => ({
+      schema: 'traceomics.automation.inspection.v1',
+      ...(await inspection.inspect(actor, req.params.runId))
+    }))
+  );
+  router.get(
+    '/projects/:projectId/runs/:runId/artifacts/:artifactId',
+    route('results.inspect', async (req, actor) => ({
+      schema: 'traceomics.automation.artifact-preview.v1',
+      ...(await inspection.artifact(actor, req.params.runId, req.params.artifactId, {
+        offset: req.query.offset === undefined ? 0 : Number(req.query.offset),
+        limit: req.query.limit === undefined ? 50 : Number(req.query.limit),
+        format: req.query.format || 'png',
+        table: req.query.table,
+        group: req.query.group
+      }))
+    }))
+  );
+
+  // Project figures: what people saved, viewable by the agent, and the
+  // dependency-ordered history behind any selection of them. Read as the
+  // sponsor, so the sponsor's current project role bounds what is visible.
+  const STATUS_BY_CODE = {
+    FIGURE_NOT_FOUND: 404, ANALYSIS_OBJECT_NOT_FOUND: 404, NOT_FOUND: 404, FORBIDDEN: 403,
+    EMPTY_SELECTION: 400, SELECTION_TOO_LARGE: 400, SELECTION_CYCLE: 400, INVALID_FIGURE_ID: 400,
+    INVALID_ANALYSIS_OBJECT_ID: 400,
+  };
+  const withStatus = async (work) => {
+    try { return await work(); } catch (error) {
+      if (!error.status && STATUS_BY_CODE[error.code]) error.status = STATUS_BY_CODE[error.code];
+      throw error;
+    }
+  };
+  const figureView = (actor, figure, { image = false } = {}) => {
+    const labels = actor.delegation.disclosureProfile === 'labels';
+    const match = image && typeof figure.thumbnailB64 === 'string'
+      ? /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(figure.thumbnailB64) : null;
+    return {
+      id: figure.id, plotType: figure.plotType, analysisObjectId: figure.analysisObjectId,
+      createdByUserId: figure.createdByUserId, createdAt: figure.createdAt, updatedAt: figure.updatedAt,
+      hasPreview: Boolean(figure.thumbnailB64),
+      revisionOf: figure.params?.revision_of || null,
+      ...(labels ? {
+        title: figure.title, collection: figure.collection, tags: figure.tags, notes: figure.notes, params: figure.params
+      } : {}),
+      ...(match ? { image: { mimeType: match[1], base64: match[2] } } : {}),
+    };
+  };
+  router.get('/projects/:projectId/figures', route('results.read', async (req, actor) => withStatus(async () => ({
+    schema: 'traceomics.automation.figures.v1',
+    figures: (await db.listProjectFigures(actor.sponsorUserId, actor.delegation.projectId)).slice(0, 500)
+      .map((figure) => figureView(actor, figure)),
+  }))));
+  router.get('/projects/:projectId/figures/:figureId', route('results.read', async (req, actor) => withStatus(async () => {
+    if (!/^fig_[0-9a-f]+$/.test(req.params.figureId)) throw Object.assign(new Error('Malformed figure ID.'), { code: 'INVALID_FIGURE_ID', status: 400 });
+    const figure = await db.getProjectFigure(actor.sponsorUserId, actor.delegation.projectId, req.params.figureId);
+    if (!figure) return null;
+    return { schema: 'traceomics.automation.figure.v1', figure: figureView(actor, figure, { image: true }) };
+  })));
+  router.post('/projects/:projectId/figures/bundles', route('results.read', async (req, actor) => withStatus(async () => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const bundle = await require('../figureBundles').buildFigureBundle(actor.sponsorUserId, actor.delegation.projectId, {
+      figureIds: body.figureIds, analysisObjectIds: body.analysisObjectIds,
+    });
+    await recordAutomationEvent(db, {
+      projectId: actor.delegation.projectId, actor, action: 'figure.bundle-read', decision: 'allowed',
+      targetType: 'project', targetId: actor.delegation.projectId,
+    });
+    return { schema: 'traceomics.automation.figure-bundle.v1', bundle };
+  })));
 
   // Isolated development (docs/spec.md phase 4): the agent's own R scripts.
   if (sandboxes) {
+    // Remote folders a person pinned to the sandbox, on the cluster. The
+    // server resolves every path; the agent never gets a shell or a key.
+    router.get('/projects/:projectId/sandboxes/:sandboxId/remote/:root', route('development.executeCandidate', async (req, actor) => ({
+      schema: 'traceomics.automation.remote-listing.v1',
+      ...(await sandboxes.listRemoteForAgent(actor, req.params.sandboxId, req.params.root,
+        typeof req.query.path === 'string' ? req.query.path : '')),
+    })));
+    router.get('/projects/:projectId/sandboxes/:sandboxId/remote/:root/file', route('development.executeCandidate', async (req, actor) => ({
+      schema: 'traceomics.automation.remote-file.v1',
+      ...(await sandboxes.readRemoteForAgent(actor, req.params.sandboxId, req.params.root,
+        typeof req.query.path === 'string' ? req.query.path : '',
+        { offset: req.query.offset === undefined ? 0 : Number(req.query.offset) })),
+    })));
     router.get('/projects/:projectId/sandboxes', route('development.executeCandidate', async (req, actor) => ({
       schema: 'traceomics.automation.sandboxes.v1', sandboxes: await sandboxes.listForAgent(actor),
     })));
@@ -249,6 +340,17 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
     router.post('/projects/:projectId/reports/:reportId/sections', route('report.write', async (req, actor) => {
       const { section, replayed } = await reports.writeSectionForAgent(actor, req.params.reportId, req.body);
       return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.report-section.v1', replayed, section } };
+    }));
+  }
+
+  // The agent notebook: this agent's cells by analysis tab, and Markdown notes
+  // it places between them.
+  if (notebook) {
+    router.get('/projects/:projectId/notebook', route('metadata.read', async (req, actor) =>
+      notebook.readForAgent(actor, { tab: typeof req.query.tab === 'string' ? req.query.tab : undefined })));
+    router.post('/projects/:projectId/notebook/notes', route('report.write', async (req, actor) => {
+      const { note, replayed } = await notebook.addNoteForAgent(actor, req.body);
+      return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.notebook-note.v1', replayed, note } };
     }));
   }
 

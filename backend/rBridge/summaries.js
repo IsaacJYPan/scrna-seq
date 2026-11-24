@@ -82,14 +82,49 @@ function sanitizePipelineSummary(body) {
       diagnostics[phase]={};
       for(const metric of ['nCount_RNA','nFeature_RNA','percent.mt']) {
         const q=s.diagnostics[phase]?.[metric];if(!q)continue;
-        diagnostics[phase][metric]=Object.fromEntries(['min','q25','median','q75','max'].filter(k=>typeof q[k]==='number'&&Number.isFinite(q[k])).map(k=>[k,q[k]]));
+        diagnostics[phase][metric] = Object.fromEntries(
+          ['min', 'q25', 'median', 'q75', 'max']
+            .filter(k => typeof q[k] === 'number' && Number.isFinite(q[k]))
+            .map(k => [k, q[k]])
+        );
       }
     }
     diagnostics.pcaVariance=(s.diagnostics.pca_variance||[]).slice(0,100).filter(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1);
     diagnostics.pcaVarianceBasis='fraction_among_stored_PCs';
-    diagnostics.sampleQc=(s.diagnostics.sample_qc||[]).slice(0,48).map(row=>({sample:sanitizeRuntimeField(row.sample,80),condition:sanitizeRuntimeField(row.condition,80),cells:sanitizeCount(row.cells),...Object.fromEntries(['counts','genes','mitochondrial'].map(metric=>[metric,Object.fromEntries(['min','q25','median','q75','max'].filter(k=>Number.isFinite(row[metric]?.[k])).map(k=>[k,row[metric][k]]))]))}));
-    diagnostics.clusterSizes=Object.fromEntries(Object.entries(s.diagnostics.cluster_sizes||{}).filter(([k,v])=>/^[A-Za-z0-9._-]{1,64}$/.test(k)&&Number.isSafeInteger(v)&&v>=0).slice(0,256));
-    diagnostics.checks=Object.fromEntries(['contains_nonfinite_counts','negative_counts','integer_counts','doublets_assessed','ambient_rna_assessed','batch_effects_assessed'].filter(k=>typeof s.diagnostics.checks?.[k]==='boolean').map(k=>[k,s.diagnostics.checks[k]]));
+    diagnostics.sampleQc = (s.diagnostics.sample_qc || [])
+      .slice(0, 48)
+      .map(row => ({
+        sample: sanitizeRuntimeField(row.sample, 80),
+        condition: sanitizeRuntimeField(row.condition, 80),
+        cells: sanitizeCount(row.cells),
+        ...Object.fromEntries(
+          ['counts', 'genes', 'mitochondrial'].map(metric => [
+            metric,
+            Object.fromEntries(
+              ['min', 'q25', 'median', 'q75', 'max']
+                .filter(k => Number.isFinite(row[metric]?.[k]))
+                .map(k => [k, row[metric][k]])
+            )
+          ])
+        )
+      }));
+    diagnostics.clusterSizes = Object.fromEntries(
+      Object.entries(s.diagnostics.cluster_sizes || {})
+        .filter(([k, v]) => /^[A-Za-z0-9._-]{1,64}$/.test(k) && Number.isSafeInteger(v) && v >= 0)
+        .slice(0, 256)
+    );
+    diagnostics.checks = Object.fromEntries(
+      [
+        'contains_nonfinite_counts',
+        'negative_counts',
+        'integer_counts',
+        'doublets_assessed',
+        'ambient_rna_assessed',
+        'batch_effects_assessed'
+      ]
+        .filter(k => typeof s.diagnostics.checks?.[k] === 'boolean')
+        .map(k => [k, s.diagnostics.checks[k]])
+    );
     out.diagnostics=diagnostics;
   }
   if (nCells !== null) out.nCells = nCells;
@@ -296,7 +331,7 @@ function sanitizeExplorationSummary(body) {
   const source = body && typeof body === 'object' ? body : {};
   const recipe = sanitizeRuntimeField(source.recipe, 64);
   const out = {
-    recipe: ['overview', 'feature_by_group', 'metadata_distribution'].includes(recipe)
+    recipe: ['overview', 'feature_by_group', 'metadata_distribution', 'group_composition'].includes(recipe)
       ? recipe
       : 'overview',
     panels: [],
@@ -311,7 +346,7 @@ function sanitizeExplorationSummary(body) {
   for (const panel of panels.slice(0, 24)) {
     if (!panel || typeof panel !== 'object') continue;
     const type = sanitizeRuntimeField(panel.type, 32);
-    if (!['histogram', 'bar', 'feature_group'].includes(type)) continue;
+    if (!['histogram', 'bar', 'feature_group', 'composition'].includes(type)) continue;
     const safe = {
       type,
       title: sanitizeRuntimeField(panel.title, 160) || 'Exploratory summary',
@@ -323,7 +358,7 @@ function sanitizeExplorationSummary(body) {
     for (const row of rows.slice(0, 512)) {
       if (!row || typeof row !== 'object') continue;
       const clean = {};
-      for (const key of ['label', 'feature', 'group']) {
+      for (const key of ['label', 'feature', 'group', 'condition']) {
         const value = sanitizeRuntimeField(row[key], 128);
         if (value) clean[key] = value;
       }
@@ -336,6 +371,7 @@ function sanitizeExplorationSummary(body) {
         'q25',
         'median',
         'q75',
+        'fraction',
       ]) {
         const value = sanitizeStatNumber(row[key]);
         if (value !== null) clean[key === 'pct_detected' ? 'pctDetected' : key] = value;
@@ -456,6 +492,7 @@ function sanitizeConditionComparisonSummary(body) {
   const top = Array.isArray(source.top_results) ? source.top_results.slice(0, 50) : [];
   return {
     method: sanitizeRuntimeField(source.method, 40),
+    countAssay: ['RNA', 'Spatial'].includes(source.count_assay) ? source.count_assay : null,
     cellTypeColumn: sanitizeRuntimeField(source.cell_type_column, 64),
     unitOfReplication: sanitizeRuntimeField(source.unit_of_replication, 20),
     paired: source.paired === true,

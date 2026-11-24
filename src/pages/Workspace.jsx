@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import LoadModal, { isLiveLoadResult } from '../components/LoadModal';
+import AiAuthorshipBadge from '../components/AiAuthorshipBadge';
 
 function boundedDemoSetting(value, fallback, minimum, maximum) {
   const parsed = Number(value);
@@ -468,6 +469,7 @@ export default function Workspace({
                         ) : (
                           <>
                             <div className="text-sm font-bold text-text break-words" title={obj.name}>{obj.name}</div>
+                            <AiAuthorshipBadge authorship={obj.aiAuthorship} />
                             {obj.isSubset && (
                               <span className="text-xs font-semibold px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/10 border-amber-500/20">
                                 subset

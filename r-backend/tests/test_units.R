@@ -931,6 +931,12 @@ run_test("ranked enrichment validates a fixed and bounded contract", function() 
   assert("valid parameters preserve the only supported gene-set collection",
          identical(parsed$gene_set_collection, "GO_BP"))
   assert("the public pathway preview is capped at 25 rows", parsed$top_pathways == 25L)
+  balanced_rows <- get("enrichment_gsea_balanced_preview_rows", envir = plumber_env)
+  ranked <- data.frame(normalized_enrichment_score = c(-2, -1.9, -1.8, -1.7, 1.5, 1.4))
+  assert("the pathway preview shows both directions when one dominates the p-value order",
+         identical(balanced_rows(ranked, 4L), c(5L, 6L, 1L, 2L)))
+  assert("the pathway preview fills from the other direction when one side runs short",
+         identical(balanced_rows(ranked[1:5, , drop = FALSE], 4L), c(5L, 1L, 2L, 3L)))
 
   rejects <- function(value) {
     inherits(tryCatch(normalize_params(value), error = identity), "error")

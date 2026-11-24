@@ -815,31 +815,30 @@ function(req, res) {
   }
   p <- body$params
 
-  # Defensive coercion/clamps (Node already validated against its allowlist; R never
-  # trusts blindly). A bad/missing value falls back to the documented default.
-  as_int <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.integer(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
+  # Strict validation (Node validated first; R never trusts blindly). An invalid
+  # value is refused, never replaced by a default or clamped to a bound.
+  effective <- tryCatch(
+    validate_seurat_pipeline_parameters(p, parameter_names = c(
+      "normalizationMethod", "scaleFactor", "variableFeatures", "pcaDims", "clusterDims",
+      "clusterResolution", "umapDims", "umapComponents", "umapNeighbors", "umapMinDist", "seed"
+    )),
+    error = function(e) e
+  )
+  if (inherits(effective, "error")) {
+    res$status <- 400
+    return(list(error = conditionMessage(effective)))
   }
-  as_num <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.numeric(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
-  }
-
-  norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
-  if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
-  scale_factor    <- as_num(p$scaleFactor,       10000, 1, 1e7)
-  nfeatures       <- as_int(p$variableFeatures,  2000, 50, 10000)
-  pca_dims        <- as_int(p$pcaDims,           50, 2, 100)
-  cluster_dims    <- as_int(p$clusterDims,       15, 2, 100)
-  cluster_res     <- as_num(p$clusterResolution, 0.8, 0.01, 10)
-  umap_dims       <- as_int(p$umapDims,          15, 2, 100)
-  umap_components <- as_int(p$umapComponents,    2, 2, 3)
-  umap_neighbors  <- as_int(p$umapNeighbors,     30, 2, 200)
-  umap_min_dist   <- as_num(p$umapMinDist,       0.3, 0, 1)
-  used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+  norm_method     <- effective$normalizationMethod
+  scale_factor    <- effective$scaleFactor
+  nfeatures       <- effective$variableFeatures
+  pca_dims        <- effective$pcaDims
+  cluster_dims    <- effective$clusterDims
+  cluster_res     <- effective$clusterResolution
+  umap_dims       <- effective$umapDims
+  umap_components <- effective$umapComponents
+  umap_neighbors  <- effective$umapNeighbors
+  umap_min_dist   <- effective$umapMinDist
+  used_seed       <- effective$seed
 
   storage_key <- body$storage_key
   if (is.null(storage_key) || !is.character(storage_key) || nchar(storage_key) == 0) {
@@ -912,6 +911,7 @@ function(req, res) {
         resolution = cluster_res,
         used_seed = used_seed
       ),
+      effective_parameters = effective,
       checkpoint = list(
         saved = saved,
         checksum_sha256 = if (is.na(checksum)) NULL else checksum,
@@ -964,15 +964,14 @@ function(req, res) {
     }
   }
 
-  as_int <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.integer(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
-  }
-  as_num <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.numeric(v))
-    if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
+  # Refuse invalid parameters before any work; the core validates again.
+  parameter_error <- tryCatch({
+    validate_seurat_pipeline_parameters(p)
+    NULL
+  }, error = function(e) conditionMessage(e))
+  if (!is.null(parameter_error)) {
+    res$status <- 400
+    return(list(error = parameter_error))
   }
 
   dataset_storage_key <- body$dataset_storage_key
@@ -1163,13 +1162,11 @@ function(req, res) {
     res$status <- 400
     return(list(error = "Missing storage key."))
   }
-  as_int <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.integer(v)); if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
-  }
-  as_num <- function(v, d, lo, hi) {
-    x <- suppressWarnings(as.numeric(v)); if (length(x) != 1 || is.na(x)) return(d)
-    max(lo, min(hi, x))
+  # Strict validation: an invalid value is refused, never defaulted or clamped.
+  effective <- tryCatch(validate_seurat_pipeline_parameters(p), error = function(e) e)
+  if (inherits(effective, "error")) {
+    res$status <- 400
+    return(list(error = conditionMessage(effective)))
   }
   tryCatch({
     receipt_binding <- validate_completion_receipt_binding(
@@ -1189,8 +1186,8 @@ function(req, res) {
     if (!inherits(obj, "Seurat") || ncol(obj) < 3 || length(Images(obj)) < 1) {
       stop("Visium bundle did not produce a spatial Seurat object.")
     }
-    min_cells <- as_int(p$minCells, 3, 0, 10000)
-    min_features <- as_int(p$minFeatures, 200, 0, 100000)
+    min_cells <- effective$minCells
+    min_features <- effective$minFeatures
     spatial_counts <- LayerData(obj, assay = "Spatial", layer = "counts")
     keep_features <- Matrix::rowSums(spatial_counts > 0) >= min_cells
     keep_spots <- obj$nFeature_Spatial >= min_features
@@ -1201,51 +1198,61 @@ function(req, res) {
     raw_obj <- obj
     warnings <- c()
     pre_filter_cells <- ncol(obj)
-    mt_ok <- TRUE
-    tryCatch({
-      obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
-    }, error = function(e) {
-      mt_ok <<- FALSE; warnings <<- c(warnings, "percent.mt could not be computed")
-      obj[["percent.mt"]] <<- 0
-    })
-    apply_qc <- isTRUE(p$applyQcFilter)
+    # Count mitochondrial features: with none, percent.mt is 0 everywhere and a
+    # filter on it would silently pass every spot.
+    mt_feature_count <- sum(grepl("^[Mm][Tt]-", rownames(obj)))
+    mt_ok <- mt_feature_count > 0L
+    if (mt_ok) {
+      tryCatch({
+        obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
+      }, error = function(e) {
+        mt_ok <<- FALSE; warnings <<- c(warnings, "percent.mt could not be computed")
+        obj[["percent.mt"]] <<- 0
+      })
+    } else {
+      warnings <- c(warnings, "No mitochondrial genes (MT- or mt- prefix) were found; percent.mt is unavailable and is not a QC criterion.")
+      obj[["percent.mt"]] <- 0
+    }
+    apply_qc <- effective$applyQcFilter
+    if (apply_qc && !mt_ok && effective$maxPercentMt < 100) {
+      stop("maxPercentMt filtering needs mitochondrial genes, but none matched the MT- prefix.")
+    }
     if (apply_qc) {
-      min_features_filter <- as_int(p$minFeaturesFilter, 200, 0, 100000)
-      max_features_filter <- as_int(p$maxFeaturesFilter, 2500, 1, 1000000)
-      max_percent_mt <- as_num(p$maxPercentMt, 5, 0, 100)
+      min_features_filter <- effective$minFeaturesFilter
+      max_features_filter <- effective$maxFeaturesFilter
+      max_percent_mt <- effective$maxPercentMt
       keep <- obj$nFeature_Spatial >= min_features_filter &
         obj$nFeature_Spatial <= max_features_filter & obj$percent.mt <= max_percent_mt
       if (sum(keep) < 3) stop("QC filtering would leave fewer than 3 spots.")
       obj <- subset(obj, cells = colnames(obj)[keep])
     }
     post_filter_cells <- ncol(obj)
-    norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
-    if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
-    nfeatures <- as_int(p$variableFeatures, 2000, 50, 10000)
-    used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+    norm_method <- effective$normalizationMethod
+    nfeatures <- effective$variableFeatures
+    used_seed <- effective$seed
     set.seed(used_seed)
     if (identical(norm_method, "SCTransform")) {
       obj <- SCTransform(obj, assay = "Spatial", verbose = FALSE)
     } else {
       obj <- NormalizeData(obj, assay = "Spatial", normalization.method = "LogNormalize",
-                           scale.factor = as_num(p$scaleFactor, 10000, 1, 1e7), verbose = FALSE)
+                           scale.factor = effective$scaleFactor, verbose = FALSE)
       obj <- FindVariableFeatures(obj, assay = "Spatial", selection.method = "vst",
                                   nfeatures = nfeatures, verbose = FALSE)
       obj <- ScaleData(obj, assay = "Spatial", features = VariableFeatures(obj), verbose = FALSE)
     }
-    npcs <- min(as_int(p$pcaDims, 50, 2, 100), ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
+    npcs <- min(effective$pcaDims, ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
     if (is.na(npcs) || npcs < 2) stop("Insufficient spots/features for PCA.")
     obj <- RunPCA(obj, npcs = npcs, seed.use = used_seed, verbose = FALSE)
     avail_dims <- ncol(Embeddings(obj, "pca"))
-    cdims <- min(as_int(p$clusterDims, 15, 2, 100), avail_dims)
-    cluster_res <- as_num(p$clusterResolution, 0.8, 0.01, 10)
+    cdims <- min(effective$clusterDims, avail_dims)
+    cluster_res <- effective$clusterResolution
     obj <- FindNeighbors(obj, reduction = "pca", dims = seq_len(cdims), verbose = FALSE)
     obj <- FindClusters(obj, resolution = cluster_res, random.seed = used_seed, verbose = FALSE)
-    udims <- min(as_int(p$umapDims, 15, 2, 100), avail_dims)
-    neighbors <- min(as_int(p$umapNeighbors, 30, 2, 200), ncol(obj) - 1)
+    udims <- min(effective$umapDims, avail_dims)
+    neighbors <- min(effective$umapNeighbors, ncol(obj) - 1)
     obj <- RunUMAP(obj, reduction = "pca", dims = seq_len(udims),
-                   n.components = as_int(p$umapComponents, 2, 2, 3), n.neighbors = neighbors,
-                   min.dist = as_num(p$umapMinDist, 0.3, 0, 1), seed.use = used_seed,
+                   n.components = effective$umapComponents, n.neighbors = neighbors,
+                   min.dist = effective$umapMinDist, seed.use = used_seed,
                    verbose = FALSE)
     safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
     atomic_save_rds(list(global = obj, raw = raw_obj), safe_path)
@@ -1257,13 +1264,14 @@ function(req, res) {
       summary = list(
         n_cells = ncol(obj), n_features = nrow(obj),
         pre_filter_cells = pre_filter_cells, post_filter_cells = post_filter_cells,
-        percent_mt_available = mt_ok, n_variable_features = length(VariableFeatures(obj)),
+        percent_mt_available = mt_ok, n_mt_features = as.integer(mt_feature_count), n_variable_features = length(VariableFeatures(obj)),
         n_pcs = npcs, n_clusters = length(cluster_counts),
         cluster_sizes = as.list(as.integer(cluster_counts)),
         reductions = as.list(names(obj@reductions)), normalization_method = norm_method,
         resolution = cluster_res, used_seed = used_seed
       ),
       warnings = as.list(warnings),
+      effective_parameters = effective,
       checkpoint = list(saved = TRUE, checksum_sha256 = checksum, size_bytes = size_bytes),
       versions = list(seurat_version = as.character(utils::packageVersion("Seurat")),
                       r_version = as.character(getRversion()))
@@ -1298,6 +1306,13 @@ function(req, res) {
     has_clusters <- "seurat_clusters" %in% colnames(global_obj@meta.data)
     has_umap <- "umap" %in% names(global_obj@reductions)
     qc_marker <- tryCatch(isTRUE(global_obj@misc$traceomics_pipeline$qc), error = function(e) FALSE)
+    qc_thresholds <- tryCatch({
+      recorded <- global_obj@misc$traceomics_pipeline$qc_thresholds
+      names_ok <- c("maxPercentMt", "minFeatures", "maxFeatures", "minCounts")
+      if (is.list(recorded) && all(names_ok %in% names(recorded)) &&
+          all(vapply(recorded[names_ok], function(v) is.numeric(v) && length(v) == 1L && is.finite(v), logical(1))))
+        lapply(recorded[names_ok], as.numeric) else NULL
+    }, error = function(e) NULL)
     pca_dims <- if (has_pca) tryCatch(ncol(Embeddings(global_obj, "pca")), error = function(e) 15) else 15
     # Number of available PCs is not the number used to construct the graph.
     # Recover the actual neighbor dimensions for restored tutorial checkpoints.
@@ -1311,6 +1326,7 @@ function(req, res) {
       saved_revision = live_saved_revision,
       has_unsaved_changes = live_session_revision_state()$has_unsaved_changes,
       has_qc = qc_marker || has_normalized || has_pca || has_clusters || has_umap,
+      qc_thresholds = qc_thresholds,
       has_normalized = has_normalized,
       has_integrated = "harmony" %in% names(global_obj@reductions),
       has_pca = has_pca,
@@ -1482,12 +1498,17 @@ function(req, res) {
     )
     summary_out
   }, error = function(e) {
-    res$status <- 500
+    # A capacity rejection happens before the live session or receipt changes and
+    # the prior state is restored, so it is a definite input rejection (400), not an
+    # unknown outcome the worker must hold for recovery.
+    capacity <- inherits(e, "live_session_capacity_error")
+    res$status <- if (capacity) 400 else 500
     # Log the real cause to stderr (captured by the Node parent as an [R:err] line) so
     # operators can diagnose failures. The RESPONSE body stays generic: the Node bridge
     # re-maps non-200s to a sanitized message and never forwards this text to clients.
     message(sprintf("[object/checkpoint-load] load error: %s", conditionMessage(e)))
-    list(error = "checkpoint load failed")
+    if (capacity) list(error = "checkpoint load failed", code = "LIVE_SESSION_CAPACITY")
+    else list(error = "checkpoint load failed")
   })
 }
 
@@ -1520,7 +1541,7 @@ function(req, res) {
   recipe <- if (is.list(params)) as.character(params$recipe)[1] else "overview"
   max_groups <- if (is.list(params)) suppressWarnings(as.integer(params$maxGroups)[1]) else 24L
   histogram_bins <- if (is.list(params)) suppressWarnings(as.integer(params$histogramBins)[1]) else 24L
-  if (!(recipe %in% c("overview", "feature_by_group", "metadata_distribution", "figure_qc", "figure_pca", "figure_umap", "figure_heatmap", "figure_dot", "figure_feature", "study_composition", "study_expression", "study_qc", "study_de", "study_pathways", "study_communication")) ||
+  if (!(recipe %in% c("overview", "feature_by_group", "metadata_distribution", "group_composition", "figure_qc", "figure_pca", "figure_umap", "figure_heatmap", "figure_dot", "figure_feature", "study_composition", "study_expression", "study_qc", "study_de", "study_pathways", "study_communication")) ||
       is.na(max_groups) || max_groups < 2L || max_groups > 32L ||
       is.na(histogram_bins) || histogram_bins < 8L || histogram_bins > 50L) {
     res$status <- 400
@@ -1544,7 +1565,9 @@ function(req, res) {
   tryCatch({
     if (!inherits(global_obj, "Seurat")) stop("Seurat object required")
     if(startsWith(recipe,"figure_"))return(standard_study_figure(global_obj,recipe))
-    if(startsWith(recipe,"study_"))return(condition_study_analysis(global_obj,params))
+    if (startsWith(recipe, "study_")) {
+      return(condition_study_analysis(global_obj, params, design = body$design, contrast_labels = body$contrast_labels))
+    }
     meta <- global_obj@meta.data
     panels <- list()
     if (identical(recipe, "overview")) {
@@ -1559,6 +1582,46 @@ function(req, res) {
         type = "bar", title = "Cells by group", field = "seurat_clusters",
         rows = lapply(seq_along(group_counts), function(index) list(
           label = names(group_counts)[index], count = as.numeric(group_counts[index]))))
+    } else if (identical(recipe, "group_composition")) {
+      # Fraction of each cell group within each value of a categorical column
+      # (usually the sample), so composition shifts can be compared per sample.
+      field <- as.character(params$metadataField)[1]
+      if (is.na(field) || !grepl("^[A-Za-z0-9_.:-]{1,128}$", field) || !(field %in% colnames(meta))) stop("metadata field unavailable")
+      splits <- meta[[field]]
+      if (is.numeric(splits) && !is.factor(splits)) stop("metadata field must be categorical")
+      splits <- as.character(splits)
+      group_by <- as.character(params$groupBy)[1]
+      groups <- if (identical(group_by, "ident")) as.character(Idents(global_obj)) else {
+        if (!("seurat_clusters" %in% colnames(meta))) stop("cluster groups unavailable")
+        as.character(meta$seurat_clusters)
+      }
+      keep <- !is.na(splits) & nzchar(splits) & !is.na(groups) & nzchar(groups)
+      splits <- splits[keep]
+      groups <- groups[keep]
+      split_levels <- sort(unique(splits))
+      if (length(split_levels) < 1L || length(split_levels) > 32L) stop("metadata field must have 1-32 values")
+      group_sizes <- sort(table(groups), decreasing = TRUE)
+      if (length(group_sizes) > max_groups) {
+        shown <- names(group_sizes)[seq_len(max_groups - 1L)]
+        groups[!(groups %in% shown)] <- "Other groups"
+      }
+      group_levels <- names(sort(table(groups), decreasing = TRUE))
+      if (length(split_levels) * length(group_levels) > 512L) stop("composition table exceeds the summary budget")
+      counts <- table(factor(splits, levels = split_levels), factor(groups, levels = group_levels))
+      totals <- rowSums(counts)
+      split_condition <- NULL
+      if (!identical(field, "condition") && "condition" %in% colnames(meta)) {
+        pairs <- unique(data.frame(split = splits, condition = as.character(meta$condition[keep]), stringsAsFactors = FALSE))
+        if (!anyDuplicated(pairs$split) && !anyNA(pairs$condition)) split_condition <- setNames(pairs$condition, pairs$split)
+      }
+      output_rows <- list()
+      for (split in split_levels) for (group in group_levels) {
+        row <- list(label = split, group = group, count = as.numeric(counts[split, group]),
+                    fraction = as.numeric(counts[split, group]) / as.numeric(totals[[split]]))
+        if (!is.null(split_condition)) row$condition <- split_condition[[split]]
+        output_rows[[length(output_rows) + 1L]] <- row
+      }
+      panels[[1]] <- list(type = "composition", title = paste("Group composition by", field), field = field, rows = output_rows)
     } else if (identical(recipe, "metadata_distribution")) {
       field <- as.character(params$metadataField)[1]
       if (is.na(field) || !grepl("^[A-Za-z0-9_.:-]{1,128}$", field) || !(field %in% colnames(meta))) stop("metadata field unavailable")
@@ -1752,10 +1815,13 @@ function(req, res) {
     })
 
     suppressMessages({ library(dplyr) })
+    # The stored preview holds at most 256 rows. Give every group a share so
+    # that, with many clusters, the last ones are not dropped from the preview.
+    preview_per_group <- max(1L, min(top_n_val, floor(256 / max(1L, length(group_labels)))))
     top_tbl <- as.data.frame(markers) %>%
       group_by(cluster) %>%
       arrange(desc(avg_log2FC), .by_group = TRUE) %>%
-      slice_head(n = top_n_val) %>%
+      slice_head(n = preview_per_group) %>%
       mutate(rank = row_number()) %>%
       ungroup()
 
@@ -2013,9 +2079,11 @@ function(req, res) {
     atomic_write_completion_receipt(receipt_binding, response_out)
     response_out
   }, error = function(error) {
-    res$status <- 500L
+    absent <- inherits(error, "condition_metadata_absent")
+    res$status <- if (absent) 400L else 500L
     message(sprintf("[object/condition-pseudobulk-de] failed: %s", conditionMessage(error)))
-    list(error = "condition pseudobulk comparison failed")
+    if (absent) list(error = "condition pseudobulk comparison failed", code = "CONDITION_METADATA_ABSENT")
+    else list(error = "condition pseudobulk comparison failed")
   })
 }
 
@@ -2186,7 +2254,21 @@ function(res, req) {
       mapping, public_scalar_text, character(1), name = "mapping value"
     )
     names(safe_values) <- safe_names
-    list(source_col = source_col, new_col = new_col, mapping = safe_values)
+    # Optional: make the mapped labels the object's active identities so
+    # identity-aware views and jobs (UMAP, markers "Current identities",
+    # enrichment, CellChat) use them. Requires a complete mapping and a column
+    # name that downstream design fields accept.
+    set_identity <- isTRUE(body$set_identity)
+    if (!is.null(body$set_identity) && !is.logical(body$set_identity)) {
+      stop("set_identity must be true or false.")
+    }
+    if (new_col %in% PROTECTED_MAPPING_COLUMNS) {
+      stop(paste0("Choose a new column name; '", new_col, "' holds computed values."))
+    }
+    if (set_identity && !grepl("^[A-Za-z][A-Za-z0-9_.-]{0,63}$", new_col)) {
+      stop("Choose a column name that starts with a letter and uses only letters, numbers, '.', '_' or '-' (64 characters at most).")
+    }
+    list(source_col = source_col, new_col = new_col, mapping = safe_values, set_identity = set_identity)
   }, error = identity)
   if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
 
@@ -2194,15 +2276,36 @@ function(res, req) {
   new_col <- parsed$new_col
   mapping <- parsed$mapping
 
+  if (parsed$set_identity) {
+    source_vals <- as.character(global_obj@meta.data[[source_col]])
+    unmapped <- setdiff(unique(source_vals[!is.na(source_vals)]), names(mapping))
+    if (any(is.na(source_vals)) || length(unmapped) > 0) {
+      return(public_validation_response(res, simpleError(paste0(
+        "Add a label for every ", source_col, " value before making it the active identity. Missing: ",
+        paste(head(bounded_public_labels(unmapped), 10L), collapse = ", ")
+      ))))
+    }
+  }
+
   tryCatch({
     source_vals <- as.character(global_obj@meta.data[[source_col]])
     mapped_vals <- unname(mapping[match(source_vals, names(mapping))])
     mark_live_session_changed()
     global_obj[[new_col]] <<- mapped_vals
+    identity_levels <- NULL
+    if (parsed$set_identity) {
+      # Keep the researcher's label order (first appearance in the mapping).
+      identity_levels <- unique(unname(mapping[names(mapping) %in% source_vals]))
+      identities <- factor(mapped_vals, levels = identity_levels)
+      names(identities) <- colnames(global_obj)
+      Idents(global_obj) <<- identities
+    }
 
     list(
       message = paste0("Successfully added new metadata column: ", new_col),
       mapped_cells = sum(!is.na(mapped_vals)),
+      active_identity = if (parsed$set_identity) new_col else NULL,
+      identity_levels = if (is.null(identity_levels)) NULL else as.list(bounded_public_labels(identity_levels)),
       live_state = live_session_revision_state()
     )
   }, error = function(e) { res$status <- 500; list(error = paste("Add meta mapping failed:", e$message)) })
@@ -2469,7 +2572,12 @@ function(res, req) {
       removed_doublets = 0,
       median_mt = round(median(global_obj$percent.mt), 2)
     ),
-    script_text = paste0("obj <- subset(obj, subset = nFeature_RNA > ", feat_min, " & nFeature_RNA < ", feat_max, " & percent.mt < ", mt_limit, " & nCount_RNA > ", count_min, ")"),
+    # The filter reads percent.mt, so the recorded code must compute it the
+    # same way this handler does when the loaded object lacks it.
+    script_text = paste0(
+      "if (!\"percent.mt\" %in% colnames(obj[[]])) obj[[\"percent.mt\"]] <- PercentageFeatureSet(obj, pattern = \"^MT-\")\n",
+      "obj <- subset(obj, subset = nFeature_RNA > ", feat_min, " & nFeature_RNA < ", feat_max, " & percent.mt < ", mt_limit, " & nCount_RNA > ", count_min, ")"
+    ),
     operation = "quality-control",
     parameters = list(
       mt_threshold = mt_limit, 
@@ -2968,7 +3076,7 @@ restored_reduction_settings <- function(object, reduction) {
 
 #* Inspect an existing reduction without running an analysis or recording provenance
 #* @get /reduction-results
-function(res, reduction = "umap") {
+function(res, reduction = "umap", group_by = "") {
   if (!is.character(reduction) || length(reduction) != 1L ||
       !reduction %in% c("pca", "umap")) {
     res$status <- 400L
@@ -2987,7 +3095,22 @@ function(res, reduction = "umap") {
       return(list(error = "This reduction exceeds the supported live preview limits."))
     }
     dimensions <- min(ncol(emb), if (identical(reduction, "umap")) 3L else 2L)
-    identities <- Idents(global_obj)[rownames(emb)]
+    # Optional colouring by a categorical metadata column (sample, condition,
+    # donor, a label column, ...) so batch structure can be inspected. The
+    # current identities remain the default.
+    meta <- global_obj@meta.data
+    groupable <- Filter(function(column) {
+      values <- meta[[column]]
+      if (!(is.character(values) || is.factor(values) || is.logical(values) || is.integer(values))) return(FALSE)
+      levels_n <- length(unique(values[!is.na(values)]))
+      levels_n >= 2L && levels_n <= MAX_PUBLIC_CLUSTERS && grepl("^[A-Za-z][A-Za-z0-9_.]{0,63}$", column)
+    }, colnames(meta))
+    group_by <- if (is.character(group_by) && length(group_by) == 1L) group_by else ""
+    if (nzchar(group_by) && !(group_by %in% groupable)) {
+      res$status <- 400L
+      return(list(error = "Choose a listed metadata column to colour by."))
+    }
+    identities <- if (nzchar(group_by)) meta[rownames(emb), group_by] else Idents(global_obj)[rownames(emb)]
     labels <- as.character(identities)
     labels[is.na(labels)] <- "Unassigned"
     all_groups <- public_identity_levels(factor(labels, levels = unique(labels)))
@@ -2997,7 +3120,7 @@ function(res, reduction = "umap") {
     selected <- eligible[bounded_group_sample_indices(labels[eligible], MAX_PUBLIC_CELL_VALUES)]
     traces <- lapply(groups, function(group) {
       index <- selected[labels[selected] == group]
-      name <- if (grepl("^[0-9]+$", group)) paste("Cluster", group) else group
+      name <- if (grepl("^[0-9]+$", group) && (!nzchar(group_by) || identical(group_by, "seurat_clusters"))) paste("Cluster", group) else group
       trace <- list(name = bounded_public_labels(name),
                     x = as.numeric(emb[index, 1L]), y = as.numeric(emb[index, 2L]))
       if (dimensions == 3L) trace$z <- as.numeric(emb[index, 3L])
@@ -3008,6 +3131,8 @@ function(res, reduction = "umap") {
                    n_cells = nrow(emb), n_points = length(selected), sampled = length(selected) < nrow(emb),
                    nonfinite_points = sum(!finite), n_clusters = length(all_groups),
                    returned_clusters = length(groups), clusters_truncated = length(groups) < length(all_groups),
+                   group_by = if (nzchar(group_by)) group_by else NULL,
+                   group_by_options = as.list(head(groupable, 64L)),
                    trace_data = traces)
     if (identical(reduction, "pca")) {
       result$npcs <- ncol(emb)

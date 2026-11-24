@@ -37,6 +37,7 @@ const {
   codedHandlerError,
   R_COMPLETION_PUBLICATION_INDETERMINATE,
   isIndeterminateRExecutionFailure,
+  definiteRFailureFrom,
   SAFE_HANDLER_DOMAIN_MESSAGES,
 } = require('./jobs/jobErrors');
 const {
@@ -1179,7 +1180,7 @@ function createJobWorker(options = {}) {
         await require('./workflowTrust/manifest').verifyJobTrust(db,job,ctx.callR,slurmExecutor);
         outcome = await handler(ctx);
       } catch (handlerErr) {
-        let effectiveHandlerErr = handlerErr;
+        let effectiveHandlerErr = await settleReturnedRFailure(job, handlerErr);
         if (
           effectiveHandlerErr &&
           effectiveHandlerErr.code === R_COMPLETION_PUBLICATION_INDETERMINATE &&
@@ -1313,6 +1314,23 @@ function createJobWorker(options = {}) {
     return { status: 'unsupported', jobId, jobType, reaped };
   }
 
+  // R answered with its own error (see rHandlerReturned in rWorkerBridge), so
+  // its synchronous handler is done. Without a completion receipt there is
+  // nothing the recovery grace could adopt later: fail now instead of holding
+  // the job for minutes. A present or unreadable receipt keeps the recovery path.
+  async function settleReturnedRFailure(job, error) {
+    if (!error || error.rSideEffectsPossible !== true || error.rHandlerReturned !== true) return error;
+    if (!COMPLETION_RECEIPT_JOB_TYPES.has(job.jobType) || typeof storageProvider.readCompletionReceipt !== 'function') {
+      return error;
+    }
+    try {
+      await storageProvider.readCompletionReceipt(storage.completionReceiptKey(job.projectId, job.id));
+      return error;
+    } catch (readError) {
+      return readError && readError.code === 'STORAGE_OBJECT_MISSING' ? definiteRFailureFrom(error) : error;
+    }
+  }
+
   async function failHandlerError(jobId, jobType, claimToken, handlerErr, nowTs, reaped) {
     // If the handler failed BECAUSE the claim was lost (e.g. a cooperative
     // ctx.heartbeat() detected cancellation), do not try to fail the job — it is no
@@ -1389,7 +1407,7 @@ function createJobWorker(options = {}) {
   async function tick() {
     timer = null;
     if (!running) return;
-    tickInFlight = runOnce()
+    tickInFlight = runOnceWithEvent()
       .catch((err) => log.error(`[worker ${workerId}] tick error: ${safeDiagnosticCode(err)}`))
       .finally(() => {
         tickInFlight = null;
@@ -1424,7 +1442,24 @@ function createJobWorker(options = {}) {
     return running;
   }
 
-  return { runOnce, start, stop, isRunning, workerId, leaseSeconds };
+  // One structured line per finished job, for operators and log pipelines:
+  // job type, outcome, duration and error code only (no ids, names or paths).
+  async function runOnceWithEvent() {
+    const startedAt = Date.now();
+    const outcome = await runOnce();
+    if (outcome && outcome.jobId && typeof logger.info === 'function') {
+      logger.info(JSON.stringify({
+        event: 'job.finished',
+        jobType: outcome.jobType || null,
+        status: outcome.status,
+        durationMs: Date.now() - startedAt,
+        ...(outcome.error && outcome.error.code ? { errorCode: String(outcome.error.code).slice(0, 80) } : {}),
+      }));
+    }
+    return outcome;
+  }
+
+  return { runOnce: runOnceWithEvent, start, stop, isRunning, workerId, leaseSeconds };
 }
 
 // Number of Slurm jobs this installation waits on at once (SLURM_MAX_RUNNING,

@@ -5,10 +5,21 @@ import { publicErrorMessage } from '../publicError';
 // expression, pathway enrichment, CellChat, workspace runs). Keep these free of
 // page-specific copy so every page describes runs the same way.
 
+// The server's canonical timestamps are UTC written as "YYYY-MM-DD HH:MM:SS"
+// with no zone marker, which browsers would otherwise read as local time.
+const CANONICAL_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+export function parseServerTime(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value);
+  const date = new Date(CANONICAL_UTC.test(text) ? `${text.replace(' ', 'T')}Z` : text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 export function formatDate(value) {
   if (!value) return 'Unknown';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  const date = parseServerTime(value);
+  return date ? date.toLocaleString() : String(value);
 }
 
 const RUN_STATUS_LABELS = {
@@ -28,7 +39,10 @@ export function researcherRunNote(entry) {
   if (entry?.level === 'error') return 'This analysis needs attention.';
   const message = String(entry?.message || '');
   if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
-  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
+  // The worker logs the claim, then the handler start; they are two steps and
+  // must not both read "Compute started."
+  if (/claim/i.test(message)) return 'Picked up by compute.';
+  if (/start|running|comput/i.test(message)) return 'Compute started.';
   if (entry?.level === 'warn') return 'Analysis warning recorded.';
   return 'Analysis update recorded.';
 }
@@ -45,7 +59,7 @@ export function parseErrorMessage(error) {
 
 const BADGE_TONES = {
   blue: 'bg-primary/10 text-text border-primary/20',
-  green: 'bg-success/10 text-success border-success/30',
+  green: 'bg-success/10 text-text border-success/30',
   amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
   rose: 'bg-danger/10 text-danger border-danger/30',
   slate: 'bg-background text-textMuted border-border',

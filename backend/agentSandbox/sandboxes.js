@@ -18,12 +18,19 @@ const { expertRAccessSql } = require('../expertRAccess');
 const { installationLimits } = require('../resourceAdmission/admission');
 const { readBundleFile, fileKind } = require('./bundleFiles');
 const { readableSteps } = require('../../shared/readableR.mjs');
+const { AGENT_NOTEBOOK_TAB_IDS, isAgentNotebookTab } = require('../../shared/agentNotebookTabs.mjs');
+const { reviewFlags } = require('../../shared/scriptReviewFlags.mjs');
+const {
+  normalizeRemoteRoots, normalizeRemoteInputs, normalizeRelativePath, createRemoteFileBrowser,
+} = require('./remoteFiles');
 
 const SANDBOX_ID = /^sbx_[0-9a-f]{24}$/;
 const RUN_ID = /^sbr_[0-9a-f]{24}$/;
 const OBJECT_ID = /^[A-Za-z0-9_-]{1,80}$/;
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
 const MAX_INPUTS = 10;
+const MIN_REASON_CHARS = 20;
+const MAX_REASON_CHARS = 1000;
 // The Expert R container's default limits: 2 CPUs for at most 15 minutes.
 const RUN_CPU_SECONDS = 2 * 900;
 const NON_TERMINAL = ['created', 'queued', 'running', 'waiting_for_user'];
@@ -77,9 +84,10 @@ const RUN_SELECT = `
          j.parameters_json, j.logs_json, j.error_json, ad.revoked_at AS delegation_revoked_at,
          ap.display_name AS agent_display_name, sb.name AS sandbox_name, sb.created_by_user_id AS sandbox_owner_id,
          b.id AS bundle_id, b.storage_uri AS bundle_storage_uri, b.checksum_sha256 AS bundle_checksum,
-         b.size_bytes AS bundle_size, b.metadata_json AS bundle_metadata
+         b.size_bytes AS bundle_size, b.metadata_json AS bundle_metadata, esv.source_code AS retained_script
     FROM agent_sandbox_runs sr
     JOIN jobs j ON j.id = sr.job_id
+    LEFT JOIN execution_source_versions esv ON esv.job_id = j.id AND esv.source_sha256 = sr.script_sha256
     JOIN agent_delegations ad ON ad.id = sr.delegation_id
     JOIN agent_principals ap ON ap.id = sr.agent_principal_id
     JOIN agent_sandboxes sb ON sb.id = sr.sandbox_id
@@ -104,6 +112,8 @@ function publicRun(row, { includeScript = true } = {}) {
   const bundle = state === 'draft_ready' ? bundleOf(row) : null;
   const logs = require('../runMonitoring').projectLogs(parseJson(row.logs_json, [])).items;
   const failure = parseJson(row.error_json, null);
+  const script = typeof parameters.script === 'string' ? parameters.script
+    : (typeof row.retained_script === 'string' ? row.retained_script : null);
   const { safeError } = require('../runMonitoring');
   return {
     id: row.id,
@@ -113,15 +123,27 @@ function publicRun(row, { includeScript = true } = {}) {
     runNumber: row.run_number,
     title: row.title,
     agent: { principalId: row.agent_principal_id, displayName: row.agent_display_name },
+    // Everything a sandbox run produces is AI-written code until a person
+    // reviews it; reviewState below says whether that has happened.
+    authorship: 'ai_written',
+    reason: row.agent_reason || null,
+    // The analysis tab this run belongs to in the agent notebook (NULL on runs
+    // submitted before agents had to name one).
+    tab: row.analysis_tab || null,
     sponsorUserId: Number(row.sponsor_user_id),
     delegationId: row.delegation_id,
     requestId: row.request_id,
     inputAnalysisObjectId: row.input_analysis_object_id,
     scriptSha256: row.script_sha256,
-    ...(includeScript && typeof parameters.script === 'string' ? {
-      script: parameters.script,
-      steps: readableSteps(parameters.script),
+    // The job may drop its copy of the code once it finishes; the retained
+    // source version (pinned by digest) is what reviewers read.
+    ...(includeScript && typeof script === 'string' ? {
+      script,
+      steps: readableSteps(script),
+      // What a reviewer should look at in this custom code before promoting it.
+      reviewFlags: reviewFlags(script),
     } : {}),
+    remoteInputs: Array.isArray(row.remote_inputs_json) ? row.remote_inputs_json : [],
     state,
     jobStatus: row.job_status,
     reservedCpuSeconds: Number(row.reserved_cpu_seconds),
@@ -144,7 +166,8 @@ function runCpuSeconds(row) {
   return row.execution_target === 'slurm' ? row.run_cpus * row.run_wall_seconds : RUN_CPU_SECONDS;
 }
 
-function publicSandbox(row, runs = null) {
+function publicSandbox(row, runs = null, { forAgent = false } = {}) {
+  const remoteRoots = Array.isArray(row.remote_roots_json) ? row.remote_roots_json : [];
   return {
     id: row.id,
     projectId: row.project_id,
@@ -160,6 +183,8 @@ function publicSandbox(row, runs = null) {
       ? { cpus: row.run_cpus, memoryMiB: row.run_memory_mib, maxWallSeconds: row.run_wall_seconds }
       : { cpus: 2, memoryMiB: 8192, maxWallSeconds: 900 },
     cpuSecondsPerRun: runCpuSeconds(row),
+    // Agents see root names only; the cluster paths are the person's.
+    remoteRoots: remoteRoots.map((root) => (forAgent ? { name: root.name } : { name: root.name, path: root.path })),
     status: row.status,
     closedAt: row.closed_at,
     createdAt: row.created_at,
@@ -169,7 +194,7 @@ function publicSandbox(row, runs = null) {
       network: 'none',
       input: 'read-only copy of the pinned analysis object, available as `obj` (a Seurat object)',
       helpers: ['write_table(df, "name.csv")', 'save_figure(plot, "name.png")', 'save_workspace(value, "name.rds")',
-        'read_input(name)'],
+        'read_input(name)', 'input_path("root/relative/path") for staged remoteInputs'],
       outputLimits: { files: 50, totalBytes: 200 * 1024 * 1024 },
       style: 'Split the script into steps with "# ---- Step name ----" lines. The review screen shows each step, with error handling hidden.',
     },
@@ -177,7 +202,20 @@ function publicSandbox(row, runs = null) {
   };
 }
 
-function createSandboxService({ db, withTransaction, provider, getEnvironment, clusterReadiness }) {
+function createSandboxService({ db, withTransaction, provider, getEnvironment, clusterReadiness, remoteBrowser }) {
+  // Remote folders live on the Slurm target and are reached only through its
+  // fixed-command transport.
+  let browser = null;
+  const remote = () => {
+    if (remoteBrowser) return remoteBrowser;
+    if (!browser) {
+      const { createSlurmExecutor } = require('../executors/slurm');
+      const executor = createSlurmExecutor({ db });
+      if (!executor.config.enabled) throw codedError('TARGET_UNQUALIFIED', 'No cluster is configured for remote folders.', 409);
+      browser = createRemoteFileBrowser({ transport: executor.transport });
+    }
+    return browser;
+  };
   const resolveEnvironment = getEnvironment || (() => require('../expertSandboxClient').getExpertREnvironment());
   // Whether the Slurm target is qualified for sandbox runs right now.
   const slurmReady = clusterReadiness || (async () => {
@@ -188,7 +226,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
   async function create(actor, projectId, body = {}) {
     requireHuman(actor);
     rejectUnknown(body, ['name', 'objective', 'analysisObjectIds', 'maxRuns', 'maxOutstandingRuns', 'maxCpuSeconds',
-      'executionTarget', 'cpusPerRun', 'memoryGiBPerRun', 'hoursPerRun']);
+      'executionTarget', 'cpusPerRun', 'memoryGiBPerRun', 'hoursPerRun', 'remoteRoots']);
     await db.requireProjectRole(actor.userId, projectId, WRITE_ROLES);
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name || name.length > 200) throw codedError('INVALID_INPUT', 'name must be 1-200 characters.', 400);
@@ -210,6 +248,11 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     } else if (body.cpusPerRun !== undefined || body.memoryGiBPerRun !== undefined || body.hoursPerRun !== undefined) {
       throw codedError('INVALID_INPUT', 'Per-run resources can be set only for cluster sandboxes.', 400);
     }
+    const remoteRoots = normalizeRemoteRoots(body.remoteRoots);
+    if (remoteRoots.length > 0 && executionTarget !== 'slurm') {
+      throw codedError('INVALID_INPUT', 'Remote folders are on the cluster: choose the cluster execution target.', 400);
+    }
+    for (const root of remoteRoots) await remote().resolve(root, '');
     const cpuPerRun = perRun.cpus * perRun.wallSeconds;
     const maxRuns = intInRange(body.maxRuns, 'maxRuns', 1, 500, 20);
     const maxOutstandingRuns = intInRange(body.maxOutstandingRuns, 'maxOutstandingRuns', 1, 5, 1);
@@ -238,10 +281,11 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     await withTransaction(async (client) => {
       await client.query(
         `INSERT INTO agent_sandboxes (id, project_id, created_by_user_id, name, objective, inputs_json, max_runs,
-           max_outstanding_runs, max_cpu_seconds, execution_target, run_cpus, run_memory_mib, run_wall_seconds)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+           max_outstanding_runs, max_cpu_seconds, execution_target, run_cpus, run_memory_mib, run_wall_seconds,
+           remote_roots_json)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         [id, String(projectId), actor.userId, name, objective, JSON.stringify(inputs), maxRuns, maxOutstandingRuns, maxCpuSeconds,
-          executionTarget, perRun.cpus, perRun.memoryMiB, perRun.wallSeconds]);
+          executionTarget, perRun.cpus, perRun.memoryMiB, perRun.wallSeconds, JSON.stringify(remoteRoots)]);
       await recordAutomationEvent(client, {
         projectId, actor, action: 'sandbox.created', decision: 'allowed', targetType: 'sandbox', targetId: id,
       });
@@ -321,6 +365,26 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     return { row: rows[0], sandbox, membership };
   }
 
+  // Runs for the agent notebook. A person sees the runs of sandboxes they may
+  // review (their own, or every sandbox for project owners/admins); the rest
+  // are only counted. An agent sees its own delegation's runs.
+  async function notebookRunsForHuman(actor, projectId) {
+    requireHuman(actor);
+    const membership = await db.requireProjectRole(actor.userId, projectId, READ_ROLES);
+    const { rows } = await db.query(
+      `${RUN_SELECT} WHERE sr.project_id = $1 ORDER BY sr.created_at DESC, sr.id DESC LIMIT 500`, [String(projectId)]);
+    const manager = MANAGE_ROLES.includes(membership.role);
+    const visible = rows.filter((row) => manager || Number(row.sandbox_owner_id) === Number(actor.userId));
+    return { runs: visible.map((row) => publicRun(row)), hiddenRuns: rows.length - visible.length };
+  }
+
+  async function notebookRunsForAgent(actor) {
+    const { rows } = await db.query(
+      `${RUN_SELECT} WHERE sr.project_id = $1 AND sr.delegation_id = $2 ORDER BY sr.created_at DESC, sr.id DESC LIMIT 500`,
+      [actor.delegation.projectId, actor.delegation.id]);
+    return { runs: rows.map((row) => publicRun(row)), hiddenRuns: 0 };
+  }
+
   async function reviewRun(actor, projectId, runId, body = {}) {
     rejectUnknown(body, ['decision', 'note']);
     if (!['promoted', 'discarded'].includes(body.decision)) {
@@ -390,7 +454,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     const { rows } = await db.query(
       `SELECT * FROM agent_sandboxes WHERE project_id = $1 AND created_by_user_id = $2 AND status = 'open'
         ORDER BY created_at DESC LIMIT 100`, [actor.delegation.projectId, actor.sponsorUserId]);
-    return rows.map((row) => publicSandbox(row));
+    return rows.map((row) => publicSandbox(row, null, { forAgent: true }));
   }
 
   async function getForAgent(actor, sandboxId) {
@@ -398,24 +462,78 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     const { rows } = await db.query(
       `${RUN_SELECT} WHERE sr.sandbox_id = $1 AND sr.delegation_id = $2 ORDER BY sr.run_number DESC LIMIT 200`,
       [sandbox.id, actor.delegation.id]);
-    return publicSandbox(sandbox, rows.map((row) => publicRun(row, { includeScript: false })));
+    return publicSandbox(sandbox, rows.map((row) => publicRun(row, { includeScript: false })), { forAgent: true });
+  }
+
+  // ── Remote folders (agent side) ───────────────────────────────────────────
+  async function remoteRootFor(actor, sandboxId, rootName) {
+    const sandbox = await agentSandboxRow(db, actor, sandboxId);
+    if (sandbox.status !== 'open') throw codedError('SANDBOX_CLOSED', 'This sandbox is closed.', 409);
+    const root = (sandbox.remote_roots_json || []).find((entry) => entry.name === rootName);
+    if (!root) throw codedError('NOT_FOUND', 'That remote folder is not part of this sandbox.', 404);
+    return { sandbox, root };
+  }
+
+  async function auditRemote(actor, sandbox, action, decision, reasonCode) {
+    await recordAutomationEvent(db, {
+      projectId: sandbox.project_id, actor, action, decision, targetType: 'sandbox', targetId: sandbox.id,
+      ...(reasonCode ? { reasonCode } : {}),
+    });
+  }
+
+  async function withRemoteAudit(actor, sandbox, action, work) {
+    try {
+      const result = await work();
+      await auditRemote(actor, sandbox, action, 'allowed');
+      return result;
+    } catch (error) {
+      if (error?.code === 'REMOTE_PATH_OUTSIDE_ROOT') await auditRemote(actor, sandbox, action, 'denied', 'REMOTE_PATH_OUTSIDE_ROOT');
+      throw error;
+    }
+  }
+
+  async function listRemoteForAgent(actor, sandboxId, rootName, relative) {
+    const { sandbox, root } = await remoteRootFor(actor, sandboxId, rootName);
+    normalizeRelativePath(relative);
+    return withRemoteAudit(actor, sandbox, 'sandbox.remote-listed', () => remote().list(root, relative));
+  }
+
+  async function readRemoteForAgent(actor, sandboxId, rootName, relative, { offset = 0 } = {}) {
+    const { sandbox, root } = await remoteRootFor(actor, sandboxId, rootName);
+    normalizeRelativePath(relative);
+    return withRemoteAudit(actor, sandbox, 'sandbox.remote-read', () => remote().read(root, relative, { offset }));
   }
 
   async function submitRun(actor, sandboxId, body = {}) {
-    rejectUnknown(body, ['requestId', 'title', 'script', 'inputAnalysisObjectId']);
+    rejectUnknown(body, ['requestId', 'title', 'script', 'inputAnalysisObjectId', 'reason', 'tab', 'remoteInputs']);
     if (!REQUEST_ID.test(String(body.requestId))) {
       throw codedError('INVALID_REQUEST_ID', 'requestId must be 8-80 letters, digits, "-" or "_".', 400);
     }
     const title = typeof body.title === 'string' ? body.title.trim() : '';
     if (!title || title.length > 200) throw codedError('INVALID_INPUT', 'title must be 1-200 characters.', 400);
+    // Verified code first: an agent writing its own R says why no reviewed
+    // workflow or library method covers the step. The reviewer sees it.
+    // eslint-disable-next-line no-control-regex -- deliberately strips control characters
+    const reason = typeof body.reason === 'string' ? body.reason.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '';
+    if (reason.length < MIN_REASON_CHARS || reason.length > MAX_REASON_CHARS) {
+      throw codedError('REASON_REQUIRED',
+        `reason must be ${MIN_REASON_CHARS}-${MAX_REASON_CHARS} characters: name the verified workflows or methods you checked (list_verified_code) and why none fits.`, 400);
+    }
+    // The agent notebook files the run under this analysis tab.
+    if (!isAgentNotebookTab(body.tab)) {
+      throw codedError('TAB_REQUIRED', `tab must be one of: ${AGENT_NOTEBOOK_TAB_IDS.join(', ')}.`, 400);
+    }
+    const tab = body.tab;
     let validated;
     try {
       validated = validateExpertRParams({ profileId: EXPERT_R_PROFILE.id, script: body.script, inputIds: [] });
     } catch (error) {
       throw codedError('INVALID_SCRIPT', error.message, 400);
     }
+    const requestedRemote = Array.isArray(body.remoteInputs) && body.remoteInputs.length > 0 ? body.remoteInputs : null;
     const requestSha256 = crypto.createHash('sha256')
-      .update(JSON.stringify([String(sandboxId), title, validated.scriptSha256, body.inputAnalysisObjectId ?? null])).digest('hex');
+      .update(JSON.stringify([String(sandboxId), title, validated.scriptSha256, body.inputAnalysisObjectId ?? null, tab,
+        ...(requestedRemote ? [requestedRemote.map((entry) => [entry?.root ?? null, entry?.path ?? null])] : [])])).digest('hex');
 
     // Replays return the original run before any other check.
     const prior = await db.query(
@@ -431,6 +549,15 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
 
     if (require('../config').demoMode()) throw codedError('TARGET_UNQUALIFIED', 'Sandboxes are not available in the demo.', 409);
     const target = await sandboxRow(db, actor.delegation.projectId, sandboxId);
+    const remoteInputs = normalizeRemoteInputs(body.remoteInputs, target?.remote_roots_json || []);
+    if (remoteInputs.length > 0) {
+      // Check each file now so a typo fails before budget is reserved; the
+      // worker resolves and verifies them again when it stages the run.
+      for (const entry of remoteInputs) {
+        const root = target.remote_roots_json.find((candidate) => candidate.name === entry.root);
+        await remote().resolve(root, entry.path);
+      }
+    }
     let parameters = validated.params;
     if (target?.execution_target === 'slurm') {
       // The cluster image is identified by its configured digest; the local
@@ -538,10 +665,10 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
       await client.query(
         `INSERT INTO agent_sandbox_runs (id, project_id, sandbox_id, delegation_id, agent_principal_id, sponsor_user_id,
            credential_id, request_id, request_sha256, job_id, run_number, title, script_sha256, input_analysis_object_id,
-           reserved_cpu_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+           reserved_cpu_seconds, agent_reason, analysis_tab, remote_inputs_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
         [runId, sandbox.project_id, sandbox.id, actor.delegation.id, actor.principalId, actor.sponsorUserId,
           actor.credentialId, body.requestId, requestSha256, jobId, counts.sandbox_runs + 1, title,
-          stored.scriptSha256, input.analysisObjectId, cpuPerRun]);
+          stored.scriptSha256, input.analysisObjectId, cpuPerRun, reason, tab, JSON.stringify(remoteInputs)]);
       await recordAutomationEvent(client, {
         projectId: sandbox.project_id, actor, action: 'sandbox-run.admitted', decision: 'allowed',
         targetType: 'sandbox_run', targetId: runId, requestId: body.requestId,
@@ -593,7 +720,8 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
   return {
     create, listForHuman, getForHuman, close, reviewRun, fileForHuman,
     listForAgent, getForAgent, submitRun, getRunForAgent, fileForAgent, cancelForAgent,
-    runForHuman,
+    runForHuman, notebookRunsForHuman, notebookRunsForAgent,
+    listRemoteForAgent, readRemoteForAgent,
   };
 }
 

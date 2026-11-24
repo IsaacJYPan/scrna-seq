@@ -69,13 +69,25 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const [loadingDist, setLoadingDist] = useState(false);
 
   // Persisted threshold state
-  const [params, setParam] = useTabParams('qc', userEmail, objectId, {
+  const genericQcDefaults = {
     mtCutoff: 5,
     minFeatures: 200,
     maxFeatures: isPbmcTutorial ? 2500 : 5000,
     minCounts: isPbmcTutorial ? 0 : 500,
-  });
+  };
+  const [params, setParam, setParams] = useTabParams('qc', userEmail, objectId, genericQcDefaults);
   const { mtCutoff, minFeatures, maxFeatures, minCounts, removeDoublets, filterFeatures } = params;
+  // A queued pipeline records the thresholds it filtered with. Start from those
+  // rather than generic defaults, unless the person has already edited them.
+  const recordedThresholds = pipelineState?.qcThresholds || null;
+  const recordedKey = recordedThresholds ? `${objectId}:${JSON.stringify(recordedThresholds)}` : '';
+  useEffect(() => {
+    if (!recordedThresholds) return;
+    setParams(prev => (Object.keys(genericQcDefaults).every(key => prev[key] === genericQcDefaults[key])
+      ? { ...prev, ...recordedThresholds }
+      : prev));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordedKey]);
 
   // Fetch real distributions when data is loaded
   const [showPoints, setShowPoints] = useState({ mt: true, features: true, counts: true });
@@ -413,6 +425,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 {medians.length > 0 && <span>Medians: {medians.map(([label, value]) => `${label} ${value}`).join(' · ')}</span>}
                 {removed.length > 0 && <span className="text-danger">Removed {removed.map(([label, value]) => `${Number(value).toLocaleString()} ${label}`).join(' · ')}</span>}
               </div>
+            )}
+            {!result && recordedThresholds && (
+              <p className="text-xs text-textMuted mt-2">
+                This analysis was filtered at: mitochondrial RNA ≤ {recordedThresholds.mtCutoff}% · genes {recordedThresholds.minFeatures}–{recordedThresholds.maxFeatures} · RNA counts ≥ {recordedThresholds.minCounts}.
+              </p>
             )}
             {(summary?.message || (!result && pipelineState?.qc)) && (
               <p className="text-xs text-textMuted mt-2 flex items-center gap-2">

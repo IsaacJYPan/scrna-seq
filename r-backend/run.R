@@ -43,7 +43,11 @@ plumber_port <- as.integer(Sys.getenv("PLUMBER_PORT", unset = "8000"))
 plumber_host <- Sys.getenv("PLUMBER_HOST", unset = "127.0.0.1")
 if (!(plumber_host %in% c("127.0.0.1", "0.0.0.0"))) stop("Invalid PLUMBER_HOST")
 cat("Plumber API running on configured private interface, port ", plumber_port, "\n", sep = "")
-pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE))
+# jsonlite's default (digits = 4) rounds to four decimal places, which turns
+# small p-values/FDRs into 0 and truncates statistics. Serialize at full
+# precision, matching hpc-runner.R, so local and Slurm results agree. Public
+# payloads are already bounded by cell/value caps.
+pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE, digits = NA))
 
 # Centralized Global Error Handler
 # Efficiently catches unhandled errors from any endpoint and prevents server crashes

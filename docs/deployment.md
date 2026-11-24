@@ -234,7 +234,12 @@ original 20 MiB output and 200/250 MiB input limits until updated.
 
 This release requires database schema contract `20261036`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
-starting the upgraded services. It adds delegated-agent principals, project
+starting the upgraded services. `init:postgres` applies the baseline schema and
+then every pending migration in `backend/pg/migrations`, recording each in the
+`schema_migrations` table; with `DATABASE_SCHEMA_MANAGED_EXTERNALLY=true` the
+services refuse to start while any migration is pending. Externally managed
+services need read access to both `app_schema_contract` and `schema_migrations`. See the
+[migrations guide](../backend/pg/migrations/README.md). It adds delegated-agent principals, project
 delegations, hashed agent credentials, inert proposals, an append-only
 automation audit, approved workflow releases, studies, plans, agent runs and
 result acceptances; see [agent automation](agent-automation.md) for the deployment
@@ -742,6 +747,12 @@ sandbox broker, and operations containers receive no original data mount. A miss
 host source fails instead of creating a directory. The base deployment remains
 unchanged when the overlay is omitted. Remove grants to revoke new source access;
 saved private snapshots remain retained under their existing artifact permissions.
+
+The same folders also feed pipelines: on **Pipelines**, *From a server folder*
+lists granted 10x `.h5` files (or Visium `.zip` bundles) and copies the chosen
+file into the project as an input dataset, like an upload but without the
+browser. The source file is copied, never moved or changed. Input datasets use
+the dataset upload limit rather than the import limit below.
 
 For a directly managed local web service, set `SERVER_DATA_IMPORT_ROOTS` to actual
 absolute directories on that host and restart it. Compose source paths are not
@@ -1412,3 +1423,19 @@ The current Rocker R base and official Caddy images publish ARM64 variants (see
 <https://hub.docker.com/r/rocker/r-ver/tags> and
 <https://hub.docker.com/_/caddy>), but that must be rechecked for the exact
 release tags/digests on the deployment day.
+
+## Observability
+
+Set `METRICS_TOKEN` (at least 32 characters) on the web service to enable
+`GET /metrics`, a Prometheus text endpoint for the private network. Callers must
+send `Authorization: Bearer <METRICS_TOKEN>`; without the variable the route does
+not exist. It reports jobs waiting or running by job type, completed-job
+durations (median and 95th percentile) and failures by job type and error code
+over the last 24 hours, free and total bytes on the durable storage volume, and
+the runs and CPU seconds reserved by outstanding agent runs. Labels are job
+types, statuses and error codes only; no identifiers, names, paths or
+parameters are exposed.
+
+The worker writes one JSON log line per finished job
+(`{"event":"job.finished","jobType":…,"status":…,"durationMs":…,"errorCode":…}`),
+so failing job types can be followed without reading container logs.

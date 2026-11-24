@@ -28,6 +28,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 // r-backend/plumber.R (POST /object/checkpoint-load), server.js (isInternalOnlyRProxyPath).
 // ════════════════════════════════════════════════════════════════════════════
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const CONFIGURED = config.hasPostgresConnection();
@@ -103,7 +104,7 @@ function recordingCaller(record, byPath) {
 }
 function pipelineThenLoadCaller(record, loadResponse = { status: 200, body: loadBody() }) {
   return recordingCaller(record, {
-    '/object/pbmc-pipeline': () => ({ status: 200, body: pipelineBody() }),
+    '/object/pbmc-pipeline': (req) => ({ status: 200, body: withEffectiveParameters(req, pipelineBody()) }),
     '/object/checkpoint-load': () => loadResponse,
     '/object/inspect': () => ({ status: 200, body: { exists: true, class: 'Seurat', n_cells: 2700, n_features: 13714 } }),
   });
@@ -554,14 +555,14 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — failure / cancel / claim-lo
   beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
 
-  it('an R load failure (non-200) remains indeterminate with NO checkpoint_load artifact', async () => {
+  it('an R-returned load failure with no receipt fails at once with NO checkpoint_load artifact', async () => {
     const { alice, proj, resultObjectId } = await seedLoadableCheckpoint();
     const ljob = await seedLoadJob(alice.id, proj.id, resultObjectId);
     const res = await drain(pipelineThenLoadCaller([], { status: 500, body: { error: 'boom' } }), T0);
-    expect(res.status).toBe('indeterminate');
+    expect(res.status).toBe('failed');
     const arts = await getJobArtifactsByJobId(ljob.id);
     expect(arts.filter((a) => a.artifactType === 'checkpoint_load')).toHaveLength(0);
-    expect((await getProjectJob(alice.id, proj.id, ljob.id)).status).toBe('running');
+    expect((await getProjectJob(alice.id, proj.id, ljob.id)).status).toBe('failed');
   });
 
   it('an R "loaded:false" response fails the job and records NO checkpoint_load artifact', async () => {
@@ -590,7 +591,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — failure / cancel / claim-lo
     // R caller cancels the job mid-flight (claim is voided), then returns success.
     const cancelingCaller = async (req) => {
       if (req.path === '/object/checkpoint-load') await cancelProjectJob(alice.id, proj.id, ljob.id);
-      return { status: 200, body: req.path === '/object/checkpoint-load' ? loadBody() : pipelineBody() };
+      return { status: 200, body: req.path === '/object/checkpoint-load' ? loadBody() : withEffectiveParameters(req, pipelineBody()) };
     };
     const res = await drain(cancelingCaller, T0);
     expect(['claim_lost', 'failed']).toContain(res.status);

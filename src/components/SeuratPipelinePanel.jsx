@@ -1,16 +1,56 @@
 import SeuratPipelineSettings from './SeuratPipelineSettings';
 import React, { useState } from 'react';
-import { FileUp, Zap, Loader2, RefreshCw, Archive } from 'lucide-react';
+import { FileUp, Zap, Loader2, RefreshCw, Archive, FolderOpen } from 'lucide-react';
+import ServerDataFilePicker from './ServerDataFilePicker';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 import { publicErrorMessage } from '../publicError';
 import RefreshButton from './RefreshButton';
 import { displayRunStatus, formatDate, parseErrorMessage, researcherRunNote } from './analysisRunDisplay';
 
+// Visium ZIPs are inspected when uploaded, so they must reach `valid`. 10x HDF5
+// contents are validated by the R worker when the run starts; the server
+// leaves them `pending` and admits them unless they were marked invalid (see
+// backend/seuratPipeline.js). Gate the UI on the same rule.
+function datasetReadyForWorkflow(dataset) {
+  if (dataset?.uploadStatus !== 'uploaded') return false;
+  if (dataset?.fileType === 'visium_zip') return dataset?.validationStatus === 'valid';
+  return dataset?.validationStatus !== 'invalid';
+}
+
 function datasetResearchStatus(dataset) {
   if (dataset?.uploadStatus === 'failed' || dataset?.validationStatus === 'invalid') return 'Needs attention';
   if (dataset?.uploadStatus === 'uploaded' && dataset?.validationStatus === 'valid') return 'Ready for analysis';
+  if (datasetReadyForWorkflow(dataset)) return 'Ready for analysis · contents are checked when the run starts';
   if (dataset?.uploadStatus === 'uploaded') return 'Checking data';
   return 'Preparing data';
+}
+
+const SUMMARY_LABELS = {
+  completedStage: 'Completed stage',
+  nCells: 'Cells',
+  nFeatures: 'Genes',
+  preFilterCells: 'Cells before QC',
+  postFilterCells: 'Cells after QC',
+  nSamples: 'Samples',
+  nConditions: 'Conditions',
+  cells: 'Cells',
+  features: 'Genes',
+  reductions: 'Reductions',
+};
+
+// Run summaries can contain nested diagnostics objects; show only readable
+// scalar values (or short lists of scalars) with researcher-facing labels.
+export function summaryDisplayEntries(summary) {
+  if (!summary || typeof summary !== 'object') return [];
+  const scalar = value => ['string', 'number', 'boolean'].includes(typeof value);
+  return Object.entries(summary).flatMap(([key, value]) => {
+    let text = null;
+    if (scalar(value)) text = typeof value === 'number' ? value.toLocaleString() : String(value);
+    else if (Array.isArray(value) && value.length && value.every(scalar)) text = value.join(', ');
+    if (text === null) return [];
+    const label = SUMMARY_LABELS[key] || key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase());
+    return [[key, label, text]];
+  });
 }
 
 const CLASSIC_VISIUM_REQUIRED_FILES = [
@@ -137,6 +177,22 @@ function scrubEmptyParams(params) {
   return out;
 }
 
+// A multi-sample run is described by its samples, not by the first file,
+// which the job records only as an internal anchor.
+export function runInputLabel({ job, multiSampleMode, multiSampleRows = [], activeDataset }) {
+  const recorded = Array.isArray(job?.parameters?.samples) ? job.parameters.samples : null;
+  const samples = recorded || (multiSampleMode ? multiSampleRows : []);
+  if (samples.length >= 2 || (multiSampleMode && samples.length)) {
+    const conditions = new Set(samples
+      .map(sample => String(sample?.conditionName || '').trim().toLocaleLowerCase('en-US'))
+      .filter(Boolean));
+    const sampleText = `${samples.length} ${samples.length === 1 ? 'sample' : 'samples'}`;
+    const conditionText = conditions.size ? ` across ${conditions.size} ${conditions.size === 1 ? 'condition' : 'conditions'}` : '';
+    return { label: 'Input', value: `${sampleText}${conditionText}` };
+  }
+  return { label: 'Dataset', value: activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset' };
+}
+
 export function SeuratPipelinePanel({
   activeProjectId,
   selectedObject,
@@ -146,6 +202,7 @@ export function SeuratPipelinePanel({
   setActiveTab,
   datasetUploadsEnabled = true,
   canWriteProject = false,
+  userId,
 }) {
   const [analysisApproach, setAnalysisApproach] = useState('automatic');
   const approachId = React.useId();
@@ -154,6 +211,8 @@ export function SeuratPipelinePanel({
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
   const [multiSampleRows, setMultiSampleRows] = useState([]);
   const [datasetStatus, setDatasetStatus] = useState({ loading: false, uploading: false, error: null });
+  const [serverPickerOpen, setServerPickerOpen] = useState(false);
+  const [serverChoice, setServerChoice] = useState(null);
   const [job, setJob] = useState(null);
   const [loadJob, setLoadJob] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -201,18 +260,30 @@ export function SeuratPipelinePanel({
   };
 
   const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
+  const runInput = runInputLabel({ job, multiSampleMode, multiSampleRows, activeDataset });
   const selectedMultiDatasets = multiSampleRows.map(row => datasets.find(dataset => dataset.id === row.datasetId));
   const activeDatasetReady = multiSampleMode
-    ? selectedMultiDatasets.length >= 2 && selectedMultiDatasets.every(dataset => (
-      dataset?.uploadStatus === 'uploaded' && dataset?.validationStatus === 'valid'
-    ))
-    : activeDataset?.uploadStatus === 'uploaded' && activeDataset?.validationStatus === 'valid';
+    ? selectedMultiDatasets.length >= 2 && selectedMultiDatasets.every(datasetReadyForWorkflow)
+    : datasetReadyForWorkflow(activeDataset);
   const multiSampleConditionCounts = multiSampleRows.reduce((counts, row) => {
     const condition = String(row.conditionName || '').trim().toLocaleLowerCase('en-US');
     if (condition) counts.set(condition, (counts.get(condition) || 0) + 1);
     return counts;
   }, new Map());
-  const multiSampleDesignValid = multiSampleRows.length >= 2
+  // The same file selected twice would count one biological sample as two
+  // replicates. Uploads carry a content checksum, so identical files are caught
+  // even when they have different names.
+  const duplicateMultiSampleFiles = (() => {
+    const byChecksum = new Map();
+    for (const dataset of selectedMultiDatasets) {
+      if (!dataset?.sha256) continue;
+      byChecksum.set(dataset.sha256, [...(byChecksum.get(dataset.sha256) || []), dataset]);
+    }
+    return [...byChecksum.values()].filter(group => group.length > 1)
+      .map(group => group.map(dataset => dataset.originalFilename || dataset.name || 'dataset'));
+  })();
+  const multiSampleDesignValid = duplicateMultiSampleFiles.length === 0
+    && multiSampleRows.length >= 2
     && multiSampleRows.length <= MAX_MULTI_SAMPLE_INPUTS
     && multiSampleRows.every(row => (
       isValidMultiSampleLabel(row.sampleName)
@@ -402,14 +473,19 @@ export function SeuratPipelinePanel({
     }
     setDatasetStatus({ loading: false, uploading: true, error: null });
     try {
+      const knownDatasets = [...datasets];
       for (const file of selectedFiles) {
         const created = await api.uploadDataset(activeProjectId, file, {
           supportedWorkflow: workflow.jobType,
           supportedFormat: workflow.formatLabel,
         }, workflow.datasetFileType);
         setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
+        knownDatasets.push(created);
         if (multiSampleMode) {
-          setMultiSampleRows(prev => prev.some(row => row.datasetId === created.id) ? prev : [...prev, {
+          setMultiSampleRows(prev => prev.some(row => (
+            row.datasetId === created.id
+            || (created.sha256 && knownDatasets.find(dataset => dataset.id === row.datasetId)?.sha256 === created.sha256)
+          )) ? prev : [...prev, {
             datasetId: created.id,
             sampleName: defaultSampleName(created),
             conditionName: '',
@@ -421,6 +497,34 @@ export function SeuratPipelinePanel({
           setSelectedDatasetId(created.id);
         }
       }
+    } catch (error) {
+      setDatasetStatus(prev => ({ ...prev, error: parseErrorMessage(error) }));
+    } finally {
+      setDatasetStatus(prev => ({ ...prev, uploading: false }));
+    }
+  };
+
+  // Adds an input file from a server folder the person was granted, for files
+  // too large or too remote to upload through the browser.
+  const addFromServerFolder = async () => {
+    const api = window.electronAPI || {};
+    if (!serverChoice || !api.addDatasetFromServerFolder) return;
+    setDatasetStatus({ loading: false, uploading: true, error: null });
+    try {
+      const created = await api.addDatasetFromServerFolder(activeProjectId, {
+        rootId: serverChoice.rootId, relativePath: serverChoice.file.relativePath, selectionToken: serverChoice.file.selectionToken,
+      }, { supportedWorkflow: workflow.jobType, supportedFormat: workflow.formatLabel }, workflow.datasetFileType);
+      setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
+      if (multiSampleMode) {
+        setMultiSampleRows(prev => prev.some(row => row.datasetId === created.id) ? prev : [...prev, {
+          datasetId: created.id, sampleName: defaultSampleName(created), conditionName: '', donorCode: '', batch: '',
+        }]);
+        setSelectedDatasetId(prev => prev || created.id);
+      } else {
+        setSelectedDatasetId(created.id);
+      }
+      setServerChoice(null);
+      setServerPickerOpen(false);
     } catch (error) {
       setDatasetStatus(prev => ({ ...prev, error: parseErrorMessage(error) }));
     } finally {
@@ -667,7 +771,30 @@ export function SeuratPipelinePanel({
                     onChange={uploadDataset}
                   />
                 </label> : null}
+                {datasetUploadsEnabled && canWriteProject && (
+                  <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" aria-expanded={serverPickerOpen}
+                    onClick={() => { setServerPickerOpen(open => !open); setServerChoice(null); }}>
+                    <FolderOpen size={16} /> From a server folder
+                  </button>
+                )}
               </div>
+              {serverPickerOpen && (
+                <div className="mb-3 space-y-3 rounded border border-border bg-background p-3">
+                  <p className="text-xs text-textMuted">Folders on this server that an administrator shared with you for this project. The file is copied into the project like an upload.</p>
+                  <ServerDataFilePicker projectId={activeProjectId} userId={userId} available={canWriteProject && userId != null} disabled={datasetStatus.uploading}
+                    allowedExtensions={[spatialMode ? '.zip' : '.h5']} sizeLimitBytes={Number.MAX_SAFE_INTEGER}
+                    unsupportedLabel={spatialMode ? 'Choose a Visium .zip bundle' : 'Choose a 10x .h5 file'}
+                    onSelect={value => setServerChoice(value)}
+                    onAuthority={allowed => { if (!allowed) setDatasetStatus(prev => ({ ...prev, error: 'No server folder is shared with you for this project. Ask an administrator, or upload the file instead.' })); }}
+                    onError={failure => { if (failure) setDatasetStatus(prev => ({ ...prev, error: failure.message })); }} />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" className="btn btn-primary text-sm" disabled={!serverChoice || datasetStatus.uploading} onClick={() => void addFromServerFolder()}>
+                      {datasetStatus.uploading ? 'Adding…' : serverChoice ? `Add ${serverChoice.file.name}` : 'Choose a file'}
+                    </button>
+                    <button type="button" className="btn btn-secondary text-sm" onClick={() => { setServerPickerOpen(false); setServerChoice(null); }}>Cancel</button>
+                  </div>
+                </div>
+              )}
               {datasetStatus.error && (
                 <div className="mb-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
                   {safeMessage(datasetStatus.error)}
@@ -745,7 +872,12 @@ export function SeuratPipelinePanel({
                   <p className="mt-1">
                     {multiSampleRows.length} selected sample{multiSampleRows.length === 1 ? '' : 's'} across {multiSampleConditionCounts.size} condition{multiSampleConditionCounts.size === 1 ? '' : 's'}.
                   </p>
-                  {!multiSampleDesignValid && (
+                  {duplicateMultiSampleFiles.map(names => (
+                    <p key={names.join('|')} className="mt-2 text-danger">
+                      These files have identical contents: {names.join(', ')}. Keep one selected so the sample is not counted twice.
+                    </p>
+                  ))}
+                  {!multiSampleDesignValid && duplicateMultiSampleFiles.length === 0 && (
                     <p className="mt-2 text-amber-800 dark:text-amber-200">
                       Select 2-{MAX_MULTI_SAMPLE_INPUTS} datasets, enter unique sample names, and assign at least two conditions. Labels must be 1-80 characters and use letters, numbers, spaces, periods, underscores, or hyphens.
                     </p>
@@ -859,7 +991,7 @@ export function SeuratPipelinePanel({
                   </div>
                   <div className="text-xs text-textMuted">Created: {formatDate(job.createdAt)}</div>
                   <div className="grid grid-cols-1 gap-2 text-xs">
-                    <div>{multiSampleMode ? 'Primary dataset' : 'Dataset'}: <span className="text-text">{activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset'}</span></div>
+                    <div>{runInput.label}: <span className="text-text">{runInput.value}</span></div>
                     <div>Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || selectedObject?.displayName || selectedObject?.name || 'Selected analysis'}</span></div>
                     <div>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Dataset is ready' : 'Preparing dataset')}</span></div>
                   </div>
@@ -876,10 +1008,10 @@ export function SeuratPipelinePanel({
               <h4 className="mb-3 flex items-center gap-2 font-bold text-text">Continue this analysis</h4>
               {safeSummary ? (
                 <div className="grid grid-cols-2 gap-2 text-xs">
-                  {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
+                  {summaryDisplayEntries(safeSummary).slice(0, 6).map(([key, label, value]) => (
                     <div key={key} className="rounded border border-border bg-surface p-2">
-                      <div className="font-medium text-textMuted">{key}</div>
-                      <div className="mt-1 truncate text-text">{Array.isArray(value) ? value.join(', ') : String(value)}</div>
+                      <div className="font-medium text-textMuted">{label}</div>
+                      <div className="mt-1 truncate text-text">{value}</div>
                     </div>
                   ))}
                 </div>

@@ -8,8 +8,10 @@ import '@fontsource/public-sans/latin-600.css';
 import './App.css';
 import { electronAPI } from './api';
 import { APP_NAME } from './brand';
+import { installNumberInputWheelGuard } from './numberInputWheelGuard';
 
 window.electronAPI = electronAPI;
+installNumberInputWheelGuard();
 
 class GlobalErrorBoundary extends React.Component {
   constructor(props) {

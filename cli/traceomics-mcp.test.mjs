@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'node:stream';
-import { createMcpServer, serveStdio, TOOLS } from './traceomics-mcp.mjs';
+import { createMcpServer, serveStdio, TOOLS, MCP_INSTRUCTIONS, NOTEBOOK_TABS } from './traceomics-mcp.mjs';
+import { AGENT_NOTEBOOK_TAB_IDS } from '../shared/agentNotebookTabs.mjs';
 
 const TOKEN = `tro_agent_${'A'.repeat(43)}`;
 const ENV = { TRACEOMICS_AGENT_TOKEN: TOKEN, TRACEOMICS_URL: 'http://127.0.0.1:9' };
@@ -62,15 +63,37 @@ describe('traceomics MCP server', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('steers agents to verified code before their own R, and requires a reason for their own R', async () => {
+    const init = await createMcpServer({ env: ENV, fetchImpl: recordingFetch().fetchImpl })
+      .handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
+    expect(init.result.instructions).toBe(MCP_INSTRUCTIONS);
+    expect(MCP_INSTRUCTIONS).toMatch(/Prefer verified code. Call list_verified_code before any analysis/);
+    expect(MCP_INSTRUCTIONS.indexOf('list_verified_code')).toBeLessThan(MCP_INSTRUCTIONS.indexOf('run_r_script'));
+    expect(MCP_INSTRUCTIONS).toMatch(/flagged as AI-written/);
+
+    const rScript = TOOLS.find((t) => t.name === 'run_r_script');
+    expect(rScript.description).toMatch(/^Last resort/);
+    expect(rScript.inputSchema.required).toContain('reason');
+
+    const { calls, fetchImpl } = recordingFetch(200, { schema: 'x', entries: [] });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    await server.callTool('list_verified_code', { projectId: 'proj_1' });
+    expect(calls[0].url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/verified-code');
+    const missing = await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 't', script: 'print(1)' });
+    expect(missing.result.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
   it('runs an R script in a sandbox with a stable request id and returns figures as images', async () => {
     const { calls, fetchImpl } = recordingFetch(201, { schema: 'x', run: { id: 'sbr_1' } });
     const server = createMcpServer({ env: ENV, fetchImpl });
-    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)' };
+    const args = { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 'Markers', script: 'print(1)',
+      reason: 'No verified entry plots per-donor marker dot plots; checked seurat-markers and gene-figures.', tab: 'deg' };
     await server.callTool('run_r_script', args);
     await server.callTool('run_r_script', args);
     expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/sbx_${'a'.repeat(24)}/runs`);
     const [a, b] = calls.map((c) => JSON.parse(c.init.body));
-    expect(a).toEqual({ title: 'Markers', script: 'print(1)', requestId: expect.any(String) });
+    expect(a).toEqual({ title: 'Markers', script: 'print(1)', reason: args.reason, tab: 'deg', requestId: expect.any(String) });
     expect(a.requestId).toBe(b.requestId);
     expect(TOOLS.find((t) => t.name === 'run_r_script').annotations.readOnlyHint).toBe(false);
 
@@ -83,6 +106,33 @@ describe('traceomics MCP server', () => {
       .result.content).toEqual([{ type: 'text', text: 'gene,p\n' }]);
     expect((await server.callTool('read_sandbox_file', { projectId: 'proj_1', runId: `sbr_${'b'.repeat(24)}`, file: '../x' }))
       .result.isError).toBe(true);
+  });
+
+  it('files agent work under analysis tabs and adds notebook notes', async () => {
+    expect(NOTEBOOK_TABS).toEqual([...AGENT_NOTEBOOK_TAB_IDS]);
+    expect(MCP_INSTRUCTIONS).toMatch(/add_notebook_note/);
+    expect(TOOLS.find((t) => t.name === 'run_r_script').inputSchema.required).toContain('tab');
+
+    const { calls, fetchImpl } = recordingFetch(201, { schema: 'x', note: { id: 'nbn_1' } });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const noTab = await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId: `sbx_${'a'.repeat(24)}`, title: 't',
+      script: 'print(1)', reason: 'No verified entry covers per-donor dot plots here.', tab: 'markers' });
+    expect(noTab.result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+
+    const note = { projectId: 'proj_1', tab: 'cluster', markdown: 'Next: name clusters from the markers in the DEG step.' };
+    await server.callTool('add_notebook_note', note);
+    await server.callTool('add_notebook_note', note);
+    expect(calls[0].url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/notebook/notes');
+    const [a, b] = calls.map((c) => JSON.parse(c.init.body));
+    expect(a).toEqual({ tab: 'cluster', markdown: note.markdown, requestId: expect.any(String) });
+    expect(a.requestId).toBe(b.requestId);
+    expect((await server.callTool('add_notebook_note', { ...note, tab: 'nope' })).result.isError).toBe(true);
+
+    await server.callTool('get_notebook', { projectId: 'proj_1', tab: 'deg' });
+    expect(calls.at(-1).url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/notebook?tab=deg');
+    await server.callTool('get_notebook', { projectId: 'proj_1' });
+    expect(calls.at(-1).url).toBe('http://127.0.0.1:9/api/automation/v1/projects/proj_1/notebook');
   });
 
   it('writes report sections with figures', async () => {
@@ -136,5 +186,40 @@ describe('traceomics MCP server', () => {
     const args={projectId:'proj_1',runId:`run_${'a'.repeat(24)}`,artifactId:`art_${'b'.repeat(24)}`};
     for(const extra of [{limit:101},{offset:10001},{path:'/private'},{code:'system(1)'},{format:'html'}])expect((await server.callTool('preview_artifact',{...args,...extra})).result.isError).toBe(true);
     expect(calls).toHaveLength(0);
+  });
+
+  it('reaches remote folders only by relative path and refuses traversal before any request', async () => {
+    const { calls, fetchImpl } = recordingFetch(200, { kind: 'text', text: 'a,b\n', root: 'raw', path: 'x.csv', offset: 0, truncated: false });
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const sandboxId = `sbx_${'a'.repeat(24)}`;
+    for (const path of ['/etc/passwd', '../x', 'a/../../b', 'a/./b']) {
+      const reply = await server.callTool('read_remote_file', { projectId: 'proj_1', sandboxId, root: 'raw', path });
+      expect(reply.result.isError, path).toBe(true);
+    }
+    expect((await server.callTool('list_remote_files', { projectId: 'proj_1', sandboxId, root: '../etc' })).result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    const read = await server.callTool('read_remote_file', { projectId: 'proj_1', sandboxId, root: 'raw', path: 'meta/x.csv' });
+    expect(read.result.content[0].text).toBe('a,b\n');
+    expect(calls[0].url).toBe(`http://127.0.0.1:9/api/automation/v1/projects/proj_1/sandboxes/${sandboxId}/remote/raw/file?path=meta%2Fx.csv`);
+    await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1', tab: 'explore',
+      reason: 'Checked the verified catalog for a matching workflow.',
+      remoteInputs: [{ root: 'raw', path: 'filtered/matrix.h5' }] });
+    expect(JSON.parse(calls[1].init.body).remoteInputs).toEqual([{ root: 'raw', path: 'filtered/matrix.h5' }]);
+    expect((await server.callTool('run_r_script', { projectId: 'proj_1', sandboxId, title: 'Load', script: 'x <- 1', tab: 'explore',
+      reason: 'Checked the verified catalog for a matching workflow.',
+      remoteInputs: [{ root: 'raw', path: '/abs' }] })).result.isError).toBe(true);
+  });
+
+  it('shows saved figures as images and fetches their history', async () => {
+    const figure = { figure: { id: 'fig_1', plotType: 'UMAP', image: { mimeType: 'image/png', base64: 'iVBORw0KGgo=' } } };
+    const { calls, fetchImpl } = recordingFetch(200, figure);
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const viewed = await server.callTool('view_figure', { projectId: 'proj_1', figureId: 'fig_1' });
+    expect(viewed.result.content[0]).toEqual({ type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' });
+    expect(JSON.parse(viewed.result.content[1].text)).toEqual({ id: 'fig_1', plotType: 'UMAP' });
+    await server.callTool('get_figure_history', { projectId: 'proj_1', figureIds: ['fig_1', 'fig_2'] });
+    expect(calls[1]).toMatchObject({ url: 'http://127.0.0.1:9/api/automation/v1/projects/proj_1/figures/bundles' });
+    expect(JSON.parse(calls[1].init.body)).toEqual({ figureIds: ['fig_1', 'fig_2'] });
+    expect((await server.callTool('get_figure_history', { projectId: 'proj_1', figureIds: ['../x'] })).result.isError).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import { safeFigureFileName } from '../figureFileName';
+import { useFigureProject, parseTags, editorStateFromParams } from '../figures/FigureProjectContext';
 
 // Plot types whose R renderer requires explicit features/genes. Mirrors the
 // guards in r-backend/plumber.R build_pub_plot() (FeaturePlot/DotPlot/Heatmap/
@@ -83,8 +84,19 @@ export default function FigureSavePanel({
   objectId = '',
   onSaved,          // callback(figureRecord)
   deploymentPolicy = {},
+  initialParams = null, // saved figure params to restore when editing a figure
+  revisionOf = null,    // figure id this save revises
+  initialGallery = null, // { collection, tags } carried into a new version
 }) {
   const serverFigureExportEnabled = deploymentPolicy.serverFigureExportEnabled === true;
+  const figureProject = useFigureProject();
+  // A figure drawn from a project analysis object is saved to that project's
+  // shared gallery, linked to the object, so collaborators see it and its
+  // history can be exported. Without a project, the private gallery remains.
+  const canSaveToProject = Boolean(figureProject.projectId && figureProject.canWrite
+    && /^ao_[0-9a-f]+$/.test(objectId || ''));
+  const canSave = canSaveToProject || serverFigureExportEnabled;
+  const initial = editorStateFromParams(initialParams || {});
   // Preview rendering is intentionally NOT gated by serverFigureExportEnabled —
   // only the server-file *export/save* is (see the Save button + proxy allowlist,
   // which permits /export-preview but blocks /export-figure). But a feature-plot
@@ -97,30 +109,35 @@ export default function FigureSavePanel({
     ? `Add at least one gene to preview a ${plotType}.`
     : null;
   // ── Label params ────────────────────────────────────────────────
-  const [title, setTitle] = useState('');
-  const [subtitle, setSubtitle] = useState('');
-  const [xLabel, setXLabel] = useState('');
-  const [yLabel, setYLabel] = useState('');
+  const [title, setTitle] = useState(initial.title);
+  const [subtitle, setSubtitle] = useState(initial.subtitle);
+  const [xLabel, setXLabel] = useState(initial.xLabel);
+  const [yLabel, setYLabel] = useState(initial.yLabel);
 
   // ── Appearance ──────────────────────────────────────────────────
-  const [ptSize, setPtSize] = useState(1.0);
-  const [alpha, setAlpha] = useState(1.0);
-  const [doLabel, setDoLabel] = useState(true);
-  const [labelSize, setLabelSize] = useState(4);
-  const [repel, setRepel] = useState(true);
-  const [legendPos, setLegendPos] = useState('right');
-  const [fontSize, setFontSize] = useState(12);
-  const [palette, setPalette] = useState('Set2');
-  const [dotScale, setDotScale] = useState(6);
-  const [logScale, setLogScale] = useState(false);
+  const [ptSize, setPtSize] = useState(initial.ptSize);
+  const [alpha, setAlpha] = useState(initial.alpha);
+  const [doLabel, setDoLabel] = useState(initial.doLabel);
+  const [labelSize, setLabelSize] = useState(initial.labelSize);
+  const [repel, setRepel] = useState(initial.repel);
+  const [legendPos, setLegendPos] = useState(initial.legendPos);
+  const [fontSize, setFontSize] = useState(initial.fontSize);
+  const [palette, setPalette] = useState(initial.palette);
+  const [dotScale, setDotScale] = useState(initial.dotScale);
+  const [logScale, setLogScale] = useState(initial.logScale);
 
   // ── Advanced ────────────────────────────────────────────────────
-  const [dpi, setDpi] = useState(300);
-  const [format, setFormat] = useState('png');
-  const [width, setWidth] = useState(8);
-  const [height, setHeight] = useState(6);
-  const [splitBy, setSplitBy] = useState('');
-  const [ncol, setNcol] = useState('');
+  const [dpi, setDpi] = useState(initial.dpi);
+  const [format, setFormat] = useState(initial.format);
+  const [width, setWidth] = useState(initial.width);
+  const [height, setHeight] = useState(initial.height);
+  const [splitBy, setSplitBy] = useState(initial.splitBy);
+  const [ncol, setNcol] = useState(initial.ncol);
+
+  // ── Gallery organisation ────────────────────────────────────────
+  const [collection, setCollection] = useState(initialGallery?.collection || '');
+  const [tagText, setTagText] = useState((initialGallery?.tags || []).join(', '));
+  const collectionListId = useId();
 
   // ── Preview state ───────────────────────────────────────────────
   const [previewB64, setPreviewB64] = useState(null);
@@ -283,24 +300,43 @@ export default function FigureSavePanel({
   }, [isOpen]);
 
   const handleSave = async () => {
-    if (!serverFigureExportEnabled) return;
+    if (!canSave) return;
     setSaving(true);
     setSaveError(null);
     setSaveSuccess(null);
 
     const params = buildParams();
-    const exportParams = { ...params, format, width, height, dpi };
+    const exportParams = { ...params, format, width, height, dpi, ...(revisionOf ? { revision_of: revisionOf } : {}) };
 
     try {
-      const data = await window.electronAPI.apiRequest('/export-figure', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Object-ID': objectId },
-        body: JSON.stringify(exportParams),
-      });
-      if (data.error) throw new Error(data.error);
-
-      const result = data.result;
+      let result = {};
+      if (serverFigureExportEnabled) {
+        const data = await window.electronAPI.apiRequest('/export-figure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Object-ID': objectId },
+          body: JSON.stringify(exportParams),
+        });
+        if (data.error) throw new Error(data.error);
+        result = data.result || {};
+      }
       const fileName = safeFigureFileName(result.file_name) || safeFigureFileName(result.file_path);
+
+      if (canSaveToProject) {
+        const saved = await window.electronAPI.createProjectFigure(figureProject.projectId, {
+          analysisObjectId: objectId,
+          plotType,
+          title: title || plotType,
+          params: exportParams,
+          fileFormat: format,
+          thumbnailB64: previewB64 || result.thumbnail_b64 || '',
+          collection,
+          tags: parseTags(tagText),
+        });
+        setSaveSuccess(`Saved to the ${figureProject.projectName || 'project'} gallery${fileName ? ` and exported as ${fileName}` : ''}.`);
+        figureProject.notifySaved?.(saved);
+        if (onSaved) onSaved(saved);
+        return;
+      }
 
       // Persist to figure gallery via Electron IPC
       const record = {
@@ -318,6 +354,7 @@ export default function FigureSavePanel({
       if (window.electronAPI?.saveFigure) {
         await window.electronAPI.saveFigure(record);
       }
+      figureProject.notifySaved?.(record);
 
       setSaveSuccess(fileName ? `Saved as ${fileName}` : 'Saved to Figure Gallery.');
       if (onSaved) onSaved(record);
@@ -350,7 +387,7 @@ export default function FigureSavePanel({
           <div className="flex items-center gap-3">
             <Image size={20} className="text-primary" />
             <div>
-              <h3 id="figure-save-panel-title" className="font-bold text-text text-sm">Save to Figure Gallery</h3>
+              <h3 id="figure-save-panel-title" className="font-bold text-text text-sm">{revisionOf ? 'Edit figure' : 'Save to Figure Gallery'}</h3>
               <p className="text-xs text-textMuted">{plotType} · Publication-quality export</p>
             </div>
           </div>
@@ -363,6 +400,23 @@ export default function FigureSavePanel({
         <div className="flex-1 flex flex-col md:flex-row min-h-0">
           {/* Left: parameter controls */}
           <div className="w-full md:w-72 flex-shrink-0 overflow-y-auto custom-scrollbar p-4 border-b md:border-b-0 md:border-r border-border max-h-[45vh] md:max-h-none">
+
+            {canSaveToProject && (
+              <CollapsibleSection title="Gallery" icon={Image}>
+                <div>
+                  <label htmlFor={`${collectionListId}-input`} className="block text-xs text-textMuted font-medium mb-1">Collection</label>
+                  <input
+                    id={`${collectionListId}-input`} list={collectionListId} value={collection}
+                    onChange={(event) => setCollection(event.target.value)} placeholder="e.g. Figure 2"
+                    className="w-full bg-background border border-border rounded px-3 py-1.5 text-sm text-text focus:outline-none focus:border-primary"
+                  />
+                  <datalist id={collectionListId}>
+                    {(figureProject.collections || []).map((name) => <option key={name} value={name} />)}
+                  </datalist>
+                </div>
+                <FieldRow label="Tags (comma-separated)" value={tagText} onChange={setTagText} placeholder="main, supplement" />
+              </CollapsibleSection>
+            )}
 
             <CollapsibleSection title="Labels" icon={Type}>
               <FieldRow label="Title" value={title} onChange={setTitle} placeholder={plotType} />
@@ -601,18 +655,20 @@ export default function FigureSavePanel({
               )}
               <button
                 onClick={handleSave}
-                disabled={!serverFigureExportEnabled || saving || previewLoading || !previewB64 || Boolean(previewError)}
+                disabled={!canSave || saving || previewLoading || !previewB64 || Boolean(previewError)}
                 className="w-full btn btn-primary h-12 flex items-center justify-center gap-2 text-sm font-bold"
               >
                 {saving
                   ? <><Loader2 size={16} className="animate-spin" /> Saving…</>
-                  : <><Download size={16} /> Save to Figure Gallery</>
+                  : <><Download size={16} /> {revisionOf ? 'Save as new version' : 'Save to Figure Gallery'}</>
                 }
               </button>
               <p className="text-xs text-slate-500 text-center">
-                {serverFigureExportEnabled
-                  ? 'Saves figure metadata and a preview to the private gallery.'
-                  : 'Figures remain in this private gallery; file export is not available in this deployment.'}
+                {canSaveToProject
+                  ? `Saves this figure, its settings and a preview to the ${figureProject.projectName || 'project'} gallery, linked to the analysis it was drawn from.`
+                  : serverFigureExportEnabled
+                    ? 'Saves figure metadata and a preview to the private gallery.'
+                    : 'Open an analysis in a project you can edit to save figures; file export is not available in this deployment.'}
               </p>
             </div>
           </div>

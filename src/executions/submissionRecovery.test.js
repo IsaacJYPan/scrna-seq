@@ -51,12 +51,36 @@ it('reopens with identifiers only and requires an authoritative receipt before m
   await clearSubmissionRecovery(); localStorage.setItem('traceomics_submission_recovery_v1_generation', generation); localStorage.setItem(RECOVERY_STORAGE_KEY, saved);
   await ensureSubmissionRecovery({ userId: 1 });
   expect(getSubmissionRecoverySnapshot().records[0].confirmed).toBe(false);
-  const another = vi.fn();
-  await expect(submit({ requestId: crypto.randomUUID(), submit: another })).rejects.toMatchObject({ code: 'SUBMISSION_RECOVERY_REQUIRED' });
-  expect(another).not.toHaveBeenCalled();
   await reconcileSubmissions();
   expect(getSubmissionRecoverySnapshot().records[0].confirmed).toBe(true);
   expect(getSubmissionRecoverySnapshot().selection.runId).toBe('job_exact');
+});
+
+it('reads the receipt of an accepted run again before admitting new work after reopening', async () => {
+  await submit();
+  const saved = localStorage.getItem(RECOVERY_STORAGE_KEY);
+  const generation = stored().generation;
+  await clearSubmissionRecovery(); localStorage.setItem('traceomics_submission_recovery_v1_generation', generation); localStorage.setItem(RECOVERY_STORAGE_KEY, saved);
+  await ensureSubmissionRecovery({ userId: 1 });
+  fetch.mockClear();
+  const nextId = crypto.randomUUID();
+  const another = vi.fn(async () => ({ submission: admitted({ requestId: nextId, jobId: 'job_next' }) }));
+  await submit({ requestId: nextId, submit: another });
+  expect(fetch.mock.calls.map(([url]) => url)).toContain(`/api/projects/proj_one/job-submissions/${requestId}`);
+  expect(fetch.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true);
+  expect(another).toHaveBeenCalledTimes(1);
+});
+
+it('still blocks new work when the reopened run receipt cannot be read', async () => {
+  await submit();
+  const saved = localStorage.getItem(RECOVERY_STORAGE_KEY);
+  const generation = stored().generation;
+  await clearSubmissionRecovery(); localStorage.setItem('traceomics_submission_recovery_v1_generation', generation); localStorage.setItem(RECOVERY_STORAGE_KEY, saved);
+  await ensureSubmissionRecovery({ userId: 1 });
+  fetch.mockImplementation(async url => (url === '/api/auth/installation' ? response(installation) : { ok: false, status: 503, headers: new Headers() }));
+  const another = vi.fn();
+  await expect(submit({ requestId: crypto.randomUUID(), submit: another })).rejects.toMatchObject({ code: 'SUBMISSION_RECOVERY_REQUIRED' });
+  expect(another).not.toHaveBeenCalled();
 });
 
 it.each([

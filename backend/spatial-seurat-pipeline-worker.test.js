@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
+const { withEffectiveParameters } = require('./_rPipelineFixture');
 const config = require('./config');
 const db = require('./pgDatabase');
 const {
@@ -104,7 +105,7 @@ describe.skipIf(!CONFIGURED)('spatial.seurat.v1 durable worker path', () => {
       logger: silentLogger(),
       callR: async (request) => {
         calls.push(request);
-        return { status: 200, body: spatialResponse() };
+        return { status: 200, body: withEffectiveParameters(request, spatialResponse()) };
       },
     });
 
