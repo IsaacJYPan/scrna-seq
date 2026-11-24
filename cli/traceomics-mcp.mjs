@@ -52,7 +52,25 @@ const ID = {
   object: /^[A-Za-z0-9_-]{1,80}$/,
   file: /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/,
   dataset: /^[A-Za-z0-9_-]{1,80}$/,
+  figure: /^fig_[0-9a-f]+$/,
+  root: /^[a-z][a-z0-9_-]{0,31}$/,
 };
+
+// Remote paths are relative to a folder a person pinned to the sandbox. The
+// server is the boundary (it resolves real paths on the cluster); refusing
+// absolute paths and ".." here keeps a confused agent from even asking.
+const REMOTE_SEGMENT = /^[A-Za-z0-9_@+=,-][A-Za-z0-9_. @+=,-]{0,199}$/;
+function remotePath(value, { required = false } = {}) {
+  if (value === undefined || value === '') {
+    if (required) throw new ToolInputError('path is required.');
+    return '';
+  }
+  if (typeof value !== 'string' || value.startsWith('/') || value.includes('\\')
+      || value.split('/').filter(Boolean).some((part) => part === '.' || part === '..' || !REMOTE_SEGMENT.test(part))) {
+    throw new ToolInputError('path must be relative to the remote folder, without "." or "..".');
+  }
+  return value.split('/').filter(Boolean).join('/');
+}
 
 class ToolInputError extends Error {}
 
@@ -255,6 +273,27 @@ export const TOOLS = [
       };
     }
   ),
+  // Figures people saved in the project gallery.
+  tool('list_figures', 'Figures saved in the project gallery: plot type, the analysis each was drawn from, versions, and (with labels disclosure) titles, collections and captions.',
+    projectProp, ['projectId'], (a) => ({ method: 'GET', path: `${project(a)}/figures` })),
+  tool('view_figure', 'Look at one saved figure (its preview image) with its saved settings.',
+    { ...projectProp, figureId: { type: 'string' } }, ['projectId', 'figureId'],
+    (a) => ({ method: 'GET', path: `${project(a)}/figures/${str(a, 'figureId', ID.figure)}` }),
+    { render: (data) => {
+      const figure = data?.figure;
+      if (!figure?.image?.base64) return null;
+      const { image, ...metadata } = figure;
+      return { content: [{ type: 'image', data: image.base64, mimeType: image.mimeType }, { type: 'text', text: JSON.stringify(metadata, null, 2) }] };
+    } }),
+  tool('get_figure_history', 'The minimal, dependency-ordered history behind selected figures: which analysis objects, server jobs and recorded steps they need (steps they do not need are listed as omitted), and one R script that reproduces them.',
+    { ...projectProp, figureIds: { type: 'array', items: { type: 'string' }, maxItems: 50 } }, ['projectId', 'figureIds'],
+    (a) => {
+      if (!Array.isArray(a.figureIds) || a.figureIds.length === 0 || !a.figureIds.every((id) => typeof id === 'string' && ID.figure.test(id))) {
+        throw new ToolInputError('figureIds must list figure ids.');
+      }
+      return { method: 'POST', path: `${project(a)}/figures/bundles`, body: { figureIds: a.figureIds } };
+    }),
+
   tool(
     'create_proposal',
     'Submit an inert proposal (code diff, method change, or workflow) for a person to review. Nothing is executed.',
@@ -318,6 +357,8 @@ export const TOOLS = [
       reason: { type: 'string', description: 'Why verified code does not cover this, naming the list_verified_code entries you checked (20-1000 characters). Shown to the reviewer.' },
       tab: tabProp,
       inputAnalysisObjectId: { type: 'string', description: 'One of the sandbox inputs; defaults to the first.' },
+      remoteInputs: { type: 'array', maxItems: 5, description: 'Cluster sandboxes only: files from the sandbox\'s remote folders to copy in read-only. Read one in R with input_path("<root>/<path>").',
+        items: { type: 'object', properties: { root: { type: 'string' }, path: { type: 'string' } }, required: ['root', 'path'], additionalProperties: false } },
       requestId: { type: 'string' }
     },
     ['projectId', 'sandboxId', 'title', 'script', 'reason', 'tab'],
@@ -326,9 +367,16 @@ export const TOOLS = [
       const body = { title: str(a, 'title'), script: str(a, 'script'), reason: str(a, 'reason'), tab: tabArg(a) };
       if (a.inputAnalysisObjectId !== undefined)
         body.inputAnalysisObjectId = str(a, 'inputAnalysisObjectId', ID.object);
+      if (a.remoteInputs !== undefined) {
+        if (!Array.isArray(a.remoteInputs) || a.remoteInputs.length > 5) throw new ToolInputError('remoteInputs must list at most 5 files.');
+        body.remoteInputs = a.remoteInputs.map((entry) => {
+          if (!entry || typeof entry !== 'object') throw new ToolInputError('Each remote input needs root and path.');
+          return { root: str(entry, 'root', ID.root), path: remotePath(entry.path, { required: true }) };
+        });
+      }
       body.requestId =
         a.requestId === undefined
-          ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? '', body.tab])
+          ? defaultRequestId([base, body.title, body.script, body.inputAnalysisObjectId ?? '', body.tab, ...(body.remoteInputs?.length ? [JSON.stringify(body.remoteInputs)] : [])])
           : str(a, 'requestId');
       return { method: 'POST', path: base, body };
     },
@@ -370,6 +418,35 @@ export const TOOLS = [
       }
     }
   ),
+  tool('list_remote_files', 'List a folder inside one of the sandbox\'s remote folders on the cluster (names, types, sizes). Paths are relative to that folder; nothing outside it can be reached.',
+    { ...projectProp, sandboxId: { type: 'string' }, root: { type: 'string', description: 'Remote folder name from get_sandbox.' },
+      path: { type: 'string', description: 'Relative folder path; empty for the top.' } },
+    ['projectId', 'sandboxId', 'root'],
+    (a) => {
+      const rel = remotePath(a.path);
+      return { method: 'GET', path: `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/remote/${str(a, 'root', ID.root)}${rel ? `?path=${encodeURIComponent(rel)}` : ''}` };
+    }),
+  tool('read_remote_file', 'Read a file in one of the sandbox\'s remote folders: text up to 256 KiB per call (use offset for more), PNG/SVG images up to 2 MiB. Binary data (h5, rds, mtx) cannot be read here; pass it to run_r_script as remoteInputs.',
+    { ...projectProp, sandboxId: { type: 'string' }, root: { type: 'string' }, path: { type: 'string' },
+      offset: { type: 'integer', minimum: 0 } },
+    ['projectId', 'sandboxId', 'root', 'path'],
+    (a) => {
+      const rel = remotePath(a.path, { required: true });
+      if (a.offset !== undefined && (!Number.isSafeInteger(a.offset) || a.offset < 0)) throw new ToolInputError('offset must be a non-negative integer.');
+      const query = `path=${encodeURIComponent(rel)}${a.offset ? `&offset=${a.offset}` : ''}`;
+      return { method: 'GET', path: `${project(a)}/sandboxes/${str(a, 'sandboxId', ID.sandbox)}/remote/${str(a, 'root', ID.root)}/file?${query}` };
+    }, { render: (data) => {
+      if (data?.kind === 'image' && data.mimeType === 'image/png' && typeof data.base64 === 'string') {
+        return { content: [{ type: 'image', data: data.base64, mimeType: 'image/png' }, { type: 'text', text: `${data.root}/${data.path} (${data.sizeBytes} bytes)` }] };
+      }
+      if (data?.kind === 'image' && typeof data.base64 === 'string') {
+        return { content: [{ type: 'text', text: Buffer.from(data.base64, 'base64').toString('utf8') }] };
+      }
+      if (data?.kind === 'text' && typeof data.text === 'string') {
+        return { content: [{ type: 'text', text: data.truncated ? `${data.text}\n[truncated: call again with offset=${data.offset + Buffer.byteLength(data.text, 'utf8')}]` : data.text }] };
+      }
+      return null;
+    } }),
   tool(
     'cancel_sandbox_run',
     "Cancel one of this agent's sandbox runs. The reserved budget is not refunded.",

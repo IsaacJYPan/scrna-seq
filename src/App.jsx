@@ -26,6 +26,8 @@ import { originalHistoryScopeChanged, prepareOriginalObjectHistory } from './ana
 import { openWorkflowSnapshot } from './analyses/researchAnalysisApi';
 import { validateWorkflowRestoration } from './analyses/workflowSnapshotClient';
 import { buildProjectProvenancePayload } from './projectProvenance';
+import { FigureProjectProvider, FIGURE_WRITE_ROLES } from './figures/FigureProjectContext';
+import { carryTabParams } from './hooks/useTabParams';
 
 import {
   saveProvenance,
@@ -336,19 +338,32 @@ export default function App() {
   }, [authRetry]);
 
   const [figuresCount, setFiguresCount] = useState(0);
+  const [figureCollections, setFigureCollections] = useState([]);
+  const [figureRefreshToken, setFigureRefreshToken] = useState(0);
+  const [figureProjectId, setFigureProjectId] = useState(null);
 
-  // Refresh the gallery badge on login and when entering/leaving the Figure
-  // Gallery, rather than firing getFigures on every unrelated tab navigation.
+  // Refresh the gallery badge on login, when entering/leaving the Figure
+  // Gallery, and after a save, rather than on every unrelated tab navigation.
+  // Within a project the badge and collection suggestions come from the
+  // project's shared gallery; otherwise from the private gallery.
   const onPublicationTab = activeTab === 'publication';
   useEffect(() => {
-    if (window.electronAPI && window.electronAPI.getFigures && user?.email) {
-      window.electronAPI.getFigures(user.email).then(figures => {
-        setFiguresCount(figures.length);
-      }).catch(err => {
-        console.error('[App] Failed to load figures count:', err);
-      });
-    }
-  }, [onPublicationTab, user?.email]);
+    let cancelled = false;
+    const api = window.electronAPI;
+    const load = figureProjectId && api?.listProjectFigures
+      ? api.listProjectFigures(figureProjectId)
+      : (api?.getFigures && user?.email ? api.getFigures(user.email) : null);
+    if (!load) return undefined;
+    load.then((figures) => {
+      if (cancelled) return;
+      const list = Array.isArray(figures) ? figures : [];
+      setFiguresCount(list.length);
+      setFigureCollections([...new Set(list.map((figure) => figure.collection).filter(Boolean))].sort());
+    }).catch(err => {
+      console.error('[App] Failed to load figures count:', err);
+    });
+    return () => { cancelled = true; };
+  }, [onPublicationTab, user?.email, figureProjectId, figureRefreshToken]);
 
   // Local workspace shell. Backend projects/analysis objects are loaded after
   // login; localStorage is no longer a durable project/object source.
@@ -398,6 +413,9 @@ export default function App() {
   const [computeStatus, setComputeStatus] = useState({ status: 'unknown', updatedAt: null });
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
+  // Session provenance id -> project provenance id, so the project history
+  // keeps each step's parent links (used to export only what figures need).
+  const projectProvenanceIds = React.useRef(new Map());
   const [drawerChain, setDrawerChain] = useState(null);
   // R process session ID — changes on every restart, busting the pipeline cache
   // so that all stateful steps re-execute in R and rebuild global_obj.
@@ -764,6 +782,8 @@ export default function App() {
       await refreshAnalysisObjects(projectId);
       if (checkpointSaveRequestRef.current !== requestId) return;
       checkpointSaveOpenedObjectRef.current = saved.resultAnalysisObjectId;
+      // The saved version continues this analysis: keep its step settings.
+      carryTabParams(user?.email, objectId, saved.resultAnalysisObjectId);
       handleSelectAnalysisObject(projectId, saved.resultAnalysisObjectId);
       handleLiveObjectAttached(projectId, saved.resultAnalysisObjectId);
       setUnsavedLiveChanges(false);
@@ -1066,8 +1086,15 @@ export default function App() {
             && ['owner', 'admin', 'analyst'].includes(projectRole)
             && typeof window.electronAPI?.createProjectProvenance === 'function') {
           const projectPayload = buildProjectProvenancePayload(data.provenance, datasetInfo.id);
+          const projectParents = (parentIds || [])
+            .map((id) => projectProvenanceIds.current.get(`${projectId}:${id}`))
+            .filter(Boolean);
+          if (projectPayload && projectParents.length > 0) projectPayload.parentIds = projectParents;
           try {
-            await window.electronAPI.createProjectProvenance(projectId, projectPayload);
+            const created = await window.electronAPI.createProjectProvenance(projectId, projectPayload);
+            if (created?.id && data.provenance.id) {
+              projectProvenanceIds.current.set(`${projectId}:${data.provenance.id}`, created.id);
+            }
           } catch {
             // The scientific operation has already completed in R. Project-level
             // provenance persistence is best-effort here so a transient history
@@ -1383,6 +1410,19 @@ export default function App() {
   // for history, script viewing, and parent links without changing R state.
   // ────────────────────────────────────────────────────────────────
 
+  // Project context for the figure editor on every plot page, and the
+  // project whose shared gallery the badge counts.
+  const activeFigureProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || null;
+  const activeFigureProject = currentWs?.projects?.find(project => project.id === activeFigureProjectId);
+  useEffect(() => { setFigureProjectId(activeFigureProjectId); }, [activeFigureProjectId]);
+  const figureProjectValue = React.useMemo(() => ({
+    projectId: activeFigureProjectId,
+    projectName: activeFigureProject?.name || '',
+    canWrite: FIGURE_WRITE_ROLES.includes(activeFigureProject?.role),
+    collections: figureCollections,
+    notifySaved: () => setFigureRefreshToken((token) => token + 1),
+  }), [activeFigureProjectId, activeFigureProject?.name, activeFigureProject?.role, figureCollections]);
+
   if (!isLoggedIn && authResolution !== 'resolved') return (
     <div className="login-bg flex min-h-dvh items-center justify-center p-6 text-text">
       <div className="w-full max-w-sm text-center">
@@ -1424,6 +1464,8 @@ export default function App() {
 
   const renderContent = () => {
     const objKey = datasetInfo?.id ?? 'none';
+    const galleryProjectId = datasetInfo?.projectId || currentWs.selectedProjectId || null;
+    const galleryProject = currentWs.projects?.find(p => p.id === galleryProjectId);
     const getLatestId = (op) => provenanceRecords.find(r => r.operation === op)?.id;
 
     const activeProjectId = datasetInfo?.projectId || currentWs.selectedProjectId || currentWs.projects?.[0]?.id || null;
@@ -1548,7 +1590,10 @@ export default function App() {
         <ErrorBoundary key="enrichment" onReturn={returnToWorkspace}><TabContent id="enrichment" activeTab={activeTab} contextKey={objKey}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat" onReturn={returnToWorkspace}><TabContent id="cellchat" activeTab={activeTab} contextKey={objKey}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate" onReturn={returnToWorkspace}><TabContent id="integrate" activeTab={activeTab} contextKey={objKey}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="publication" onReturn={returnToWorkspace}><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="publication" onReturn={returnToWorkspace}><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'}
+          projectId={galleryProjectId} projectName={galleryProject?.name || ''} projectRole={galleryProject?.role || null}
+          figureRefreshToken={figureRefreshToken}
+          onOpenAnalysisObject={(projectId, objectId) => handleSelectAnalysisObject(projectId, objectId)} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation" onReturn={returnToWorkspace}><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="team" onReturn={returnToWorkspace}><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="agents" onReturn={returnToWorkspace}><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
@@ -1614,7 +1659,9 @@ export default function App() {
         {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
           checkpointSaveState={checkpointSaveState} checkpointSaveBusy={checkpointSaveBusy}
           onSave={() => void handleSaveLiveAnalysis()} onOpenHistory={() => setActiveTab('history')} />}
-        <div className="min-h-0 flex-1">{renderContent()}</div>
+        <FigureProjectProvider value={figureProjectValue}>
+          <div className="min-h-0 flex-1">{renderContent()}</div>
+        </FigureProjectProvider>
       </main>
 
       <ProvenanceDrawer

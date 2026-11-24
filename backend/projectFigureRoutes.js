@@ -9,6 +9,10 @@ const {
   isValidProvenanceIdFormat,
 } = require('./resourceIds');
 const { rejectProjectResourceFields, sendProjectResourceError } = require('./projectResourceHttp');
+const figureBundles = require('./figureBundles');
+const projectAudit = require('./projectAudit');
+
+const FIGURE_EDIT_FIELDS = new Set(['title', 'collection', 'tags', 'notes']);
 
 // Figure metadata associated with a project, readable by members by role.
 // SECURITY: a client may NOT supply file_path / storage key / raw path here, and
@@ -54,7 +58,10 @@ function projectFigureRoutes({ db }) {
         title: body.title,
         params: body.params,
         fileFormat: body.fileFormat,
-        thumbnailB64: body.thumbnailB64
+        thumbnailB64: body.thumbnailB64,
+        collection: body.collection,
+        tags: body.tags,
+        notes: body.notes
       });
       res.status(201).json(created);
     } catch (e) {
@@ -72,6 +79,72 @@ function projectFigureRoutes({ db }) {
     };
     try {
       res.json(await db.listProjectFigures(req.user.id, req.params.projectId, filters));
+    } catch (e) {
+      sendProjectResourceError(res, e, 'ProjectFigures');
+    }
+  });
+
+  // Selection export: only the objects, jobs and recorded steps the selected
+  // figures depend on, in dependency order, plus one R script. format=r
+  // returns just the script.
+  router.post('/bundles', async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    try {
+      const bundle = await figureBundles.buildFigureBundle(req.user.id, req.params.projectId, {
+        figureIds: body.figureIds, analysisObjectIds: body.analysisObjectIds,
+      });
+      await projectAudit.recordEvent(db, {
+        projectId: req.params.projectId, actorUserId: req.user.id,
+        action: 'figure.bundle_exported', targetType: 'project', targetId: req.params.projectId,
+        details: {
+          bundleVersion: bundle.version, figureCount: bundle.figures.length,
+          stepCount: bundle.steps.length, scriptSha256: bundle.scriptSha256,
+        },
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (body.format === 'r' || req.query.format === 'r') {
+        res.setHeader('Content-Type', 'text/x-r; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="figure-bundle.R"');
+        return res.send(bundle.script);
+      }
+      res.json(bundle);
+    } catch (e) {
+      sendProjectResourceError(res, e, 'ProjectFigureBundles');
+    }
+  });
+
+  router.patch('/:figureId', async (req, res) => {
+    if (!isValidFigureIdFormat(req.params.figureId)) {
+      return res.status(400).json({ error: 'Malformed figure ID.' });
+    }
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const unknown = Object.keys(body).filter((key) => !FIGURE_EDIT_FIELDS.has(key));
+    if (unknown.length > 0) {
+      return res.status(400).json({ error: `Figures accept only ${[...FIGURE_EDIT_FIELDS].join(', ')} edits.` });
+    }
+    try {
+      const updated = await db.updateProjectFigure(req.user.id, req.params.projectId, req.params.figureId, body);
+      await projectAudit.recordEvent(db, {
+        projectId: req.params.projectId, actorUserId: req.user.id,
+        action: 'figure.updated', targetType: 'figure', targetId: updated.id, details: {},
+      });
+      res.json(updated);
+    } catch (e) {
+      sendProjectResourceError(res, e, 'ProjectFigures');
+    }
+  });
+
+  router.delete('/:figureId', async (req, res) => {
+    if (!isValidFigureIdFormat(req.params.figureId)) {
+      return res.status(400).json({ error: 'Malformed figure ID.' });
+    }
+    try {
+      await db.removeProjectFigure(req.user.id, req.params.projectId, req.params.figureId);
+      await projectAudit.recordEvent(db, {
+        projectId: req.params.projectId, actorUserId: req.user.id,
+        action: 'figure.removed', targetType: 'figure', targetId: req.params.figureId, details: {},
+      });
+      res.status(204).end();
     } catch (e) {
       sendProjectResourceError(res, e, 'ProjectFigures');
     }

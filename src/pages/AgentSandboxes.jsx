@@ -18,6 +18,40 @@ const STATE_TONE = {
 };
 const STATE_LABEL = { draft_ready: 'draft ready', cancel_requested: 'canceling' };
 
+const FLAG_TONE = {
+  high: 'border-danger/40 bg-danger/10 text-danger',
+  medium: 'border-amber-500/40 bg-amber-500/10 text-text',
+  review: 'border-primary/30 bg-primary/5 text-text',
+  low: 'border-border bg-background text-textMuted',
+};
+
+// Lines in the agent's code a reviewer should read before promoting.
+function ReviewFlags({ flags }) {
+  if (!Array.isArray(flags)) return null;
+  if (flags.length === 0) return <p className="text-xs text-textMuted">No review flags: the code only reads the input and writes outputs through the helpers.</p>;
+  return (
+    <div className="space-y-1" aria-label="Review flags">
+      <p className="text-xs font-bold text-text">Check before promoting ({flags.length})</p>
+      <ul className="space-y-1">
+        {flags.map((flag, index) => (
+          <li key={`${flag.id}-${flag.line}-${index}`} className={`rounded border px-2 py-1 text-xs ${FLAG_TONE[flag.severity] || FLAG_TONE.low}`}>
+            <span className="font-bold">Line {flag.line}: {flag.label}</span>
+            {flag.excerpt && <code className="ml-2 font-mono text-[11px] break-all">{flag.excerpt}</code>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// "raw = /scratch/lab/pbmc" lines → remote folder definitions.
+function parseRemoteRoots(text) {
+  return String(text || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [name, ...rest] = line.split('=');
+    return { name: name.trim(), path: rest.join('=').trim() };
+  });
+}
+
 function formatBytes(n) {
   if (!Number.isFinite(n)) return '';
   if (n < 1024) return `${n} B`;
@@ -82,7 +116,7 @@ export default function AgentSandboxes({ projectId, role, userId, theme, onChang
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [notes, setNotes] = useState({});
-  const [form, setForm] = useState({ name: '', objective: '', objectIds: [], maxRuns: 20, target: 'local', cpus: 4, memoryGiB: 32, hours: 4 });
+  const [form, setForm] = useState({ name: '', objective: '', objectIds: [], maxRuns: 20, target: 'local', cpus: 4, memoryGiB: 32, hours: 4, remoteRoots: '' });
   const [cluster, setCluster] = useState(null);
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
 
@@ -141,8 +175,9 @@ export default function AgentSandboxes({ projectId, role, userId, theme, onChang
       const res = await api.createAgentSandbox(projectId, {
         name: form.name, objective: form.objective, analysisObjectIds: form.objectIds, maxRuns: Number(form.maxRuns),
         ...(onCluster ? { executionTarget: 'slurm', cpusPerRun: Number(form.cpus), memoryGiBPerRun: Number(form.memoryGiB), hoursPerRun: Number(form.hours) } : {}),
+        ...(onCluster && form.remoteRoots.trim() ? { remoteRoots: parseRemoteRoots(form.remoteRoots) } : {}),
       });
-      setForm((f) => ({ ...f, name: '', objective: '', objectIds: [] }));
+      setForm((f) => ({ ...f, name: '', objective: '', objectIds: [], remoteRoots: '' }));
       if (res?.sandbox?.id) setOpenId(res.sandbox.id);
     });
   };
@@ -188,6 +223,14 @@ export default function AgentSandboxes({ projectId, role, userId, theme, onChang
                 </label>
               </div>
             )}
+            {form.target === 'slurm' && cluster?.sandbox?.ready && (
+              <label className="space-y-1 text-xs font-bold text-textMuted md:col-span-2">Cluster folders the agent may read (optional)
+                <textarea rows={2} value={form.remoteRoots} placeholder="raw = /scratch/lab/pbmc_runs"
+                  onChange={(e) => setForm((f) => ({ ...f, remoteRoots: e.target.value }))}
+                  className="w-full rounded border border-border bg-background px-3 py-2 font-mono text-xs font-normal text-text" />
+                <span className="block font-normal">One <code>name = /absolute/path</code> per line, up to five. The agent can list and read files inside these folders and copy them into its runs, read-only, through TraceOmics only. It never gets a shell or your SSH key, and links that lead outside a folder are refused.</span>
+              </label>
+            )}
             <label className="space-y-1 text-xs font-bold text-textMuted md:col-span-2">What should the agent investigate?
               <textarea maxLength={4000} rows={2} value={form.objective} onChange={(e) => setForm((f) => ({ ...f, objective: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
@@ -227,6 +270,9 @@ export default function AgentSandboxes({ projectId, role, userId, theme, onChang
               {openId === s.id && detail?.id === s.id && (
                 <div className="mt-3 space-y-3">
                   <p className="text-xs text-textMuted">Reads: {detail.inputs.map((i) => i.displayName || i.analysisObjectId).join(', ')} · {detail.runtime.network === 'none' ? 'no network' : detail.runtime.network} · {detail.executionTarget === 'slurm' ? `Slurm, ${detail.perRun.cpus} CPUs, ${Math.round(detail.perRun.memoryMiB / 1024)} GiB, ${detail.perRun.maxWallSeconds / 3600} h per run` : 'this installation'}</p>
+                  {detail.remoteRoots?.length > 0 && (
+                    <p className="text-xs text-textMuted">Cluster folders: {detail.remoteRoots.map((root) => `${root.name} (${root.path})`).join(', ')}</p>
+                  )}
                   {s.status === 'open' && canWrite && (
                     <button type="button" disabled={Boolean(busy)} onClick={() => act(`close:${s.id}`, () => api.closeAgentSandbox(projectId, s.id))} className="btn btn-secondary text-xs">Close sandbox</button>
                   )}
@@ -242,6 +288,10 @@ export default function AgentSandboxes({ projectId, role, userId, theme, onChang
                         {run.reason || 'No reason was recorded (run submitted before reasons were required).'}
                       </p>
                       {run.error && <p className="text-xs text-danger">{run.error.message}</p>}
+                      {run.remoteInputs?.length > 0 && (
+                        <p className="text-xs text-textMuted">Copied from cluster folders: {run.remoteInputs.map((entry) => `${entry.root}/${entry.path}`).join(', ')}</p>
+                      )}
+                      {run.review.state === 'draft' && <ReviewFlags flags={run.reviewFlags} />}
                       {run.steps && <AgentRunNotebook run={{ ...run, sandboxName: detail.name }} projectId={projectId} theme={theme} canSave={canWrite}
                         fileUrl={(name, options) => api.agentSandboxFileUrl?.(projectId, run.id, name, options)}
                         readText={api.readAgentSandboxText ? (name) => api.readAgentSandboxText(projectId, run.id, name) : null} />}

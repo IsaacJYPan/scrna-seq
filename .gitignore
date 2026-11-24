@@ -125,3 +125,4 @@ trusted-methods/dist/
 # Local agent runtime: sandbox broker work folder and R install pin
 /.expert-r-work/
 /.traceomics-runtime.json
+.playwright-mcp/

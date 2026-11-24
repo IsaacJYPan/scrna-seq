@@ -3,7 +3,8 @@
 // Slurm execution target (docs/spec.md phases 3-4). Runs the Seurat pipeline,
 // and agent sandbox runs on a qualified cluster, through a login node over SSH
 // with a fixed command set (mkdir, chmod, sbatch, sacct, squeue, scancel, sinfo,
-// tail, tar, rm) plus scp. Commands are built from validated tokens only; no
+// tail, tar, rm, and for sandbox remote folders realpath, stat, find, dd, cp,
+// sha256sum) plus scp. Commands are built from validated tokens only; no
 // caller-supplied text reaches the remote shell.
 //
 // Each job gets <SLURM_REMOTE_ROOT>/<jobId>/ with the exact runner code, its
@@ -356,12 +357,33 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
     const containerWork = config.sandboxExec.some((t) => t.includes('{work}')) ? '/work' : work;
     const opened = await provider.openVerifiedRead(checkpointStorageKey, { sizeBytes: checkpointSizeBytes, checksumSha256: checkpointChecksumSha256 });
     await opened.handle.close();
+    const remote = await remoteInputsForJob(jobId);
     await submitAndWait({ jobId, runDir, heartbeat, log, isCanceled, failureLabel: 'R console (last lines)', stage: async (write) => {
-      await transport.exec(['mkdir', '-p', `${work}/input`, `${work}/output`]);
+      await transport.exec(['mkdir', '-p', `${work}/input/files`, `${work}/output`]);
       await transport.put(path.join(ROOT, 'r-backend/expert-runner.R'), `${work}/expert-runner.R`);
       await transport.put(provider.resolveKey(checkpointStorageKey), `${work}/input/checkpoint.rds`);
       await write('work/input/analysis.R', script);
-      await write('work/input/input-manifest.json', '[]');
+      // Files from the sandbox's remote folders are copied on the cluster from
+      // their verified real paths; the script reads them with input_path().
+      const manifest = [];
+      if (remote.inputs.length > 0) {
+        const { createRemoteFileBrowser } = require('../agentSandbox/remoteFiles');
+        const browser = createRemoteFileBrowser({ transport });
+        for (const [position, entry] of remote.inputs.entries()) {
+          const root = remote.roots.find((candidate) => candidate.name === entry.root);
+          if (!root) throw codedError('REMOTE_ROOT_UNAVAILABLE', 'A remote input names a folder that is not in the sandbox.');
+          const filename = `remote-${position}-${path.posix.basename(entry.path).replace(/[^A-Za-z0-9_.-]/g, '_')}`;
+          const staged = await browser.stage(root, entry.path, `${work}/input/files/${filename}`);
+          manifest.push({ id: `remote-${position}`, name: `${entry.root}/${entry.path}`, filename,
+            sizeBytes: staged.sizeBytes, checksumSha256: staged.checksumSha256 });
+          await db.query(
+            `INSERT INTO agent_sandbox_remote_inputs (run_id, position, root_name, relative_path, size_bytes, checksum_sha256)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (run_id, position) DO NOTHING`,
+            [remote.runId, position, entry.root, entry.path, staged.sizeBytes, staged.checksumSha256]);
+          await log({ level: 'info', message: `Staged ${entry.root}/${entry.path} (${staged.sizeBytes} bytes, sha256 ${staged.checksumSha256.slice(0, 12)}…).` });
+        }
+      }
+      await write('work/input/input-manifest.json', JSON.stringify(manifest));
       await transport.exec(['chmod', '-R', 'a-w', `${work}/input`, `${work}/expert-runner.R`]);
       await write('job.sh', sandboxJobScript(config, { jobId, runDir, work, containerWork, resources }));
     } });
@@ -405,6 +427,18 @@ function createSlurmExecutor({ db, env = process.env, transport: injected } = {}
     } finally {
       await fs.promises.rm(local, { recursive: true, force: true });
     }
+  }
+
+  async function remoteInputsForJob(jobId) {
+    const { rows } = await db.query(
+      `SELECT r.id, r.remote_inputs_json, s.remote_roots_json FROM agent_sandbox_runs r
+         JOIN agent_sandboxes s ON s.id = r.sandbox_id WHERE r.job_id = $1`, [jobId]).catch(() => ({ rows: [] }));
+    const row = rows[0];
+    return {
+      runId: row?.id || null,
+      inputs: Array.isArray(row?.remote_inputs_json) ? row.remote_inputs_json : [],
+      roots: Array.isArray(row?.remote_roots_json) ? row.remote_roots_json : [],
+    };
   }
 
   async function cancel(jobId) {

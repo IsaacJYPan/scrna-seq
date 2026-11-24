@@ -3743,8 +3743,51 @@ function rowToProjectFigure(row) {
     params: parseJson(row.params_json, {}),
     fileFormat: row.file_format,
     thumbnailB64: row.thumbnail_b64,
-    createdAt: row.created_at
+    collection: row.collection_name || '',
+    tags: parseJson(row.tags_json, []),
+    notes: row.notes || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at || null
   };
+}
+
+const MAX_FIGURE_TAGS = 20;
+const MAX_FIGURE_TAG_CHARS = 40;
+const MAX_FIGURE_COLLECTION_CHARS = 80;
+const MAX_FIGURE_TITLE_CHARS = 200;
+const MAX_FIGURE_NOTES_CHARS = 4000;
+const MAX_FIGURE_THUMBNAIL_CHARS = 2 * 1024 * 1024;
+
+// Normalise the organisation fields a figure can carry.
+function normalizeFigureOrganization(input = {}) {
+  const out = {};
+  if (input.title !== undefined) {
+    if (typeof input.title !== 'string') throw codedError('INVALID_FIGURE', 'title must be a string.');
+    out.title = input.title.trim().slice(0, MAX_FIGURE_TITLE_CHARS);
+  }
+  if (input.collection !== undefined) {
+    if (input.collection !== null && typeof input.collection !== 'string') {
+      throw codedError('INVALID_FIGURE', 'collection must be a string.');
+    }
+    out.collection = String(input.collection || '').trim().replace(/\s+/g, ' ').slice(0, MAX_FIGURE_COLLECTION_CHARS);
+  }
+  if (input.tags !== undefined) {
+    if (!Array.isArray(input.tags) || input.tags.some((tag) => typeof tag !== 'string')) {
+      throw codedError('INVALID_FIGURE', 'tags must be an array of strings.');
+    }
+    const tags = [];
+    for (const raw of input.tags) {
+      const tag = raw.trim().replace(/\s+/g, ' ').slice(0, MAX_FIGURE_TAG_CHARS);
+      if (tag && !tags.some((existing) => existing.toLowerCase() === tag.toLowerCase())) tags.push(tag);
+    }
+    if (tags.length > MAX_FIGURE_TAGS) throw codedError('INVALID_FIGURE', `A figure can have at most ${MAX_FIGURE_TAGS} tags.`);
+    out.tags = tags;
+  }
+  if (input.notes !== undefined) {
+    if (typeof input.notes !== 'string') throw codedError('INVALID_FIGURE', 'notes must be a string.');
+    out.notes = input.notes.slice(0, MAX_FIGURE_NOTES_CHARS);
+  }
+  return out;
 }
 
 async function resolveSameProjectRefs(pid, input, { allowResult = false, allowProvenanceRef = false, allowParents = false } = {}) {
@@ -3849,13 +3892,22 @@ async function createProjectFigure(userId, projectId, input = {}) {
   assertPlainObject(params, 'INVALID_PARAMETERS', 'params must be a plain JSON object.');
   const plotType = input.plotType === undefined || input.plotType === null ? 'Unknown' : input.plotType;
   if (typeof plotType !== 'string' || plotType === '') throw codedError('INVALID_PLOT_TYPE', 'plotType must be a non-empty string.');
+  const thumbnail = input.thumbnailB64 != null ? String(input.thumbnailB64) : '';
+  if (thumbnail && (thumbnail.length > MAX_FIGURE_THUMBNAIL_CHARS
+      || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(thumbnail))) {
+    throw codedError('INVALID_FIGURE', 'Figure previews must be a PNG, JPEG or WebP data URL under 2 MB.');
+  }
   const refs = await resolveSameProjectRefs(pid, input, { allowProvenanceRef: true });
+  const organization = normalizeFigureOrganization({
+    collection: input.collection, tags: input.tags, notes: input.notes,
+  });
   const id = generateFigureId();
   const { rows } = await query(
     `INSERT INTO figure_collection
        (id, user_email, project_id, created_by_user_id, analysis_object_id, job_id, provenance_id,
-        dataset_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64)
-     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, $12)
+        dataset_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64,
+        collection_name, tags_json, notes)
+     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, $12, $13, $14, $15)
      RETURNING *`,
     [
       id, pid, Number(actor), refs.analysisObjectId || null, refs.jobId || null,
@@ -3863,7 +3915,10 @@ async function createProjectFigure(userId, projectId, input = {}) {
       input.title != null ? String(input.title) : '',
       JSON.stringify(params),
       input.fileFormat != null ? String(input.fileFormat) : 'png',
-      input.thumbnailB64 != null ? String(input.thumbnailB64) : ''
+      thumbnail,
+      organization.collection || '',
+      JSON.stringify(organization.tags || []),
+      organization.notes || ''
     ]
   );
   return rowToProjectFigure(rows[0]);
@@ -3890,6 +3945,45 @@ async function listProjectFigures(userId, projectId, filters = {}) {
 async function getProjectFigure(userId, projectId, figureId) {
   await requireProjectRole(userId, projectId, FIGURE_READ_ROLES);
   return getProjectFigureRow(figureId, projectId);
+}
+
+// Organise a project figure: rename, caption, file into a collection, tag.
+// Owners/admins may edit any figure; analysts may edit the figures they saved.
+async function requireFigureEditor(userId, projectId, figureId, verb) {
+  const membership = await requireProjectRole(userId, projectId, FIGURE_WRITE_ROLES);
+  const existing = await getProjectFigureRow(figureId, projectId);
+  if (!existing) throw codedError('FIGURE_NOT_FOUND', 'Figure not found.');
+  if (!['owner', 'admin'].includes(membership.role) && existing.createdByUserId !== Number(membership.userId)) {
+    throw codedError('FORBIDDEN', `Only the person who saved this figure, or a project owner or admin, can ${verb} it.`);
+  }
+  return existing;
+}
+
+async function updateProjectFigure(userId, projectId, figureId, input = {}) {
+  const existing = await requireFigureEditor(userId, projectId, figureId, 'edit');
+  const changes = normalizeFigureOrganization(input);
+  const columns = { title: 'title', collection: 'collection_name', tags: 'tags_json', notes: 'notes' };
+  const sets = [];
+  const params = [String(figureId), String(projectId)];
+  for (const [field, column] of Object.entries(columns)) {
+    if (changes[field] === undefined) continue;
+    params.push(field === 'tags' ? JSON.stringify(changes[field]) : changes[field]);
+    sets.push(`${column} = $${params.length}`);
+  }
+  if (sets.length === 0) return existing;
+  const { rows } = await query(
+    `UPDATE figure_collection SET ${sets.join(', ')}, updated_at = now()
+      WHERE id = $1 AND project_id = $2 RETURNING *`,
+    params
+  );
+  return rowToProjectFigure(rows[0]);
+}
+
+async function removeProjectFigure(userId, projectId, figureId) {
+  await requireFigureEditor(userId, projectId, figureId, 'remove');
+  const result = await query('DELETE FROM figure_collection WHERE id = $1 AND project_id = $2',
+    [String(figureId), String(projectId)]);
+  return result.rowCount > 0;
 }
 
 const CHECKPOINT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
@@ -7348,6 +7442,8 @@ module.exports = {
   createProjectFigure,
   listProjectFigures,
   getProjectFigure,
+  updateProjectFigure,
+  removeProjectFigure,
   // artifacts
   createArtifact,
   createResultCheckpoint,

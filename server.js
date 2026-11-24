@@ -1698,6 +1698,9 @@ app.use('/api/organizations', requireAuth);
 // ordinary project parser so other project APIs retain their smaller limit.
 app.use('/api/projects/:projectId/analyses/:analysisId/documents', requireAuth,
   require('./backend/notebookDocuments').notebookDocumentRoutes({ database: db }));
+// Saved figures carry a bounded preview image; authenticate before accepting
+// the larger body. The ordinary parser below skips an already parsed body.
+app.use('/api/projects/:projectId/figures', requireAuth, express.json({ limit: '3mb' }));
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/projects/:projectId/analyses', researchAnalysisRoutes({ database: db }));

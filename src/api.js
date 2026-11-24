@@ -314,6 +314,7 @@ async function performRequest(endpoint, options = {}) {
     if (body && typeof body.code === 'string') error.code = body.code;
     throw error;
   }
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -893,6 +894,14 @@ export const electronAPI = {
   },
   getProjectFigure: async (projectId, figureId) =>
     req(`/api/projects/${projectId}/figures/${figureId}`),
+  updateProjectFigure: async (projectId, figureId, changes) =>
+    req(`/api/projects/${projectId}/figures/${figureId}`, { method: 'PATCH', body: JSON.stringify(changes || {}) }),
+  removeProjectFigure: async (projectId, figureId) =>
+    req(`/api/projects/${projectId}/figures/${figureId}`, { method: 'DELETE' }),
+  // Selection export: only the objects, jobs and recorded steps the selected
+  // figures depend on, in dependency order, with one R script.
+  exportFigureBundle: async (projectId, selection) =>
+    req(`/api/projects/${projectId}/figures/bundles`, { method: 'POST', body: JSON.stringify(selection || {}) }),
 
   // Project-scoped job artifact & checkpoint metadata (READ-ONLY). Metadata only —
   // there is no create/mutate wrapper (artifacts are worker/helper-driven) and no
