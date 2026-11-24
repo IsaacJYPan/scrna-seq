@@ -7,7 +7,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { Client } = require('pg');
 const config = require('../backend/config');
 const { validateNewPassword } = require('../backend/passwordPolicy');
@@ -235,15 +235,10 @@ async function main() {
   try {
     await admin.query(`CREATE DATABASE ${quotedDatabase(databaseName)}`);
     databaseCreated = true;
-    const schemaAdmin = new Client({ connectionString: databaseUrl });
-    await schemaAdmin.connect();
-    try {
-      await schemaAdmin.query(fs.readFileSync(
-        path.join(__dirname, '..', 'backend', 'pg', 'schema.sql'), 'utf8'
-      ));
-    } finally {
-      await schemaAdmin.end();
-    }
+    execFileSync(process.execPath, [path.join(__dirname, 'init-postgres.js')], {
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+      stdio: 'inherit',
+    });
     fakeR = await startFakeR();
     const rPort = fakeR.address().port;
     const commonEnv = {
