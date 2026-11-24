@@ -72,6 +72,12 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
+// Ordered forward migrations applied after the frozen baseline (schema.sql).
+// Files are named NNNN_snake_case.sql; each is applied once and recorded with
+// its checksum in schema_migrations. Do not add inline ALTER statements to the
+// baseline; add a migration instead (backend/pg/migrations/README.md).
+const MIGRATIONS_DIR = path.join(__dirname, 'pg', 'migrations');
+const MIGRATION_FILE = /^(\d{4})_[a-z0-9_]+\.sql$/;
 const SCHEMA_CONTRACT_VERSION = 20261036;
 
 let pool = null;
@@ -500,7 +506,83 @@ async function query(text, params = []) {
   return p.query(text, params);
 }
 
-async function verifySchemaContract() {
+function loadMigrations(dir = MIGRATIONS_DIR) {
+  if (!fs.existsSync(dir)) return [];
+  const migrations = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (name === 'README.md') continue;
+    const match = MIGRATION_FILE.exec(name);
+    if (!match) throw codedError('DATABASE_MIGRATION_INVALID', `Unexpected file in migrations: ${name}.`);
+    const sql = fs.readFileSync(path.join(dir, name), 'utf8');
+    migrations.push({
+      version: Number(match[1]),
+      name,
+      sql,
+      checksum: crypto.createHash('sha256').update(sql).digest('hex'),
+    });
+  }
+  for (let i = 1; i < migrations.length; i += 1) {
+    if (migrations[i].version === migrations[i - 1].version) {
+      throw codedError('DATABASE_MIGRATION_INVALID', `Duplicate migration version ${migrations[i].version}.`);
+    }
+  }
+  return migrations;
+}
+
+const SCHEMA_MIGRATIONS_DDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  checksum_sha256 TEXT NOT NULL CHECK (checksum_sha256 ~ '^[0-9a-f]{64}$'),
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`;
+
+// Every applied migration must still exist unchanged: an edited or removed
+// migration means this database and this build disagree about the schema.
+function checkAppliedMigrations(appliedRows, migrations) {
+  for (const row of appliedRows) {
+    const known = migrations.find((m) => m.version === Number(row.version));
+    if (!known) {
+      throw codedError('DATABASE_MIGRATION_UNKNOWN', `Migration ${row.name} is applied but not part of this build.`);
+    }
+    if (known.checksum !== row.checksum_sha256) {
+      throw codedError('DATABASE_MIGRATION_CHANGED', `Migration ${row.name} changed after it was applied.`);
+    }
+  }
+}
+
+async function applyPendingMigrations(client, migrations) {
+  await client.query(SCHEMA_MIGRATIONS_DDL);
+  const { rows } = await client.query('SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version');
+  checkAppliedMigrations(rows, migrations);
+  const applied = new Set(rows.map((row) => Number(row.version)));
+  const appliedNow = [];
+  for (const migration of migrations) {
+    if (applied.has(migration.version)) continue;
+    await client.query(migration.sql);
+    await client.query(
+      'INSERT INTO schema_migrations (version, name, checksum_sha256) VALUES ($1, $2, $3)',
+      [migration.version, migration.name, migration.checksum]
+    );
+    appliedNow.push(migration.name);
+  }
+  return appliedNow;
+}
+
+async function verifySchemaContract(options = {}) {
+  const migrations = loadMigrations(options.migrationsDir);
+  if (migrations.length) {
+    const ledger = await query("SELECT to_regclass('schema_migrations') AS ledger");
+    const rows = ledger.rows[0].ledger
+      ? (await query('SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version')).rows
+      : [];
+    checkAppliedMigrations(rows, migrations);
+    if (rows.length !== migrations.length) {
+      throw codedError(
+        'DATABASE_SCHEMA_MISMATCH',
+        'The production database has pending migrations; apply them before starting this build.'
+      );
+    }
+  }
   const result = await query(
     'SELECT schema_version FROM app_schema_contract WHERE schema_key = $1',
     ['traceomics.runtime']
@@ -516,8 +598,9 @@ async function verifySchemaContract() {
 
 async function initSchema(options = {}) {
   if (options.force !== true && process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY === 'true') {
-    return verifySchemaContract();
+    return verifySchemaContract(options);
   }
+  const migrations = loadMigrations(options.migrationsDir);
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8');
   const p = await connect();
   const client = await p.connect();
@@ -527,8 +610,12 @@ async function initSchema(options = {}) {
     // PostgreSQL's IF NOT EXISTS DDL is not catalog-race-safe across sessions, so
     // serialize the idempotent schema bootstrap with one transaction-scoped lock.
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [0x5343524e, 5]);
+    // Baseline first (idempotent, frozen), then pending migrations in order, all
+    // in this one transaction: an upgrade applies completely or not at all.
     await client.query(sql);
+    const applied = await applyPendingMigrations(client, migrations);
     await client.query('COMMIT');
+    return { appliedMigrations: applied };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -760,7 +847,7 @@ async function resetSchemaForTests() {
       research_analysis_revisions, research_analyses,
       server_data_imports, private_r_publications, private_r_executions, private_r_kernel_restarts, private_r_kernels,
       workflow_snapshots, workflow_artifacts, workflow_runs, workflow_instances,
-      app_schema_contract,
+      app_schema_contract, schema_migrations,
       project_pipeline_selections, pipeline_definitions,
       project_audit_events,
       project_canonical_analyses, analysis_branch_review_comments,
@@ -7009,6 +7096,8 @@ module.exports = {
   connect,
   query,
   initSchema,
+  loadMigrations,
+  verifySchemaContract,
   checkHealth,
   reportStandaloneWorkerRuntimeState,
   getStandaloneWorkerRuntimeStatus,
