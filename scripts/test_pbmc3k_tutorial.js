@@ -38,7 +38,7 @@ const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-let PASS = 0, FAIL = 0, WARN = 0;
+let PASS = 0, FAIL = 0;
 const failures = [];
 
 function pass(desc) {
@@ -50,11 +50,6 @@ function fail(desc, detail = '') {
   console.log(`  ❌ FAIL: ${desc}${detail ? `\n     → ${detail}` : ''}`);
   FAIL++;
   failures.push({ desc, detail });
-}
-
-function warn(desc) {
-  console.log(`  ⚠  WARN: ${desc}`);
-  WARN++;
 }
 
 function info(msg) {
@@ -348,7 +343,6 @@ async function main() {
   console.log(`  Total : ${PASS + FAIL}`);
   console.log(`  Passed: ${PASS}`);
   console.log(`  Failed: ${FAIL}`);
-  console.log(`  Warned: ${WARN}`);
   console.log('');
 
   if (failures.length > 0) {
