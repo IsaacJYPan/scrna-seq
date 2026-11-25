@@ -9,18 +9,26 @@
 //
 // Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout. Logs go to stderr.
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { defaultRequestId, readToken, sendRequest } from './traceomics.mjs';
 
 const SERVER_INFO = { name: 'traceomics', version: '1.0.0' };
+const analysisReviewMarkdown = readFileSync(new URL('./skills/traceomics-analysis-review/SKILL.md', import.meta.url), 'utf8');
+const ANALYSIS_REVIEW_SKILL = {
+  name: 'traceomics-analysis-review',
+  version: `sha256:${createHash('sha256').update(analysisReviewMarkdown).digest('hex')}`,
+  markdown: analysisReviewMarkdown
+};
 
 // Verified code first. Every script an agent writes needs a person to review
 // it, while reviewed workflows and library methods do not, so the server tells
 // agents to look for verified code before writing their own.
 export const MCP_INSTRUCTIONS = [
   'TraceOmics delegated-agent tools. Start with get_context to see what you may do.',
+  'Use the analysis-review skill supplied by get_context when conducting a study. Before a consequential choice, identify an alternative explanation and what evidence would change the choice. Inspect the relevant artifact, record the observation and decision, and verify the requested outputs before closing.',
   'Prefer verified code. Call list_verified_code before any analysis: it lists every reviewed workflow and trusted library method, whether this project approved it, and reviewed multi-step chains.',
   'Run verified code through a study: list_studies, create_plan, submit_run, get_run, get_run_results.',
   'If a verified entry fits but is not approved or has no study, ask a person or use create_proposal rather than re-implementing it.',
@@ -104,10 +112,11 @@ function tool(name, description, properties, required, build, { readOnly = true,
 export const TOOLS = [
   tool(
     'get_context',
-    "Show this agent's identity, sponsor, project, effective capabilities, and limits. Call this first.",
+    "Show this agent's identity, sponsor, project, effective capabilities, limits, and the default analysis-review skill. Call this first.",
     {},
     [],
-    () => ({ method: 'GET', path: '/context' })
+    () => ({ method: 'GET', path: '/context' }),
+    { render: (data) => textResult({ ...data, analysisReviewSkill: ANALYSIS_REVIEW_SKILL }) }
   ),
   tool('get_project', 'Bounded summary of the project.', projectProp, ['projectId'], a => ({
     method: 'GET',

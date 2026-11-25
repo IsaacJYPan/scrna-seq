@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { createMcpServer, serveStdio, TOOLS, MCP_INSTRUCTIONS, NOTEBOOK_TABS } from './traceomics-mcp.mjs';
 import { AGENT_NOTEBOOK_TAB_IDS } from '../shared/agentNotebookTabs.mjs';
@@ -20,6 +21,7 @@ describe('traceomics MCP server', () => {
     const server = createMcpServer({ env: ENV });
     const init = await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
     expect(init.result).toMatchObject({ protocolVersion: '2025-03-26', serverInfo: { name: 'traceomics' }, capabilities: { tools: {} } });
+    expect(init.result.instructions).toContain('Use the analysis-review skill supplied by get_context');
     expect(await server.handle({ jsonrpc: '2.0', method: 'notifications/initialized' })).toBeNull();
     const list = await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const names = list.result.tools.map((t) => t.name);
@@ -27,6 +29,26 @@ describe('traceomics MCP server', () => {
     expect(JSON.stringify(list.result.tools)).not.toMatch(/token/i);
     expect(TOOLS.find((t) => t.name === 'submit_run').annotations.readOnlyHint).toBe(false);
     expect((await server.handle({ jsonrpc: '2.0', id: 3, method: 'shell/exec' })).error.code).toBe(-32601);
+  });
+
+  it('supplies the bundled analysis-review skill with authenticated context', async () => {
+    const context = {
+      schema: 'traceomics.automation.context.v1',
+      actor: { kind: 'agent' },
+      delegation: { effectiveCapabilities: ['metadata.read'] },
+    };
+    const { calls, fetchImpl } = recordingFetch(200, context);
+    const server = createMcpServer({ env: ENV, fetchImpl });
+    const reply = await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_context' } });
+
+    expect(reply.result.isError).toBeUndefined();
+    const { analysisReviewSkill: skill, ...rest } = JSON.parse(reply.result.content[0].text);
+    expect(rest).toEqual(context);
+    expect(skill.name).toBe('traceomics-analysis-review');
+    expect(skill.markdown).toContain('## Verify the deliverables before closing');
+    expect(skill.version).toBe(`sha256:${createHash('sha256').update(skill.markdown).digest('hex')}`);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('http://127.0.0.1:9/api/automation/v1/context');
   });
 
   it('maps a tool call to one automation request with the bearer credential', async () => {

@@ -662,6 +662,18 @@ directly. Like the CLI it has no authority of its own and reads the credential
 from `TRACEOMICS_AGENT_TOKEN` or `TRACEOMICS_AGENT_TOKEN_FILE`; tools never take
 a credential argument.
 
+The MCP initialization response asks the client to use the analysis-review
+skill. A successful `get_context` call includes the full Markdown and its
+content digest in `analysisReviewSkill` alongside the agent's existing context.
+This gives clients the guidance through the first tool call even if they omit
+the initialization instructions from the model's context. The skill guides
+evidence review and report closeout within the effective delegation.
+
+Run the MCP server from the repository or keep
+[`cli/skills/traceomics-analysis-review/SKILL.md`](../cli/skills/traceomics-analysis-review/SKILL.md)
+alongside the scripts when copying the CLI directory. Other clients can load
+the same Markdown directly.
+
 Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
 `list_verified_code`, `list_workflows`, `list_targets`, `list_studies`, `get_study`, `create_plan`,
 `get_plan`, `submit_run`, `get_run`, `get_run_results`, `cancel_run`,
