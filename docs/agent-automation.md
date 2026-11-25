@@ -4,6 +4,9 @@ This page describes what is implemented from the [agent governance design](spec.
 The design is the target; this page is the current contract. Anything the design
 describes that is not listed here as implemented is not available.
 
+For proposed changes to support end-to-end study work, see
+[Autonomous scientific analysis in delegated studies](autonomous-scientific-analysis.md).
+
 | Spec phase | Status |
 | --- | --- |
 | 0. Authority inventory and contracts | Implemented for the routes below |
