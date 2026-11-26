@@ -197,47 +197,54 @@ export function AgentNotebookCells({ cells, projectId, api = NO_API, theme, canW
   return <div className="space-y-3">{rows}</div>;
 }
 
-// Loads the project's notebook and reloads it whenever a project job settles.
-export function useAgentNotebook(projectId, api = NO_API) {
-  const [state, setState] = useState({ loading: true, data: null, error: null });
-  const live = useRef(true);
-  // Set again on every mount: StrictMode mounts, unmounts and remounts.
-  useEffect(() => {
-    live.current = true;
-    return () => { live.current = false; };
-  }, []);
+export function useAgentNotebook(projectId, api = NO_API, active = true) {
+  const [state, setState] = useState({ projectId, loading: true, data: null, error: null });
+  const latestRequest = useRef(0);
   const load = useCallback(async () => {
-    if (!projectId || !api.getAgentNotebook) { setState({ loading: false, data: null, error: null }); return; }
-    setState((previous) => ({ ...previous, loading: true }));
+    const requestId = ++latestRequest.current;
+    if (!projectId || !api.getAgentNotebook) { setState({ projectId, loading: false, data: null, error: null }); return; }
+    setState(previous => ({
+      projectId, loading: true, data: previous.projectId === projectId ? previous.data : null, error: null,
+    }));
     try {
       const data = await api.getAgentNotebook(projectId);
-      if (live.current) setState({ loading: false, data, error: null });
+      if (latestRequest.current === requestId) setState({ projectId, loading: false, data, error: null });
     } catch (error) {
-      if (live.current) setState((previous) => ({ loading: false, data: previous.data, error: publicErrorMessage(error, 'The agent notebook could not be loaded.') }));
+      if (latestRequest.current === requestId) {
+        setState(previous => ({ ...previous, loading: false, error: publicErrorMessage(error, 'The agent notebook could not be loaded.') }));
+      }
     }
   }, [projectId, api]);
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => onProjectJobSettled((event) => {
-    if (String(event?.projectId) === String(projectId)) load();
-  }), [projectId, load]);
-  // Agents work through their own API, so the app never polls their jobs;
-  // re-read once a minute while the page is visible.
   useEffect(() => {
-    if (!projectId || !api.getAgentNotebook) return undefined;
+    if (active) load();
+    return () => { latestRequest.current += 1; };
+  }, [active, load]);
+  useEffect(() => {
+    if (!active || !projectId || !api.getAgentNotebook) return undefined;
+    const unsubscribeJobs = onProjectJobSettled(event => {
+      if (String(event?.projectId) === String(projectId)) load();
+    });
+    const unsubscribeNotebook = api.subscribeAgentNotebook?.(projectId, load);
+    // Recover missed updates if the stream is unavailable or interrupted.
     const timer = setInterval(() => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') load();
     }, REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [projectId, api, load]);
+    return () => {
+      unsubscribeJobs();
+      unsubscribeNotebook?.();
+      clearInterval(timer);
+    };
+  }, [active, projectId, api, load]);
+  if (state.projectId !== projectId) return { loading: Boolean(projectId), data: null, error: null, reload: load };
   return { ...state, reload: load };
 }
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 
 // The whole notebook, on its own page.
-export default function AgentNotebook({ projectId, role, theme, onOpenTab, api: injected }) {
+export default function AgentNotebook({ projectId, role, theme, onOpenTab, active, api: injected }) {
   const api = injected || window.electronAPI || NO_API;
-  const { loading, data, error, reload } = useAgentNotebook(projectId, api);
+  const { loading, data, error, reload } = useAgentNotebook(projectId, api, active);
   const [filter, setFilter] = useState('all');
   const cells = useMemo(() => (data?.cells || []).filter((cell) => filter === 'all' || cell.tab === filter), [data, filter]);
   const counts = data?.tabs || AGENT_NOTEBOOK_TABS.map((tab) => ({ ...tab, cellCount: 0 }));

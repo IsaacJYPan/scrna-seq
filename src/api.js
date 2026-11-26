@@ -966,6 +966,14 @@ export const electronAPI = {
   closeStudy: async (id, studyId) => req(`/api/projects/${encodeURIComponent(id)}/studies/${encodeURIComponent(studyId)}/close`, { method: 'POST', body: '{}' }),
   listAgentRuns: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs`),
   getAgentNotebook: async (id, { tab } = {}) => req(`/api/projects/${encodeURIComponent(id)}/agent-notebook${tab ? `?tab=${encodeURIComponent(tab)}` : ''}`),
+  subscribeAgentNotebook: (id, onChange) => {
+    if (typeof EventSource !== 'function') return undefined;
+    const source = new EventSource(apiUrl(`/api/projects/${encodeURIComponent(id)}/agent-notebook/events`), {
+      withCredentials: true,
+    });
+    source.addEventListener('notebook-changed', onChange);
+    return () => source.close();
+  },
   acceptAgentRun: async (id, runId, expectedAcceptedRunId) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/accept`, { method: 'POST', body: JSON.stringify({ expectedAcceptedRunId }) }),
   listAgentSandboxes: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`),
   createAgentSandbox: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/agent-sandboxes`, { method: 'POST', body: JSON.stringify(body) }),

@@ -513,6 +513,11 @@ shows its own cells in an **Agent work in this step** side panel. An agent
 reads back its own cells with `GET …/projects/:projectId/notebook`
 (`metadata.read`).
 
+The open notebook and analysis side panel refresh when the server reports a
+change to a note or run. The stream sends a refresh signal, and the notebook
+fetches the current records with the viewer's permissions. Both views keep
+their once-a-minute refresh when the browser tab is visible.
+
 ## Agent reports (phase 5)
 
 An agent with `report.write` can draft a report (for example a paper) section by

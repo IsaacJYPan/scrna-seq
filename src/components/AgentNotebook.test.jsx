@@ -90,6 +90,27 @@ describe('AgentNotebook', () => {
     render(<AgentNotebook projectId="proj_1" api={api} />);
     expect(await screen.findByText('No agent work yet')).toBeInTheDocument();
   });
+
+  it('reloads after a notebook notification and disconnects when its tab closes', async () => {
+    const api = fakeApi();
+    const disconnect = vi.fn();
+    let notify;
+    api.subscribeAgentNotebook = vi.fn((projectId, onChange) => {
+      notify = onChange;
+      return disconnect;
+    });
+    const { rerender } = render(<AgentNotebook projectId="proj_1" api={api} />);
+    expect(await screen.findByRole('region', { name: /Cell 1: note/ })).toBeInTheDocument();
+    expect(api.subscribeAgentNotebook).toHaveBeenCalledWith('proj_1', expect.any(Function));
+
+    api.getAgentNotebook.mockResolvedValueOnce({
+      ...notebook, cells: [{ ...cells[0], markdown: 'An agent recorded a new result.' }],
+    });
+    notify();
+    expect(await screen.findByText('An agent recorded a new result.')).toBeInTheDocument();
+    rerender(<AgentNotebook projectId="proj_1" api={api} active={false} />);
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
 });
 
 describe('AgentWorkDock', () => {

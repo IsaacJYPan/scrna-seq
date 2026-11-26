@@ -118,9 +118,10 @@ function submit(ctx, requestId = 'req-sandbox-0001', extra = {}) {
 }
 
 // Completes a claimed sandbox job like the worker: real tar.gz bundle in storage.
-async function completeSandboxJob(ctx, jobId, files) {
+async function completeSandboxJob(ctx, jobId, files, { onClaim } = {}) {
   const claim = await db.claimNextJob('sandbox-worker', { allowedJobTypes: ['expert.r.v1'], leaseSeconds: 30 });
   expect(claim?.id).toBe(jobId);
+  await onClaim?.();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbx-'));
   for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
   const archive = path.join(dir, '..', `${path.basename(dir)}.tar.gz`);
@@ -338,6 +339,53 @@ describe.skipIf(!CONFIGURED)('agent sandboxes', () => {
 });
 
 describe.skipIf(!CONFIGURED)('agent notebook', () => {
+  it('streams project refresh signals for committed notes and sandbox job changes', async () => {
+    const ctx = await setup();
+    const outsider = await createUserWithToken({ email: 'outsider@example.com' });
+    const path = `${ctx.base}/agent-notebook/events`;
+    expect((await api(server, path, { token: outsider.token })).status).toBe(404);
+    const controller = new AbortController();
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}${path}`, {
+        headers: { Cookie: `${config.sessionCookieName()}=${encodeURIComponent(ctx.sponsor.token)}` },
+        signal: controller.signal,
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain('text/event-stream');
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffered = '';
+      async function readChange() {
+        for (;;) {
+          const end = buffered.indexOf('\n\n');
+          if (end !== -1) {
+            const frame = buffered.slice(0, end);
+            buffered = buffered.slice(end + 2);
+            if (frame.startsWith('event:')) return frame;
+          } else {
+            const { value, done } = await reader.read();
+            if (done) throw new Error('Event stream ended before a change arrived.');
+            buffered += value;
+          }
+        }
+      }
+      const signal = 'event: notebook-changed\ndata: {}';
+      expect(await readChange()).toBe(signal);
+      expect((await ctx.agent('/notebook/notes', {
+        method: 'POST', body: { requestId: 'note-live-01', tab: 'cluster', markdown: 'Inspect the markers.' },
+      })).status).toBe(201);
+      expect(await readChange()).toBe(signal);
+      const run = await submit(ctx);
+      expect(run.status, JSON.stringify(run.data)).toBe(201);
+      expect(await readChange()).toBe(signal);
+      await completeSandboxJob(ctx, await jobIdOf(run.data.run.id), { 'clusters.csv': 'cluster\n1\n' }, {
+        onClaim: async () => { expect(await readChange()).toBe(signal); },
+      });
+      expect(await readChange()).toBe(signal);
+    } finally {
+      controller.abort();
+    }
+  }, 10000);
+
   it('files agent scripts and notes under analysis tabs, oldest first, for people who may review them', async () => {
     const ctx = await setup();
     const note = (requestId, tab, markdown) => ctx.agent('/notebook/notes', { method: 'POST', body: { requestId, tab, markdown } });

@@ -1733,6 +1733,11 @@ agentServices.reports = require('./backend/agentReports/reports').createReportSe
 agentServices.notebook = require('./backend/agentNotebook/notebook').createAgentNotebookService({
   db, withTransaction: agentDelegations.withTransaction, admission: agentAdmission, sandboxes: agentServices.sandboxes,
 });
+const { createAgentNotebookEvents, notebookEventStream } = require('./backend/agentNotebook/events');
+const agentNotebookEvents = createAgentNotebookEvents();
+app.get('/api/projects/:projectId/agent-notebook/events', notebookEventStream({
+  db, events: agentNotebookEvents, resolveSessionUser,
+}));
 app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
 app.use('/api/automation/v1', automationRoutes({
   ...agentServices,
@@ -3802,6 +3807,7 @@ if (require.main === module) {
     shuttingDown = true;
     topologyWatchdog?.stop?.();
     topologyWatchdog = null;
+    agentNotebookEvents.close();
     void shutdownWebRuntime({
       server: httpServer,
       rProcess: ownedRProcess,

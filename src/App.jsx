@@ -1599,7 +1599,7 @@ export default function App() {
         <ErrorBoundary key="team" onReturn={returnToWorkspace}><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="agents" onReturn={returnToWorkspace}><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics" onReturn={returnToWorkspace}><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="agent-notebook" onReturn={returnToWorkspace}><TabContent id="agent-notebook" activeTab={activeTab}><AgentNotebookPage {...props} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="agent-notebook" onReturn={returnToWorkspace}><TabContent id="agent-notebook" activeTab={activeTab}><AgentNotebookPage {...props} setActiveTab={setActiveTab} isActive={activeTab === 'agent-notebook'} /></TabContent></ErrorBoundary>
         {/* Agent work filed under the open analysis tab, in a side panel. */}
         {activeProjectIdForPipeline && deploymentPolicy.demoMode !== true && (
           <React.Suspense fallback={null}>
