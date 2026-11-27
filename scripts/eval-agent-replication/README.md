@@ -16,11 +16,21 @@ are in [docs/agent-evaluation.md](../../docs/agent-evaluation.md).
   `ANALYSIS_CHECKLIST` (the malignancy item has since become the general
   `explore.orthogonal-support`).
 
+- `make-brief.mjs` builds a brief from a study description in `studies/` and
+  the current `LEDGER_PROTOCOL` and `ANALYSIS_CHECKLIST`. It writes a ledger
+  brief, or with `--baseline` one without the ledger. A study file holds only
+  what the researcher knows before analyzing: the design, the samples, the
+  question and the data format.
+- The local ledger tool's `run` command stands in for a sandbox run. It runs a
+  script, records which outputs it wrote in `runs.jsonl`, and refuses the next
+  script while more than one finished run is uncited (`LEDGER_BEHIND`), as the
+  server does.
+
 To run one:
 
 1. Put the raw matrices in `<eval>/data/sample*/`.
-2. Make `<eval>/run<X>/` with `scripts/ logs/ outputs/ report/`, and copy a
-   brief into it as `BRIEF.md`.
+2. Make `<eval>/run<X>/` with `scripts/ logs/ outputs/ report/`, and write
+   `node make-brief.mjs studies/<study>.md > <eval>/run<X>/BRIEF.md`.
 3. Start the agent there. Tell it to read `BRIEF.md`, not to use the web, and
    not to read anything outside its run folder and `data/`.
 
