@@ -53,4 +53,36 @@ describe('AgentReports', () => {
     fireEvent.click(within(results).getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(window.electronAPI.reviewAgentReportSection).toHaveBeenLastCalledWith('proj_1', 'rep_1', 'sec_2', 'approved', ''));
   });
+
+  it('shows the ledger audit, links citations to their evidence, and needs gaps acknowledged before finalizing', async () => {
+    const approved = { ...report, sections: [section({ body: 'WNT-active cells [F:led_1].' })] };
+    const ledgerAudit = {
+      counts: { blocker: 1, review: 1, info: 0 },
+      gaps: [
+        { severity: 'blocker', code: 'ISSUE_OPEN', message: 'Open issue: IGKC in myeloid cluster', entryIds: ['led_2'] },
+        { severity: 'review', code: 'FINDING_SINGLE_SAMPLE', message: 'Finding seen in one sample only: IFN state', entryIds: ['led_1'] },
+      ],
+      findings: [{ id: 'led_1', title: 'WNT', statement: 'Cluster 7 is WNT-active.', confidence: 'high', sampleSupport: 'all',
+        limitations: null, evidence: [{ sandboxRunId: 'sbr_1', file: 'markers.csv', locator: 'cluster 7, LEF1', value: '3.1' }] }],
+      labels: [], decisions: [], issues: [{ id: 'led_2', title: 'IGKC', observation: 'IGKC high', status: 'open', resolution: null, evidence: [] }],
+      checklist: [{ key: 'qc.doublets', title: 'Doublets detected and handled', status: 'missing', entryId: null, note: null }],
+      citations: { cited: 1, unknown: [], uncitedFindings: [] },
+    };
+    window.electronAPI.getAgentReport = vi.fn(async () => ({ report: approved, ledgerAudit }));
+    render(<AgentReports projectId="proj_1" role="analyst" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'PBMC paper' }));
+    const audit = await screen.findByRole('region', { name: 'Analysis audit' });
+    expect(within(audit).getByText(/Open issue: IGKC/)).toBeInTheDocument();
+    expect(within(audit).getByRole('link', { name: 'markers.csv @ cluster 7, LEF1 = 3.1' })).toHaveAttribute('href', '/files/sbr_1/markers.csv');
+    const methods = screen.getByRole('article', { name: 'Section Methods' });
+    expect(within(methods).getByRole('link', { name: 'F:led_1' })).toHaveAttribute('href', '#ledger-led_1');
+    expect(document.getElementById('ledger-led_1')).not.toBeNull();
+
+    const finalize = screen.getByRole('button', { name: /finalize report/i });
+    expect(finalize).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /1 blocking gap/ }));
+    expect(finalize).toBeEnabled();
+    fireEvent.click(finalize);
+    await waitFor(() => expect(window.electronAPI.finalizeAgentReport).toHaveBeenCalledWith('proj_1', 'rep_1', { acknowledgeLedgerGaps: true }));
+  });
 });

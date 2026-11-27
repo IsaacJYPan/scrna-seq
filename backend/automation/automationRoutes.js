@@ -8,7 +8,7 @@
 const express = require('express');
 const { readAgentCredential } = require('../actors/agentCredentials');
 const { authorizeAgentOperation } = require('../actors/delegations');
-const { publicCatalog } = require('../policy/agentCapabilities');
+const { publicCatalog, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('./automationAudit');
 
 const API_VERSION = 'traceomics.automation.v1';
@@ -60,7 +60,7 @@ function createRateLimiter() {
 }
 
 function automationRoutes({
-  db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports, notebook
+  db, delegations, proposals, readModels, studies, admission, approvals, targets, sandboxes, reports, notebook, ledger
 }) {
   const inspection = require('./inspection').createRunInspection({ db, admission });
   const router = express.Router();
@@ -351,6 +351,26 @@ function automationRoutes({
     router.post('/projects/:projectId/notebook/notes', route('report.write', async (req, actor) => {
       const { note, replayed } = await notebook.addNoteForAgent(actor, req.body);
       return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.notebook-note.v1', replayed, note } };
+    }));
+  }
+
+  // The analysis ledger: structured decisions, labels, findings, issues and
+  // checklist answers citing run outputs, and the audit computed from them.
+  if (ledger) {
+    router.get('/projects/:projectId/ledger', route('metadata.read', async (req, actor) =>
+      ledger.readForAgent(actor, { kind: typeof req.query.kind === 'string' ? req.query.kind : undefined })));
+    router.post('/projects/:projectId/ledger', route('report.write', async (req, actor) => {
+      const { entry, replayed } = await ledger.recordForAgent(actor, req.body);
+      return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.ledger-entry.v1', replayed, entry } };
+    }));
+    router.get('/projects/:projectId/ledger/audit', route('metadata.read', async (req, actor) => {
+      let reportText;
+      if (typeof req.query.reportId === 'string') {
+        if (!reports) throw codedError('NOT_FOUND', 'Report not found.', 404);
+        const report = await reports.getForAgent(actor, req.query.reportId);
+        reportText = report.sections.map((section) => section.body).join('\n\n');
+      }
+      return { ...(await ledger.auditForAgent(actor, { reportText })), schema: 'traceomics.automation.ledger-audit.v1' };
     }));
   }
 

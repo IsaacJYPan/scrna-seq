@@ -73,7 +73,7 @@ function publicReview(row) {
   };
 }
 
-function createReportService({ db, withTransaction, sandboxes }) {
+function createReportService({ db, withTransaction, sandboxes, ledger }) {
   async function loadReport(runner, reportId) {
     const { rows } = await runner.query(
       `SELECT r.*, ap.display_name AS agent_display_name FROM agent_reports r
@@ -293,8 +293,19 @@ function createReportService({ db, withTransaction, sandboxes }) {
     return { schema: 'traceomics.agent-reports.v1', reports };
   }
 
+  // The audit of the analysis ledger kept by the delegation that wrote the
+  // report, cross-checked against the report's current sections. Null when
+  // that agent kept no ledger.
+  async function ledgerAuditFor(loaded) {
+    if (!ledger) return null;
+    const reportText = loaded.public.sections.map((section) => section.body).join('\n\n');
+    return ledger.auditForReport(db, { projectId: loaded.row.project_id, delegationId: loaded.row.delegation_id, reportText });
+  }
+
   async function getForHuman(actor, projectId, reportId) {
-    return { schema: 'traceomics.agent-report.v1', report: (await humanReport(db, actor, projectId, reportId)).public };
+    const loaded = await humanReport(db, actor, projectId, reportId);
+    const ledgerAudit = await ledgerAuditFor(loaded);
+    return { schema: 'traceomics.agent-report.v1', report: loaded.public, ledgerAudit: ledgerAudit ? ledgerAudit.audit : null };
   }
 
   async function reviewByHuman(actor, projectId, reportId, body = {}) {
@@ -323,10 +334,14 @@ function createReportService({ db, withTransaction, sandboxes }) {
   }
 
   async function finalizeByHuman(actor, projectId, reportId, body = {}) {
-    rejectUnknown(body, []);
+    rejectUnknown(body, ['acknowledgeLedgerGaps']);
+    if (body.acknowledgeLedgerGaps !== undefined && typeof body.acknowledgeLedgerGaps !== 'boolean') {
+      throw codedError('INVALID_INPUT', 'acknowledgeLedgerGaps must be true or false.', 400);
+    }
     return withTransaction(async (client) => {
       await client.query('SELECT id FROM agent_reports WHERE id = $1 FOR UPDATE', [String(reportId)]);
-      const { row, public: report } = await humanReport(client, actor, projectId, reportId, WRITE_ROLES);
+      const loaded = await humanReport(client, actor, projectId, reportId, WRITE_ROLES);
+      const { row, public: report } = loaded;
       if (row.status === 'finalized') return { schema: 'traceomics.agent-report.v1', report };
       const pending = report.sections.filter((section) => section.status !== 'approved');
       if (!report.sections.length || pending.length) {
@@ -334,22 +349,39 @@ function createReportService({ db, withTransaction, sandboxes }) {
         error.details = { sections: pending.map((section) => section.key) };
         throw error;
       }
+      // Open blocking gaps in the agent's ledger (unresolved issues, checklist
+      // items never addressed, uncited claims) must be acknowledged by name.
+      const ledgerAudit = await ledgerAuditFor(loaded);
+      const blockers = ledgerAudit ? ledgerAudit.audit.gaps.filter((gap) => gap.severity === 'blocker') : [];
+      if (blockers.length && body.acknowledgeLedgerGaps !== true) {
+        const error = codedError('LEDGER_GAPS_OPEN',
+          'The analysis ledger has blocking gaps. Ask the agent to close them, or finalize with acknowledgeLedgerGaps.', 409);
+        error.details = { gaps: blockers.map((gap) => ({ code: gap.code, message: gap.message, entryIds: gap.entryIds })) };
+        throw error;
+      }
       await client.query(
         "UPDATE agent_reports SET status = 'finalized', finalized_at = now(), finalized_by_user_id = $2 WHERE id = $1",
         [row.id, actor.userId]);
       await recordAutomationEvent(client, {
-        projectId: row.project_id, actor, action: 'report.finalized', decision: 'allowed', targetType: 'report', targetId: row.id,
+        projectId: row.project_id, actor, action: blockers.length ? 'report.finalized-with-ledger-gaps' : 'report.finalized',
+        decision: 'allowed', targetType: 'report', targetId: row.id,
       });
       return { schema: 'traceomics.agent-report.v1', report: (await loadReport(client, row.id)).public };
     });
   }
 
   async function exportMarkdown(actor, projectId, reportId) {
-    const { public: report } = await humanReport(db, actor, projectId, reportId);
+    const loaded = await humanReport(db, actor, projectId, reportId);
+    const { public: report } = loaded;
+    const ledgerAudit = await ledgerAuditFor(loaded);
     const lines = [`# ${report.title}`, ''];
     lines.push(report.status === 'finalized'
       ? `_Finalized ${new Date(report.finalizedAt).toISOString().slice(0, 10)}. Drafted by ${report.agent.displayName || 'an agent'}; every section approved by a reviewer._`
       : `_Draft. ${report.sections.filter((s) => s.status === 'approved').length} of ${report.sections.length} sections approved._`, '');
+    if (ledgerAudit) {
+      const { counts } = ledgerAudit.audit;
+      lines.push(`_Analysis ledger: ${counts.blocker} blocking gap(s) and ${counts.review} item(s) to review; see the Audit section._`, '');
+    }
     const provenance = [];
     for (const section of report.sections) {
       lines.push(`## ${section.heading}`, '', section.body.trim(), '');
@@ -362,6 +394,9 @@ function createReportService({ db, withTransaction, sandboxes }) {
       });
     }
     if (provenance.length) lines.push('## Figure provenance', '', ...provenance, '');
+    // The reviewer's checklist: every claim, label and decision with the
+    // evidence it cites, and what the agent left open.
+    if (ledgerAudit) lines.push(ledgerAudit.markdown, '');
     const slug = report.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'report';
     return { filename: `${slug}.md`, markdown: `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n` };
   }

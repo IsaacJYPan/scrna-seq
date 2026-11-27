@@ -470,3 +470,111 @@ describe.skipIf(!CONFIGURED)('agent reports', () => {
     await expect(db.query('DELETE FROM agent_reports')).rejects.toMatchObject({ code: '55000' });
   });
 });
+
+describe.skipIf(!CONFIGURED)('analysis ledger', () => {
+  const { CHECKLIST_KEYS } = require('../shared/analysisLedger.mjs');
+
+  async function withRun(ctx) {
+    const run = (await submit(ctx)).data.run;
+    await completeSandboxJob(ctx, await jobIdOf(run.id), { 'umap.png': PNG, 'clusters.csv': 'cluster,n\n1,10\n2,12\n' });
+    return run;
+  }
+  const record = (ctx, requestId, entry) => ctx.agent('/ledger', { method: 'POST', body: { requestId, ...entry } });
+
+  it('records entries citing verified run outputs, rejects evidence it cannot find, and replays by requestId', async () => {
+    const ctx = await setup();
+    const run = await withRun(ctx);
+    const finding = {
+      kind: 'finding', tab: 'cluster', title: 'Two clusters', statement: 'The sample has two clusters of 10 and 12 cells.',
+      confidence: 'high', sampleSupport: 'all',
+      evidence: [{ sandboxRunId: run.id, file: 'clusters.csv', locator: 'column n', value: '10, 12' }],
+    };
+    const written = await record(ctx, 'ledger-0000001', finding);
+    expect(written.status, JSON.stringify(written.data)).toBe(201);
+    expect(written.data.entry).toMatchObject({ id: expect.stringMatching(/^led_[0-9a-f]{24}$/), kind: 'finding',
+      evidence: [{ sandboxRunId: run.id, file: 'clusters.csv', scriptSha256: run.scriptSha256, checksumSha256: expect.stringMatching(/^[0-9a-f]{64}$/) }] });
+    const replay = await record(ctx, 'ledger-0000001', finding);
+    expect(replay.status).toBe(200);
+    expect(replay.data).toMatchObject({ replayed: true, entry: { id: written.data.entry.id } });
+    expect((await record(ctx, 'ledger-0000001', { ...finding, title: 'Other' })).data.code).toBe('IDEMPOTENCY_CONFLICT');
+
+    const missingFile = await record(ctx, 'ledger-0000002', { ...finding, evidence: [{ ...finding.evidence[0], file: 'nope.csv' }] });
+    expect(missingFile.data.code).toBe('EVIDENCE_NOT_FOUND');
+    const noRun = await record(ctx, 'ledger-0000003', { ...finding, evidence: [{ file: 'clusters.csv', value: '10' }] });
+    expect(noRun.data.code).toBe('EVIDENCE_RUN_REQUIRED');
+    const invalid = await record(ctx, 'ledger-0000004', { ...finding, evidence: [] });
+    expect(invalid.status).toBe(400);
+    expect(invalid.data.code).toBe('INVALID_LEDGER_ENTRY');
+
+    const issue = await record(ctx, 'ledger-0000005', { kind: 'issue', tab: 'qc', title: 'Odd cluster', observation: 'Cluster 2 is all one sample.' });
+    const stranger = await record(ctx, 'ledger-0000006', { kind: 'issue', tab: 'qc', title: 'x', observation: 'x', status: 'accepted',
+      refersTo: `led_${'0'.repeat(24)}`, resolution: 'x' });
+    expect(stranger.data.code).toBe('INVALID_LEDGER_ENTRY');
+    const audit = await ctx.agent('/ledger/audit');
+    expect(audit.data.gaps.filter((gap) => gap.code === 'ISSUE_OPEN')).toEqual([
+      expect.objectContaining({ entryIds: [issue.data.entry.id] }),
+    ]);
+    const closed = await record(ctx, 'ledger-0000007', { kind: 'issue', tab: 'qc', title: 'Odd cluster explained',
+      observation: 'Re-checked.', status: 'resolved', refersTo: issue.data.entry.id, resolution: 'Cluster 2 is sample-specific stress.',
+      evidence: [{ sandboxRunId: run.id, file: 'clusters.csv' }] });
+    expect(closed.status, JSON.stringify(closed.data)).toBe(201);
+    expect((await ctx.agent('/ledger/audit')).data.gaps.some((gap) => gap.code === 'ISSUE_OPEN')).toBe(false);
+    expect((await ctx.agent('/ledger?kind=issue')).data.entries).toHaveLength(2);
+
+    // People see the ledger and its audit; rows are append-only.
+    const human = await api(server, `${ctx.base}/agent-ledgers`, { token: ctx.sponsor.token });
+    expect(human.data.ledgers).toEqual([expect.objectContaining({ delegationId: ctx.delegation.id, audit: expect.any(Object) })]);
+    expect(human.data.ledgers[0].entries).toHaveLength(3);
+    await expect(db.query("UPDATE agent_ledger_entries SET entry_kind = 'check'")).rejects.toMatchObject({ code: '55000' });
+    await expect(db.query('DELETE FROM agent_ledger_entries')).rejects.toMatchObject({ code: '55000' });
+  });
+
+  it('needs report.write to record, and metadata.read to read', async () => {
+    const ctx = await setup({ caps: ['metadata.read', 'results.read', 'development.executeCandidate'] });
+    const denied = await record(ctx, 'ledger-0000010', { kind: 'issue', tab: 'qc', title: 'x', observation: 'x' });
+    expect(denied.status).toBe(403);
+    expect((await ctx.agent('/ledger')).data.entries).toEqual([]);
+  });
+
+  it('appends the audit to the report export and asks the reviewer to acknowledge open gaps before finalizing', async () => {
+    const ctx = await setup();
+    const run = await withRun(ctx);
+    const evidence = [{ sandboxRunId: run.id, file: 'clusters.csv', locator: 'column n', value: '10, 12' }];
+    const finding = await record(ctx, 'ledger-0000020', { kind: 'finding', tab: 'cluster', title: 'Two clusters',
+      statement: 'Two clusters of 10 and 12 cells.', confidence: 'high', sampleSupport: 'one', evidence });
+    const report = await ctx.agent('/reports', { method: 'POST', body: { requestId: 'req-report-0020', title: 'PBMC clustering' } });
+    const reportId = report.data.report.id;
+    const section = await ctx.agent(`/reports/${reportId}/sections`, { method: 'POST',
+      body: { requestId: 'req-section-0020', key: 'results', heading: 'Results', body: `Two clusters [F:${finding.data.entry.id}].` } });
+
+    const agentAudit = await ctx.agent(`/ledger/audit?reportId=${reportId}`);
+    expect(agentAudit.data.citations).toEqual({ cited: 1, unknown: [], uncitedFindings: [] });
+    expect(agentAudit.data.gaps.filter((gap) => gap.code === 'CHECK_MISSING')).toHaveLength(CHECKLIST_KEYS.length);
+
+    const shown = await api(server, `${ctx.base}/agent-reports/${reportId}`, { token: ctx.sponsor.token });
+    expect(shown.data.ledgerAudit.counts.blocker).toBe(CHECKLIST_KEYS.length);
+    await api(server, `${ctx.base}/agent-reports/${reportId}/reviews`, { method: 'POST', token: ctx.sponsor.token,
+      body: { sectionId: section.data.section.id, decision: 'approved' } });
+    const finalize = (body) => api(server, `${ctx.base}/agent-reports/${reportId}/finalize`, { method: 'POST', token: ctx.sponsor.token, body });
+    const blocked = await finalize({});
+    expect(blocked.status).toBe(409);
+    expect(blocked.data.code).toBe('LEDGER_GAPS_OPEN');
+    expect(blocked.data.details.gaps).toHaveLength(CHECKLIST_KEYS.length);
+    const done = await finalize({ acknowledgeLedgerGaps: true });
+    expect(done.status, JSON.stringify(done.data)).toBe(200);
+    const { rows } = await db.query("SELECT action FROM automation_audit_events WHERE target_id = $1 AND action LIKE 'report.finalized%'", [reportId]);
+    expect(rows.map((row) => row.action)).toEqual(['report.finalized-with-ledger-gaps']);
+
+    const exported = (await api(server, `${ctx.base}/agent-reports/${reportId}/export`, { token: ctx.sponsor.token })).data;
+    expect(exported).toContain(`_Analysis ledger: ${CHECKLIST_KEYS.length} blocking gap(s) and 1 item(s) to review; see the Audit section._`);
+    expect(exported).toContain('## Audit');
+    expect(exported).toContain(`| ${finding.data.entry.id} | Two clusters of 10 and 12 cells. | high | one | \`${run.id}:clusters.csv\` @ column n = 10, 12 |`);
+  });
+
+  it('leaves reports without a ledger unchanged', async () => {
+    const ctx = await setup();
+    const report = await ctx.agent('/reports', { method: 'POST', body: { requestId: 'req-report-0030', title: 'T' } });
+    const shown = await api(server, `${ctx.base}/agent-reports/${report.data.report.id}`, { token: ctx.sponsor.token });
+    expect(shown.data.ledgerAudit).toBeNull();
+  });
+});

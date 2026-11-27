@@ -27,7 +27,10 @@ export const MCP_INSTRUCTIONS = [
   'Write your own R only when nothing verified covers the step: list_sandboxes, run_r_script (with its reason), get_sandbox_run, read_sandbox_file. That code is flagged as AI-written; inputs are read-only and outputs stay drafts until a person reviews and promotes them. Keep scripts short and close to standard Seurat and Bioconductor calls so they are quick to review.',
   'Everything you do is laid out for people as a notebook, filed under the analysis tab it serves (qc, normalize, pca, integrate, cluster, umap, deg, enrichment, cellchat, explore). Verified runs are placed automatically; give run_r_script the `tab` of the step it serves. Use add_notebook_note for a short Markdown note before or after a step (what you are about to do, what a result means); get_notebook reads back your cells. Notes and runs are append-only.',
   'Remote data: list_remote_files and read_remote_file use only folders granted to the sandbox. Use remoteInputs to stage files read-only. Figures: list_figures, view_figure, get_figure_history.',
-  "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise.",
+  'Analysis ledger: record your reasoning as you go with record_ledger_entry, not at the end. A decision entry for every choice that could change results (thresholds, integration, resolution, gene sets). An annotation entry for every cluster you label (markers with values, confidence, alternatives). A finding entry for every claim you will make, with evidence naming the run, file and exact row/value. An issue entry the moment something looks unexpected. A check entry for each item of the standard checklist.',
+  'Treat each issue as work, not as a caveat: investigate it with a follow-up run and resolve it with evidence, or accept it with a reason. If a short script could check a caveat, run it.',
+  'After the first global clustering, re-cluster each major compartment on its own (immune, T/NK, myeloid, stromal, glial, epithelial or tumor) and annotate the subtypes; global clusters hide them. Check each finding in every sample and record whether it holds in all, most, or one.',
+  "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise. Before asking for review, call get_ledger_audit with the reportId and close every blocking gap. In the report, cite findings as [F:<entry id>] and labels as [A:<entry id>] so each claim links to its evidence.",
   'Ask a person (or create_proposal) for anything outside what you were given.',
 ].join(' ');
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -41,6 +44,14 @@ function tabArg(a) {
   return a.tab;
 }
 
+// The standard checklist of shared/analysisLedger.mjs (checked by the tests).
+export const LEDGER_CHECKLIST_KEYS = [
+  'qc.thresholds', 'qc.doublets', 'qc.ambient', 'integrate.compare', 'cluster.resolution', 'cluster.sample-composition',
+  'cluster.every-label', 'cluster.canonical-markers', 'cluster.subcluster', 'explore.malignancy', 'deg.replicate-aware',
+  'explore.cross-sample', 'explore.anomalies', 'cellchat.limitations',
+];
+const LEDGER_KINDS = ['decision', 'annotation', 'finding', 'issue', 'check'];
+
 const ID = {
   project: /^[A-Za-z0-9_-]{1,80}$/,
   study: /^study_[0-9a-f]{24}$/,
@@ -50,6 +61,7 @@ const ID = {
   sandbox: /^sbx_[0-9a-f]{24}$/,
   sandboxRun: /^sbr_[0-9a-f]{24}$/,
   report: /^rep_[0-9a-f]{24}$/,
+  ledgerEntry: /^led_[0-9a-f]{24}$/,
   object: /^[A-Za-z0-9_-]{1,80}$/,
   file: /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/,
   dataset: /^[A-Za-z0-9_-]{1,80}$/,
@@ -470,6 +482,62 @@ export const TOOLS = [
       body.requestId = a.requestId === undefined ? defaultRequestId([base, body.tab, body.markdown]) : str(a, 'requestId');
       return { method: 'POST', path: base, body };
     }, { readOnly: false }),
+
+  // The analysis ledger: structured reasoning a reviewer can check claim by claim.
+  tool(
+    'record_ledger_entry',
+    [
+      'Record one entry in the analysis ledger. Common fields: kind, tab, title, evidence (list of {sandboxRunId or runId, file, locator, value}: the output that supports the entry, where in it, and the number read there).',
+      'decision: choice, alternatives (list), rationale, impact (high|medium|low), optional sensitivity {checked, summary} (checked needs evidence).',
+      'annotation: grouping (e.g. "seurat_clusters res0.6" or "myeloid_sub res0.5"), group, label, markers (2+ genes), confidence (high|medium|low), alternatives (required unless high), optional cells; needs evidence.',
+      'finding: statement, confidence, sampleSupport (all|most|one|not_checked|not_applicable), optional limitations; needs evidence with a locator or value.',
+      'issue: observation (opens it). Close it with a new issue entry {status: resolved|accepted, refersTo: <issue id>, resolution, evidence}.',
+      `check: item (one of ${LEDGER_CHECKLIST_KEYS.join(', ')}), status (done|not_applicable|blocked), note (unless done), evidence when done.`,
+      'Append-only: a newer annotation for the same grouping and group, or a newer check for the same item, replaces the older one in the audit.',
+    ].join(' '),
+    {
+      ...projectProp,
+      entry: {
+        type: 'object',
+        description: 'The entry. kind is one of decision, annotation, finding, issue, check; tab is an analysis tab.',
+        properties: { kind: { type: 'string', enum: LEDGER_KINDS }, tab: tabProp },
+        required: ['kind', 'tab', 'title'],
+      },
+      requestId: { type: 'string' },
+    },
+    ['projectId', 'entry'],
+    (a) => {
+      if (!a.entry || typeof a.entry !== 'object' || Array.isArray(a.entry)) throw new ToolInputError('entry must be an object.');
+      if (!LEDGER_KINDS.includes(a.entry.kind)) throw new ToolInputError(`entry.kind must be one of: ${LEDGER_KINDS.join(', ')}.`);
+      tabArg(a.entry);
+      const base = `${project(a)}/ledger`;
+      const body = { ...a.entry };
+      delete body.requestId;
+      body.requestId = a.requestId === undefined ? defaultRequestId([base, JSON.stringify(body)]) : str(a, 'requestId');
+      return { method: 'POST', path: base, body };
+    },
+    { readOnly: false }
+  ),
+  tool(
+    'get_ledger',
+    'Read back your analysis ledger entries in the order written, optionally only one kind.',
+    { ...projectProp, kind: { type: 'string', enum: LEDGER_KINDS } },
+    ['projectId'],
+    (a) => {
+      if (a.kind !== undefined && !LEDGER_KINDS.includes(a.kind)) throw new ToolInputError(`kind must be one of: ${LEDGER_KINDS.join(', ')}.`);
+      return { method: 'GET', path: `${project(a)}/ledger${a.kind ? `?kind=${a.kind}` : ''}` };
+    }
+  ),
+  tool(
+    'get_ledger_audit',
+    'The audit reviewers read before your report: blocking gaps (open issues, checklist items not addressed, report claims without ledger citations), items to review (single-sample findings, low-confidence labels, untested high-impact decisions), and the checklist. Pass reportId to check the report against the ledger. Close every blocking gap before asking for review.',
+    { ...projectProp, reportId: { type: 'string' } },
+    ['projectId'],
+    (a) => ({
+      method: 'GET',
+      path: `${project(a)}/ledger/audit${a.reportId !== undefined ? `?reportId=${str(a, 'reportId', ID.report)}` : ''}`,
+    })
+  ),
 
   // Reports: draft sections for people to review.
   tool(

@@ -981,7 +981,8 @@ export const electronAPI = {
   listAgentReports: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports`),
   getAgentReport: async (id, reportId) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}`),
   reviewAgentReportSection: async (id, reportId, sectionId, decision, comment) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/reviews`, { method: 'POST', body: JSON.stringify({ sectionId, decision, ...(comment ? { comment } : {}) }) }),
-  finalizeAgentReport: async (id, reportId) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/finalize`, { method: 'POST', body: '{}' }),
+  finalizeAgentReport: async (id, reportId, { acknowledgeLedgerGaps = false } = {}) => req(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/finalize`, { method: 'POST', body: JSON.stringify(acknowledgeLedgerGaps ? { acknowledgeLedgerGaps: true } : {}) }),
+  listAgentLedgers: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-ledgers`),
   agentReportExportUrl: (id, reportId) => apiUrl(`/api/projects/${encodeURIComponent(id)}/agent-reports/${encodeURIComponent(reportId)}/export`),
 
   // Cache

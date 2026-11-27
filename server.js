@@ -1727,8 +1727,11 @@ const agentServices = {
     db, withTransaction: agentDelegations.withTransaction, provider: durableStorage,
   }),
 };
+agentServices.ledger = require('./backend/agentLedger/ledger').createAgentLedgerService({
+  db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes, admission: agentAdmission,
+});
 agentServices.reports = require('./backend/agentReports/reports').createReportService({
-  db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes,
+  db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes, ledger: agentServices.ledger,
 });
 agentServices.notebook = require('./backend/agentNotebook/notebook').createAgentNotebookService({
   db, withTransaction: agentDelegations.withTransaction, admission: agentAdmission, sandboxes: agentServices.sandboxes,

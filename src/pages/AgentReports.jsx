@@ -2,10 +2,14 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { CheckCircle2, Download, FileText, Loader2, MessageSquare } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import LedgerAudit, { linkLedgerCitations } from '../components/LedgerAudit';
 
 // Review screen for reports an agent drafts (docs/spec.md phase 5). Each
 // section version is reviewed on its own; a revision by the agent needs a new
 // review. Only a person can finalize, and only when every section is approved.
+// When the agent kept an analysis ledger, its audit is shown above the
+// sections, citations in the text link to it, and blocking gaps must be
+// acknowledged before finalizing.
 
 const NO_API = Object.freeze({});
 const STATUS = {
@@ -32,7 +36,7 @@ function Section({ api, projectId, report, section, canWrite, busy, onReview }) 
         <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${status.tone}`}>{status.label}</span>
       </div>
       <div className="prose prose-sm max-w-none text-text">
-        <ReactMarkdown skipHtml urlTransform={safeUrl}>{section.body}</ReactMarkdown>
+        <ReactMarkdown skipHtml urlTransform={safeUrl}>{linkLedgerCitations(section.body)}</ReactMarkdown>
       </div>
       {section.figures.length > 0 && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -91,6 +95,8 @@ export default function AgentReports({ projectId, role }) {
   const [reports, setReports] = useState([]);
   const [openId, setOpenId] = useState(null);
   const [report, setReport] = useState(null);
+  const [ledgerAudit, setLedgerAudit] = useState(null);
+  const [acknowledged, setAcknowledged] = useState(false);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
@@ -105,10 +111,14 @@ export default function AgentReports({ projectId, role }) {
     }
   }, [api, projectId]);
   const loadReport = useCallback(async (id) => {
-    if (!id) { setReport(null); return; }
+    if (!id) { setReport(null); setLedgerAudit(null); return; }
     try {
       const res = await api.getAgentReport(projectId, id);
-      if (mounted.current) setReport(res?.report || null);
+      if (mounted.current) {
+        setReport(res?.report || null);
+        setLedgerAudit(res?.ledgerAudit || null);
+        setAcknowledged(false);
+      }
     } catch (err) {
       if (mounted.current) setError(publicErrorMessage(err?.message, 'The report could not be loaded.'));
     }
@@ -123,6 +133,11 @@ export default function AgentReports({ projectId, role }) {
       const res = await action();
       if (res?.report && mounted.current) setReport(res.report);
       await load();
+      // Reviews change which claims are current; recompute the audit.
+      if (res?.report && mounted.current) {
+        const fresh = await api.getAgentReport(projectId, res.report.id).catch(() => null);
+        if (fresh && mounted.current) setLedgerAudit(fresh.ledgerAudit || null);
+      }
       return true;
     } catch (err) {
       setError(publicErrorMessage(err?.message, 'The request was rejected.'));
@@ -133,7 +148,9 @@ export default function AgentReports({ projectId, role }) {
   };
 
   if (!api.listAgentReports) return null;
-  const ready = report && report.sections.length > 0 && report.sections.every((s) => s.status === 'approved');
+  const blockers = ledgerAudit?.counts?.blocker || 0;
+  const ready = report && report.sections.length > 0 && report.sections.every((s) => s.status === 'approved')
+    && (blockers === 0 || acknowledged);
   return (
     <section className="space-y-4" aria-label="Agent reports">
       <div>
@@ -163,11 +180,18 @@ export default function AgentReports({ projectId, role }) {
               <a href={api.agentReportExportUrl?.(projectId, report.id)} className="btn btn-secondary text-xs"><Download size={14} /> Download Markdown</a>
               {report.status === 'finalized'
                 ? <span className="inline-flex items-center gap-1 text-xs font-bold text-success"><CheckCircle2 size={14} /> Finalized</span>
-                : canWrite && <button type="button" disabled={Boolean(busy) || !ready} onClick={() => act('finalize', () => api.finalizeAgentReport(projectId, report.id))} className="btn btn-primary text-xs">
+                : canWrite && <button type="button" disabled={Boolean(busy) || !ready} onClick={() => act('finalize', () => api.finalizeAgentReport(projectId, report.id, { acknowledgeLedgerGaps: blockers > 0 && acknowledged }))} className="btn btn-primary text-xs">
                   {busy === 'finalize' ? <Loader2 size={14} className="animate-spin" /> : null} Finalize report
                 </button>}
             </div>
           </div>
+          {report.status === 'draft' && canWrite && blockers > 0 && (
+            <label className="flex items-start gap-2 rounded border border-danger/30 bg-danger/10 p-2 text-xs text-text">
+              <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} className="mt-0.5" />
+              <span>The audit lists {blockers} blocking gap{blockers === 1 ? '' : 's'}. I have read them and want to finalize anyway; this is recorded.</span>
+            </label>
+          )}
+          <LedgerAudit audit={ledgerAudit} fileUrl={(runId, file) => api.agentSandboxFileUrl?.(projectId, runId, file)} />
           {report.sections.length === 0 ? <p className="text-sm text-textMuted">The agent has not written any sections yet.</p> : report.sections.map((section) => (
             <Section key={section.id} api={api} projectId={projectId} report={report} section={section} canWrite={canWrite} busy={busy}
               onReview={(sectionId, decision, comment) => act(`review:${sectionId}`, () => api.reviewAgentReportSection(projectId, report.id, sectionId, decision, comment))} />

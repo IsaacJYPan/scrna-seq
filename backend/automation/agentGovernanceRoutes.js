@@ -11,7 +11,9 @@ const { humanActorContext } = require('../actors/actorContext');
 const { READ_ROLES, MANAGE_ROLES } = require('../policy/agentCapabilities');
 const { listAutomationEvents } = require('./automationAudit');
 
-function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports, notebook }) {
+function agentGovernanceRoutes({
+  db, delegations, proposals, approvals, studies, admission, targets, sandboxes, reports, notebook, ledger,
+}) {
   const router = express.Router({ mergeParams: true });
 
   const route = (handler, { status = 200 } = {}) => async (req, res) => {
@@ -110,6 +112,11 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
     router.get('/agent-notebook', route((req, actor) => notebook.readForHuman(actor, req.params.projectId, {
       tab: typeof req.query.tab === 'string' ? req.query.tab : undefined,
     })));
+  }
+
+  // Each agent's analysis ledger with the audit computed from it.
+  if (ledger) {
+    router.get('/agent-ledgers', route((req, actor) => ledger.ledgersForHuman(actor, req.params.projectId)));
   }
 
   // Agent sandboxes and their draft outputs (docs/spec.md phase 4).

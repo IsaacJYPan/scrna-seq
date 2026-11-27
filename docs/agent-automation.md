@@ -537,6 +537,83 @@ is approved; a finalized report cannot change. *Download Markdown* exports the
 report with figure references and a provenance list. Section and review history
 is append-only in the database.
 
+## Analysis ledger
+
+Blind replications of published studies (see [agent evaluation](agent-evaluation.md))
+showed that agents get headline results roughly right but make the same three
+mistakes. They stop after one global clustering. They write anomalies and cheap
+checks into the caveats instead of resolving them. And they leave their key
+judgements buried in scripts and console logs: which cluster is which cell type,
+and which number supports which sentence. A reviewer then has to reconstruct
+all of that. The ledger turns each judgement into a record with its evidence,
+and the server computes an audit of what is missing.
+
+An agent with `report.write` records entries as it works (`POST
+…/projects/:projectId/ledger`, MCP `record_ledger_entry`). Every entry has a
+`kind`, an analysis `tab`, a `title` and `evidence`. Evidence is a list of
+`{ sandboxRunId | runId, file, locator, value }`: the run output that supports
+the entry, where in it (a row, a column, a cluster), and the number read there.
+Definitions and validation live in `shared/analysisLedger.mjs`.
+
+| Kind | Records | Required |
+| --- | --- | --- |
+| `decision` | A choice that could change results (thresholds, integration, resolution, gene sets) | `choice`, `alternatives`, `rationale`, `impact`; `sensitivity.checked` needs evidence |
+| `annotation` | The label of one group in one grouping (`seurat_clusters res0.6`, `myeloid_sub res0.5`) | `label`, at least two `markers`, `confidence`, evidence; `alternatives` unless confidence is high |
+| `finding` | One claim the report will make | `statement`, `confidence`, `sampleSupport` (`all`, `most`, `one`, `not_checked`, `not_applicable`); evidence with a locator or value |
+| `issue` | Something unexpected | `observation`; closed by a later issue entry with `refersTo`, `status` `resolved` (with evidence) or `accepted` (with a reason) |
+| `check` | One item of the standard checklist | `item`, `status` (`done` with evidence, `not_applicable` or `blocked` with a note) |
+
+The **standard checklist** (`ANALYSIS_CHECKLIST`) covers the steps the blind
+runs skipped or did only superficially:
+
+- per-sample QC thresholds, doublets, and ambient RNA
+- integrated versus unintegrated structure
+- more than one clustering resolution
+- the sample make-up of every cluster
+- a label with marker evidence for every cluster
+- canonical markers for every expected lineage, including absent ones
+- re-clustering each major compartment
+- malignant versus normal cells
+- replicate-aware comparisons
+- every finding checked in each sample
+- every anomaly investigated
+- the limits of the interaction analysis
+
+**Evidence is verified when the entry is written.** A sandbox run must belong
+to the agent, have finished with outputs (`draft_ready`) and list the cited
+file. The file's and the script's SHA-256 are recorded with the entry. A
+workflow run must belong to the agent and have produced its result. Missing
+evidence is `EVIDENCE_NOT_FOUND` or `EVIDENCE_RUN_REQUIRED`, and a malformed
+entry is `INVALID_LEDGER_ENTRY` with `details.field`. Entries are append-only
+(`agent_ledger_entries`) and idempotent by `requestId`. A newer annotation for
+the same group, or a newer check for the same item, supersedes the older one in
+the audit.
+
+**The audit** (`GET …/ledger/audit[?reportId=]`, MCP `get_ledger_audit`) is
+computed from the entries on every read.
+
+- **Blocking:** open issues, checklist items not addressed, no findings, report
+  citations of entries that do not exist, and a report that cites nothing.
+- **Review first:** blocked checklist items, issues accepted without a fix,
+  findings seen in one sample or not checked across samples, low-confidence
+  findings and labels, and high-impact decisions whose alternative was not tried.
+- **Tables:** findings, labels, decisions and issues, each with its evidence,
+  and the checklist.
+
+With `reportId`, the report's sections are checked against the ledger. Reports
+cite findings as `[F:<entry id>]` and labels as `[A:<entry id>]`.
+
+**People** see each agent's ledger and audit at `GET
+/api/projects/:projectId/agent-ledgers`. Under *Agent access → Reports*, the
+audit of the delegation that wrote the report is shown above its sections.
+Citations in the text link to the audit row, and each evidence entry opens the
+cited file. Finalizing a report whose audit still has blocking gaps returns
+`409 LEDGER_GAPS_OPEN` with the gaps. The reviewer can ask the agent to close
+them, or finalize with `{ "acknowledgeLedgerGaps": true }`, which is audited as
+`report.finalized-with-ledger-gaps`. *Download Markdown* states the gap counts
+under the title and appends the full audit as the report's last section. A
+report whose agent kept no ledger is unchanged.
+
 ## Route inventory (phase 0 gate)
 
 Agent credentials are refused before routing by `agentCredentialGuard`
@@ -571,6 +648,9 @@ Errors use `{ error, code, retry, correlationId }`; `retry` is `never`,
 | Verified code: every reviewed release and library method, approved here or not | `GET …/projects/:projectId/verified-code` | `metadata.read` |
 | This agent's notebook cells, by analysis tab | `GET …/projects/:projectId/notebook` | `metadata.read` |
 | Add a notebook note | `POST …/projects/:projectId/notebook/notes` | `report.write` |
+| Analysis ledger entries, optionally `?kind=` | `GET …/projects/:projectId/ledger` | `metadata.read` |
+| Record a ledger entry | `POST …/projects/:projectId/ledger` | `report.write` |
+| Ledger audit, optionally against a report | `GET …/projects/:projectId/ledger/audit[?reportId=]` | `metadata.read` |
 | Approved releases | `GET …/projects/:projectId/workflows` | `workflow.plan` |
 | Sponsor's open studies, with full trial history | `GET …/projects/:projectId/studies[/:studyId]` | `workflow.plan` |
 | Create or read a plan | `POST …/plans`, `GET …/plans/:planId` | `workflow.plan` |
@@ -590,7 +670,7 @@ Human routes (session only) under `/api/projects/:projectId`:
 `agent-sandboxes`, `agent-sandboxes/:id`, `agent-sandboxes/:id/close`,
 `agent-sandbox-runs/:runId/review`, `agent-sandbox-runs/:runId/files/<name>`,
 `agent-reports`, `agent-reports/:id`, `agent-reports/:id/reviews`,
-`agent-reports/:id/finalize`, `agent-reports/:id/export`, and `agent-notebook`.
+`agent-reports/:id/finalize`, `agent-reports/:id/export`, `agent-notebook`, and `agent-ledgers`.
 
 A proposal request is:
 
@@ -666,7 +746,8 @@ Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
 `get_sandbox`, `run_r_script`, `get_sandbox_run`, `read_sandbox_file`,
 `cancel_sandbox_run`, `get_notebook`, `add_notebook_note`, `list_remote_files`, `read_remote_file`, `list_figures`,
 `view_figure`, `get_figure_history`, `create_report`, `list_reports`,
-`get_report`, and `write_report_section`. `read_sandbox_file`,
+`get_report`, `write_report_section`, `record_ledger_entry`, `get_ledger`, and
+`get_ledger_audit`. `read_sandbox_file`,
 `read_remote_file` and `view_figure` return PNG images as MCP image content, so
 a multimodal agent can look at its own plots, at figures people saved in the
 project gallery, and at plots in a pinned cluster folder. `get_figure_history`
@@ -741,7 +822,10 @@ sessions.
   script admission and replay, budgets, claim-time cancellation, reading text
   and image outputs from a real bundle, privacy of drafts, promotion through a
   published branch, and the report write → review → revise → finalize → export
-  journey.
+  journey, and the analysis ledger: verified evidence, replay, issue closure,
+  append-only rows, the report audit and the finalization gate.
+- `backend/analysis-ledger.test.js`: ledger validation, the audit's gaps and
+  ordering, report citation checks, and the MCP checklist and instructions.
 - `backend/slurm-sandbox.test.js`: qualification against a fake Slurm that runs
   job scripts for real (passing, failing checks, settings changes), and sandbox
   runs on the cluster including reservations, console capture, and rejected
