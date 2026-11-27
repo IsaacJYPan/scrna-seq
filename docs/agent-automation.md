@@ -581,7 +581,13 @@ runs skipped or did only superficially:
 
 **Evidence is verified when the entry is written.** A sandbox run must belong
 to the agent, have finished with outputs (`draft_ready`) and list the cited
-file. The file's and the script's SHA-256 are recorded with the entry. A
+file. The file's and the script's SHA-256 are recorded with the entry. A value
+cited from a CSV or TSV output with a locator of the form `row <column>=<value>[,
+<column>=<value>...], column <column>` is compared with that cell of the file
+(at the precision cited, and as a percentage when it ends in `%`). A different
+value is refused with `409 EVIDENCE_VALUE_MISMATCH` and the value found. Other
+locators are kept as text, and each reference records `valueCheck` (`matched`
+or `unchecked`); the audit shows checked values with ✓. A
 workflow run must belong to the agent and have produced its result. Missing
 evidence is `EVIDENCE_NOT_FOUND` or `EVIDENCE_RUN_REQUIRED`, and a malformed
 entry is `INVALID_LEDGER_ENTRY` with `details.field`. Entries are append-only

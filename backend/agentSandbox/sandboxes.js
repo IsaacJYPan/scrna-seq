@@ -35,6 +35,7 @@ const MAX_REASON_CHARS = 1000;
 const RUN_CPU_SECONDS = 2 * 900;
 const NON_TERMINAL = ['created', 'queued', 'running', 'waiting_for_user'];
 const MAX_TEXT_BYTES = 256 * 1024;
+const MAX_LEDGER_TABLE_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 function requireHuman(actor) {
@@ -695,6 +696,15 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     return readFile(row, name, { maxBytes: kind?.kind === 'image' ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES });
   }
 
+  // A table the agent cites in its analysis ledger, read so the ledger can
+  // check the cited value. Larger than what the agent may read back itself:
+  // only the one cell is compared, nothing is returned to the agent.
+  async function tableForLedger(actor, runId, name) {
+    const row = await agentRunRow(actor, runId);
+    if (fileKind(String(name))?.kind !== 'text') throw codedError('INVALID_INPUT', 'Not a text table.', 400);
+    return readFile(row, name, { maxBytes: MAX_LEDGER_TABLE_BYTES });
+  }
+
   async function cancelForAgent(actor, runId) {
     const row = await agentRunRow(actor, runId);
     await withTransaction(async (client) => {
@@ -719,7 +729,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
 
   return {
     create, listForHuman, getForHuman, close, reviewRun, fileForHuman,
-    listForAgent, getForAgent, submitRun, getRunForAgent, fileForAgent, cancelForAgent,
+    listForAgent, getForAgent, submitRun, getRunForAgent, fileForAgent, tableForLedger, cancelForAgent,
     runForHuman, notebookRunsForHuman, notebookRunsForAgent,
     listRemoteForAgent, readRemoteForAgent,
   };

@@ -138,6 +138,90 @@ export function normalizeEvidence(value, field = 'evidence') {
   });
 }
 
+// ── Cited values ───────────────────────────────────────────────────────────
+// A cited number is only useful if it is the number in the file. For CSV/TSV
+// outputs, a locator of the form `row <column>=<value>[, <column>=<value>...],
+// column <column>` names one cell; the store reads the table and refuses an
+// entry whose value differs from that cell. Other locators are kept as text
+// and marked unchecked.
+
+export const LOCATOR_GRAMMAR = 'row <column>=<value>[, <column>=<value>...], column <column>';
+
+export function parseDelimited(text, delimiter = ',') {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { field += '"'; i += 1; } else if (ch === '"') quoted = false;
+      else field += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === delimiter) { row.push(field); field = ''; } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i += 1;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += ch;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.length > 1 || r[0] !== '');
+}
+
+export function parseTableLocator(locator) {
+  const match = /^row\s+(.+?),\s*column\s+(.+)$/i.exec(String(locator || '').trim());
+  if (!match) return null;
+  const conditions = [];
+  for (const part of match[1].split(',')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) return null;
+    conditions.push([part.slice(0, eq).trim(), part.slice(eq + 1).trim()]);
+  }
+  return { conditions, column: match[2].trim() };
+}
+
+function sameNumber(found, cited) {
+  const text = String(cited).trim();
+  const percent = text.endsWith('%');
+  const number = Number(percent ? text.slice(0, -1) : text);
+  const actual = Number(found);
+  if (!Number.isFinite(number) || !Number.isFinite(actual) || String(found).trim() === '') return null;
+  const decimals = (text.replace('%', '').split(/[eE]/)[0].split('.')[1] || '').length;
+  const close = (a) => {
+    if (Math.abs(a - number) <= 1e-9 * Math.max(1, Math.abs(a))) return true;
+    // The agent rounded: accept the file's value at the precision cited.
+    if (Math.abs(Number(a.toFixed(Math.min(decimals, 15))) - number) < 1e-12) return true;
+    return Math.abs(a - number) <= 0.005 * Math.abs(a) && decimals >= 2;
+  };
+  return close(actual) || (percent && close(actual * 100));
+}
+
+// Returns { status: 'matched' | 'mismatched' | 'unchecked', found?, reason? }.
+export function checkCitedValue(text, { file, locator, value }) {
+  if (!value || !/\.(csv|tsv)$/i.test(String(file || ''))) return { status: 'unchecked', reason: 'not a table' };
+  const parsed = parseTableLocator(locator);
+  if (!parsed) return { status: 'unchecked', reason: `locator is not "${LOCATOR_GRAMMAR}"` };
+  const rows = parseDelimited(String(text), /\.tsv$/i.test(file) ? '\t' : ',');
+  if (rows.length < 2) return { status: 'unchecked', reason: 'empty table' };
+  const header = rows[0];
+  // R's write.csv(row.names = TRUE) leaves the first header cell empty.
+  const columnIndex = (name) => {
+    const index = header.indexOf(name);
+    if (index >= 0) return index;
+    return header[0] === '' && !header.includes(name) ? 0 : -1;
+  };
+  const keys = parsed.conditions.map(([name, wanted]) => [columnIndex(name), wanted]);
+  if (keys.some(([index]) => index < 0)) return { status: 'unchecked', reason: 'a row key is not a column of the table' };
+  const target = header.indexOf(parsed.column);
+  if (target < 0) return { status: 'mismatched', reason: `the table has no column ${parsed.column}` };
+  const hits = rows.slice(1).filter((row) => keys.every(([index, wanted]) => String(row[index] ?? '').trim() === wanted));
+  if (!hits.length) return { status: 'mismatched', reason: 'no row matches the locator' };
+  if (hits.length > 1) return { status: 'unchecked', reason: 'the locator matches more than one row' };
+  const found = String(hits[0][target] ?? '').trim();
+  const numeric = sameNumber(found, value);
+  if (numeric === true || (numeric === null && found === String(value).trim())) return { status: 'matched', found };
+  return { status: 'mismatched', found, reason: `the file says ${found.slice(0, 80)}` };
+}
+
 const COMMON = ['kind', 'tab', 'title', 'evidence', 'requestId', 'refersTo'];
 
 const KIND_FIELDS = Object.freeze({
@@ -274,6 +358,9 @@ export function auditLedger(entries, { reportText } = {}) {
       add('review', 'FINDING_SINGLE_SAMPLE', `Finding ${finding.sampleSupport === 'one' ? 'seen in one sample only' : 'not checked across samples'}: ${finding.title}`, [finding.id]);
     }
     if (finding.confidence === 'low') add('review', 'FINDING_LOW_CONFIDENCE', `Low-confidence finding: ${finding.title}`, [finding.id]);
+    if (finding.evidence.some((ref) => ref.valueCheck) && !finding.evidence.some((ref) => ref.valueCheck === 'matched')) {
+      add('info', 'FINDING_VALUES_UNCHECKED', `No cited value of this finding could be checked against its table: ${finding.title}`, [finding.id]);
+    }
   }
   if (!findings.length) add('blocker', 'NO_FINDINGS', 'No findings recorded: the report has nothing a reviewer can check claim by claim.', []);
 
@@ -340,7 +427,8 @@ function formatEvidence(refs) {
     const where = [ref.sandboxRunId || ref.runId, ref.file].filter(Boolean).join(':');
     const at = ref.locator ? ` @ ${ref.locator}` : '';
     const reading = ref.value ? ` = ${ref.value}` : '';
-    return `\`${where}\`${at}${reading}`;
+    const checked = ref.valueCheck === 'matched' ? ' ✓' : '';
+    return `\`${where}\`${at}${reading}${checked}`;
   }).join('; ');
 }
 
@@ -401,5 +489,6 @@ export const LEDGER_PROTOCOL = Object.freeze([
   'Treat each issue as work, not as a caveat: investigate it with a follow-up run and resolve it with evidence, or accept it with a reason. If a short script could check a caveat, run it.',
   'After the first global clustering, re-cluster each major compartment on its own (immune, T/NK, myeloid, stromal, glial, epithelial or tumor) and annotate the subtypes; global clusters hide them.',
   'Check each finding in every sample and record whether it holds in all, most, or one.',
+  `Cite numbers from tables with a locator of the form "${LOCATOR_GRAMMAR}" and the value as written in the file; the ledger checks the value against the file and refuses a mismatch.`,
   'Before writing the report, read get_ledger_audit and close every blocking gap. In the report, cite findings as [F:<id>] and labels as [A:<id>] so each claim links to its evidence.',
 ]);

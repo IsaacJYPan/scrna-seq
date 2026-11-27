@@ -8,6 +8,8 @@
 // agent's own runs when the entry is written: a sandbox run must have
 // finished with outputs and list the cited file (whose SHA-256 is recorded),
 // and a workflow run must belong to the agent and have produced its result.
+// A value cited from a CSV/TSV output with a row/column locator is compared
+// with the file, and a mismatch is refused.
 // The audit is computed from the stored entries on every read, so it always
 // reflects the latest labels, closed issues and checklist answers.
 
@@ -15,7 +17,7 @@ const crypto = require('crypto');
 const { READ_ROLES, MANAGE_ROLES, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('../automation/automationAudit');
 const {
-  LEDGER_SCHEMA, normalizeLedgerEntry, auditLedger, renderAuditMarkdown, LedgerValidationError,
+  LEDGER_SCHEMA, normalizeLedgerEntry, auditLedger, renderAuditMarkdown, LedgerValidationError, checkCitedValue,
 } = require('../../shared/analysisLedger.mjs');
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
@@ -57,7 +59,20 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
         if (run.state !== 'draft_ready') throw codedError('EVIDENCE_NOT_READY', `Sandbox run ${run.id} has no outputs (${run.state}).`, 409);
         const listed = (run.files || []).find((entry) => entry.name === ref.file);
         if (!listed) throw codedError('EVIDENCE_NOT_FOUND', `Run ${run.id} has no output named ${ref.file}.`, 404);
-        verified.push({ ...ref, checksumSha256: listed.checksumSha256, scriptSha256: run.scriptSha256 });
+        const out = { ...ref, checksumSha256: listed.checksumSha256, scriptSha256: run.scriptSha256 };
+        if (ref.value && /\.(csv|tsv)$/i.test(ref.file)) {
+          const table = sandboxes.tableForLedger
+            ? await sandboxes.tableForLedger(actor, run.id, ref.file).catch(() => null) : null;
+          const check = table ? checkCitedValue(table.content.toString('utf8'), ref) : { status: 'unchecked' };
+          if (check.status === 'mismatched') {
+            const error = codedError('EVIDENCE_VALUE_MISMATCH',
+              `${ref.file} at "${ref.locator}" does not hold ${ref.value}: ${check.reason}.`, 409);
+            error.details = { file: ref.file, locator: ref.locator, value: ref.value, found: check.found ?? null };
+            throw error;
+          }
+          out.valueCheck = check.status;
+        }
+        verified.push(out);
       } else if (ref.runId) {
         const run = admission ? await admission.getRunForAgent(actor, ref.runId).catch(() => null) : null;
         if (!run) throw codedError('EVIDENCE_NOT_FOUND', `Run ${ref.runId} not found.`, 404);

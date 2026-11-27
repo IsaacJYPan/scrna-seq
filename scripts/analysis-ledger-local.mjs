@@ -11,7 +11,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { auditLedger, normalizeLedgerEntry, renderAuditMarkdown, LedgerValidationError } from '../shared/analysisLedger.mjs';
+import { auditLedger, normalizeLedgerEntry, renderAuditMarkdown, LedgerValidationError, checkCitedValue } from '../shared/analysisLedger.mjs';
 
 const PREFIX = { decision: 'D', annotation: 'A', finding: 'F', issue: 'I', check: 'C' };
 
@@ -27,6 +27,13 @@ export function addEntry(root, input) {
   for (const ref of entry.evidence) {
     if (ref.file && !fs.existsSync(path.join(root, ref.file))) {
       throw new LedgerValidationError(`Evidence file not found: ${ref.file}. Cite an output that exists.`, 'evidence');
+    }
+    if (ref.file && ref.value && /\.(csv|tsv)$/i.test(ref.file)) {
+      const check = checkCitedValue(fs.readFileSync(path.join(root, ref.file), 'utf8'), ref);
+      if (check.status === 'mismatched') {
+        throw new LedgerValidationError(`${ref.file} at "${ref.locator}" does not hold ${ref.value}: ${check.reason}.`, 'evidence');
+      }
+      ref.valueCheck = check.status;
     }
   }
   const n = entries.filter((e) => e.kind === entry.kind).length + 1;

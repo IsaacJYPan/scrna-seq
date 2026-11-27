@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 const {
-  normalizeLedgerEntry, auditLedger, renderAuditMarkdown, ANALYSIS_CHECKLIST, CHECKLIST_KEYS, LEDGER_PROTOCOL,
+  normalizeLedgerEntry, auditLedger, renderAuditMarkdown, ANALYSIS_CHECKLIST, CHECKLIST_KEYS, LEDGER_PROTOCOL, checkCitedValue,
 } = require('../shared/analysisLedger.mjs');
 const { LEDGER_CHECKLIST_KEYS, MCP_INSTRUCTIONS } = require('../cli/traceomics-mcp.mjs');
 
@@ -115,12 +115,40 @@ describe('ledger audit', () => {
   });
 });
 
+describe('cited value check', () => {
+  const markers = '"p_val","avg_log2FC","cluster","gene"\n1e-10,3.0412,"7","LEF1"\n1e-5,1.2,"7","WNT5A"\n2e-3,0.9,"2","LEF1"\n';
+  const fractions = '"","sample1","sample2"\n"Tumor",0.9614,0.4005\n"Immune",0.0300,0.4300\n';
+  const check = (text, file, locator, value) => checkCitedValue(text, { file, locator, value });
+
+  it('matches the cell the locator names, at the precision cited', () => {
+    expect(check(markers, 'm.csv', 'row cluster=7, gene=LEF1, column avg_log2FC', '3.04')).toMatchObject({ status: 'matched', found: '3.0412' });
+    expect(check(markers, 'm.csv', 'row cluster=7, gene=LEF1, column avg_log2FC', '3.0412')).toMatchObject({ status: 'matched' });
+    // write.csv row names: the first header cell is empty.
+    expect(check(fractions, 'f.csv', 'row compartment=Tumor, column sample2', '0.4005').status).toBe('matched');
+    expect(check(fractions, 'f.csv', 'row compartment=Tumor, column sample2', '40.05%').status).toBe('matched');
+  });
+
+  it('reports a different number, a missing row or column as a mismatch', () => {
+    expect(check(markers, 'm.csv', 'row cluster=7, gene=LEF1, column avg_log2FC', '4.1')).toMatchObject({ status: 'mismatched', found: '3.0412' });
+    expect(check(fractions, 'f.csv', 'row compartment=Tumor, column sample2', '0.50')).toMatchObject({ status: 'mismatched', found: '0.4005' });
+    expect(check(markers, 'm.csv', 'row cluster=9, gene=LEF1, column avg_log2FC', '3.04').status).toBe('mismatched');
+    expect(check(markers, 'm.csv', 'row cluster=7, gene=LEF1, column logFC', '3.04').status).toBe('mismatched');
+  });
+
+  it('leaves what it cannot locate unchecked rather than guessing', () => {
+    expect(check(markers, 'm.csv', 'cluster 7 LEF1', '3.04').status).toBe('unchecked');
+    expect(check(markers, 'm.csv', 'row gene=LEF1, column avg_log2FC', '3.04').status).toBe('unchecked');
+    expect(check(markers, 'umap.png', 'row gene=LEF1, column avg_log2FC', '3.04').status).toBe('unchecked');
+  });
+});
+
 describe('MCP server', () => {
   it('lists the same checklist and tells agents the ledger protocol', () => {
     expect(LEDGER_CHECKLIST_KEYS).toEqual(CHECKLIST_KEYS);
     expect(MCP_INSTRUCTIONS).toContain('record_ledger_entry');
     expect(MCP_INSTRUCTIONS).toContain('get_ledger_audit');
     expect(MCP_INSTRUCTIONS).toContain('re-cluster each major compartment');
+    expect(MCP_INSTRUCTIONS).toContain('EVIDENCE_VALUE_MISMATCH');
     expect(LEDGER_PROTOCOL.length).toBeGreaterThan(0);
   });
 });

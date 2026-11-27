@@ -500,6 +500,13 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
 
     const missingFile = await record(ctx, 'ledger-0000002', { ...finding, evidence: [{ ...finding.evidence[0], file: 'nope.csv' }] });
     expect(missingFile.data.code).toBe('EVIDENCE_NOT_FOUND');
+    const wrongValue = await record(ctx, 'ledger-0000008', { ...finding,
+      evidence: [{ sandboxRunId: run.id, file: 'clusters.csv', locator: 'row cluster=2, column n', value: '15' }] });
+    expect(wrongValue.status).toBe(409);
+    expect(wrongValue.data).toMatchObject({ code: 'EVIDENCE_VALUE_MISMATCH', details: { found: '12' } });
+    const rightValue = await record(ctx, 'ledger-0000009', { ...finding, title: 'Cluster 2 size',
+      evidence: [{ sandboxRunId: run.id, file: 'clusters.csv', locator: 'row cluster=2, column n', value: '12' }] });
+    expect(rightValue.data.entry.evidence[0].valueCheck).toBe('matched');
     const noRun = await record(ctx, 'ledger-0000003', { ...finding, evidence: [{ file: 'clusters.csv', value: '10' }] });
     expect(noRun.data.code).toBe('EVIDENCE_RUN_REQUIRED');
     const invalid = await record(ctx, 'ledger-0000004', { ...finding, evidence: [] });
@@ -524,7 +531,7 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
     // People see the ledger and its audit; rows are append-only.
     const human = await api(server, `${ctx.base}/agent-ledgers`, { token: ctx.sponsor.token });
     expect(human.data.ledgers).toEqual([expect.objectContaining({ delegationId: ctx.delegation.id, audit: expect.any(Object) })]);
-    expect(human.data.ledgers[0].entries).toHaveLength(3);
+    expect(human.data.ledgers[0].entries).toHaveLength(4);
     await expect(db.query("UPDATE agent_ledger_entries SET entry_kind = 'check'")).rejects.toMatchObject({ code: '55000' });
     await expect(db.query('DELETE FROM agent_ledger_entries')).rejects.toMatchObject({ code: '55000' });
   });
