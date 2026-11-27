@@ -537,6 +537,22 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
     await expect(db.query('DELETE FROM agent_ledger_entries')).rejects.toMatchObject({ code: '55000' });
   });
 
+  it('asks the agent to record what its finished runs showed before starting more', async () => {
+    const ctx = await setup({ limits: { maxOutstandingRuns: 3 }, sandbox: { maxRuns: 5 } });
+    const first = await withRun(ctx);
+    // One finished run may wait for its entry.
+    const second = (await submit(ctx, 'req-sandbox-0002')).data.run;
+    await completeSandboxJob(ctx, await jobIdOf(second.id), { 'clusters.csv': 'cluster,n\n1,10\n' });
+    const behind = await submit(ctx, 'req-sandbox-0003');
+    expect(behind.status).toBe(409);
+    expect(behind.data).toMatchObject({ code: 'LEDGER_BEHIND' });
+    expect(behind.data.details.runs.map((run) => run.id)).toEqual([first.id, second.id]);
+    await record(ctx, 'ledger-0000030', { kind: 'decision', tab: 'cluster', title: 'Resolution', choice: '0.5',
+      alternatives: ['1.0'], rationale: 'Two stable clusters.', impact: 'low',
+      evidence: [{ sandboxRunId: first.id, file: 'clusters.csv' }] });
+    expect((await submit(ctx, 'req-sandbox-0003')).status).toBe(201);
+  });
+
   it('needs report.write to record, and metadata.read to read', async () => {
     const ctx = await setup({ caps: ['metadata.read', 'results.read', 'development.executeCandidate'] });
     const denied = await record(ctx, 'ledger-0000010', { kind: 'issue', tab: 'qc', title: 'x', observation: 'x' });

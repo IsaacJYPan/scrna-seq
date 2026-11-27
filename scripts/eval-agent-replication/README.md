@@ -11,7 +11,10 @@ are in [docs/agent-evaluation.md](../../docs/agent-evaluation.md).
 - `brief-ledger.md`: the same brief, plus the analysis ledger protocol and the
   standard checklist from `shared/analysisLedger.mjs`. The agent records entries
   with `scripts/analysis-ledger-local.mjs`, which applies the server's
-  validation, cited-value check and audit to a local `ledger.jsonl`.
+  validation, cited-value check and audit to a local `ledger.jsonl`. The brief
+  records the checklist as it was for the evaluation; the current list is
+  `ANALYSIS_CHECKLIST` (the malignancy item has since become the general
+  `explore.orthogonal-support`).
 
 To run one:
 

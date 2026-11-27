@@ -85,6 +85,21 @@ describe('AgentNotebook', () => {
     expect(screen.getByRole('button', { name: 'All steps (3)' })).toBeInTheDocument();
   });
 
+  it('shows ledger entries as cells with the outputs they cite', async () => {
+    const api = fakeApi();
+    api.getAgentNotebook = vi.fn(async () => ({ ...notebook, cells: [{
+      kind: 'ledger', id: 'led_1', tab: 'cluster', createdAt: '2026-11-20T10:06:00Z', agent, authorship: 'ai_written',
+      entryKind: 'issue', title: 'IGKC in a myeloid cluster', summary: 'IGKC is high in cluster 11.', status: 'open',
+      confidence: null, sampleSupport: null, item: null, markers: [], alternatives: [], refersTo: null,
+      evidence: [{ sandboxRunId: 'sbr_1', file: 'markers.csv', locator: 'row cluster=11, gene=IGKC, column avg_log2FC', value: '2.1', valueCheck: 'matched' }],
+    }] }));
+    render(<AgentNotebook projectId="proj_1" role="analyst" api={api} />);
+    const cell = await screen.findByRole('region', { name: 'Cell 1: issue from Analyst agent' });
+    expect(within(cell).getByText('IGKC in a myeloid cluster')).toBeInTheDocument();
+    expect(within(cell).getByText('open')).toBeInTheDocument();
+    expect(within(cell).getByRole('link', { name: 'markers.csv @ row cluster=11, gene=IGKC, column avg_log2FC = 2.1 ✓' })).toHaveAttribute('href', '/file');
+  });
+
   it('says so when no agent has done anything yet', async () => {
     const api = { getAgentNotebook: vi.fn(async () => ({ ...notebook, cells: [], hiddenSandboxRuns: 0 })) };
     render(<AgentNotebook projectId="proj_1" api={api} />);

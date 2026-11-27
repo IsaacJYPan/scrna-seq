@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Bot, Loader2, NotebookPen, RefreshCw, ShieldCheck, StickyNote, X } from 'lucide-react';
+import { Bot, ClipboardList, Loader2, NotebookPen, RefreshCw, ShieldCheck, StickyNote, X } from 'lucide-react';
 import ExactDetails from './ExactDetails';
 import AgentRunNotebook from './AgentRunNotebook';
 import AiAuthorshipBadge from './AiAuthorshipBadge';
@@ -13,11 +13,15 @@ import { AGENT_NOTEBOOK_TABS, agentNotebookTabLabel } from '../../shared/agentNo
 // like a notebook and filed under the analysis tab each step serves.
 // Verified-code runs show the reviewed release and the agent's parameter
 // choices; an agent's own script shows its R as numbered cells and stays
-// flagged as AI-written code; notes are the agent's Markdown between cells.
+// flagged as AI-written code; notes are the agent's Markdown between cells;
+// ledger cells are the agent's recorded decisions, labels, findings, issues
+// and checklist answers, each with the outputs it cites.
 // Cells are records: nothing here edits them.
 
 const NO_API = {};
-const REFRESH_MS = 60000;
+// Agents record ledger entries as they work; re-read often enough that a
+// person watching sees them arrive.
+const REFRESH_MS = 15000;
 const safeUrl = (url) => (/^(https?:|mailto:|#)/i.test(String(url || '')) ? url : '');
 
 // App tabs that show the cells of a notebook tab. Plot tabs read the
@@ -46,7 +50,7 @@ function CellFrame({ index, kind, children, label }) {
   return (
     <section aria-label={label} className="grid min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] gap-2">
       <span className="pt-3 text-right font-mono text-xs text-textMuted" aria-hidden="true">[{index}]</span>
-      <div className={`min-w-0 rounded-lg border p-4 ${kind === 'note' ? 'border-dashed border-border bg-transparent' : 'border-border bg-surface/50'}`}>
+      <div className={`min-w-0 rounded-lg border p-4 ${kind === 'note' || kind === 'ledger' ? 'border-dashed border-border bg-transparent' : 'border-border bg-surface/50'}`}>
         {children}
       </div>
     </section>
@@ -173,6 +177,49 @@ function NoteCell({ cell, index }) {
   );
 }
 
+const LEDGER_KIND_LABEL = {
+  decision: 'Decision', annotation: 'Cluster label', finding: 'Finding', issue: 'Issue', check: 'Checklist',
+};
+
+function ledgerBadge(cell) {
+  if (cell.entryKind === 'issue') return cell.status === 'open' ? 'open' : cell.status;
+  if (cell.entryKind === 'check') return cell.status ? cell.status.replace('_', ' ') : null;
+  return cell.confidence ? `${cell.confidence} confidence` : null;
+}
+
+function LedgerCell({ cell, index, projectId, api }) {
+  const label = LEDGER_KIND_LABEL[cell.entryKind] || 'Ledger entry';
+  const badge = ledgerBadge(cell);
+  const warn = (cell.entryKind === 'issue' && cell.status === 'open') || cell.confidence === 'low';
+  return (
+    <CellFrame index={index} kind="ledger" label={`Cell ${index}: ${label.toLowerCase()} from ${cell.agent?.displayName || 'an agent'}`}>
+      <p className="mb-1 flex flex-wrap items-center gap-1 text-xs text-textMuted">
+        <ClipboardList size={12} aria-hidden="true" /> {label} by {cell.agent?.displayName || 'an agent'} · {formatDate(cell.createdAt)}
+        {badge && <span className={`ml-1 rounded border px-1.5 text-[10px] font-bold uppercase ${warn ? 'border-warning/40 bg-warning/10 text-text' : 'border-border'}`}>{badge}</span>}
+        {cell.sampleSupport && <span className="ml-1 text-[10px]">samples: {cell.sampleSupport.replace('_', ' ')}</span>}
+      </p>
+      <p className="text-sm font-bold text-text">{cell.title}</p>
+      {cell.summary && <p className="mt-1 text-sm text-text">{cell.summary}</p>}
+      {cell.markers.length > 0 && <p className="mt-1 text-xs text-textMuted">Markers: {cell.markers.join(', ')}</p>}
+      {cell.alternatives.length > 0 && <p className="text-xs text-textMuted">Alternatives: {cell.alternatives.join(', ')}</p>}
+      {cell.evidence.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs">
+          {cell.evidence.map((ref) => {
+            const text = [ref.file, ref.locator && `@ ${ref.locator}`, ref.value && `= ${ref.value}`, ref.valueCheck === 'matched' && '✓'].filter(Boolean).join(' ');
+            const href = ref.sandboxRunId && ref.file ? api.agentSandboxFileUrl?.(projectId, ref.sandboxRunId, ref.file) : null;
+            return (
+              <li key={`${ref.sandboxRunId || ref.runId}:${ref.file}:${ref.locator || ''}`} className="break-words text-textMuted">
+                {href ? <a href={href} target="_blank" rel="noreferrer" className="text-primary underline">{text}</a> : text}
+                <span className="ml-1 text-[10px]">{ref.sandboxRunId || ref.runId}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </CellFrame>
+  );
+}
+
 // The cells, numbered from 1, with a heading wherever the analysis step
 // changes (the full notebook) or without headings (one tab's cells).
 export function AgentNotebookCells({ cells, projectId, api = NO_API, theme, canWrite = false, showTabHeadings = true, onOpenTab }) {
@@ -191,7 +238,8 @@ export function AgentNotebookCells({ cells, projectId, api = NO_API, theme, canW
     rows.push(
       cell.kind === 'verified' ? <VerifiedCell key={cell.id} {...common} />
         : cell.kind === 'agent_code' ? <AgentCodeCell key={cell.id} {...common} canWrite={canWrite} onOpenReview={onOpenTab ? () => onOpenTab('agents') : null} />
-          : <NoteCell key={cell.id} cell={cell} index={index} />,
+          : cell.kind === 'ledger' ? <LedgerCell key={cell.id} {...common} />
+            : <NoteCell key={cell.id} cell={cell} index={index} />,
     );
   });
   return <div className="space-y-3">{rows}</div>;
@@ -221,7 +269,7 @@ export function useAgentNotebook(projectId, api = NO_API) {
     if (String(event?.projectId) === String(projectId)) load();
   }), [projectId, load]);
   // Agents work through their own API, so the app never polls their jobs;
-  // re-read once a minute while the page is visible.
+  // re-read every few seconds while the page is visible.
   useEffect(() => {
     if (!projectId || !api.getAgentNotebook) return undefined;
     const timer = setInterval(() => {

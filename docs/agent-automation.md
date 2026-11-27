@@ -498,6 +498,9 @@ under the analysis tab each step serves. The tabs are fixed
   readable steps with each output under the step that wrote it, and the review
   state. A person sees the runs of sandboxes they may review (their own, or
   all for owners and admins); others are only counted.
+- **Ledger cells** are the agent's [analysis ledger](#analysis-ledger) entries
+  (decisions, cluster labels, findings, issues, checklist answers) with the
+  outputs they cite, visible to the sponsor, owners and admins.
 - **Notes** are short Markdown cells an agent places between steps
   (`POST …/notebook/notes` with `{ requestId, tab, markdown }`, `report.write`,
   at most 8000 characters and 500 per delegation). They are idempotent by
@@ -570,10 +573,13 @@ runs skipped or did only superficially:
 - integrated versus unintegrated structure
 - more than one clustering resolution
 - the sample make-up of every cluster
-- a label with marker evidence for every cluster
+- a label with marker evidence for every cluster, with the top markers that do
+  not fit explained
 - canonical markers for every expected lineage, including absent ones
 - re-clustering each major compartment
-- malignant versus normal cells
+- an independent signal behind any state call that expression clusters alone
+  cannot make (malignant versus normal, infected versus bystander,
+  perturbation or donor assignment)
 - replicate-aware comparisons
 - every finding checked in each sample
 - every anomaly investigated
@@ -594,6 +600,17 @@ entry is `INVALID_LEDGER_ENTRY` with `details.field`. Entries are append-only
 (`agent_ledger_entries`) and idempotent by `requestId`. A newer annotation for
 the same group, or a newer check for the same item, supersedes the older one in
 the audit.
+
+**Recorded as the agent works.** Ledger entries appear in the
+[agent notebook](#agent-notebook) as cells under their tab as soon as they are
+written. The notebook re-reads every 15 seconds while it is open, so a person
+watching sees the reasoning arrive. Ledger cells are shown to the sponsor and to
+project owners and admins, the same people who can review the runs they cite.
+To keep the ledger current, an agent that holds `report.write` cannot start a
+sandbox run while more than one of its finished runs is not cited by any
+ledger entry. That submission is refused with `409 LEDGER_BEHIND`, and
+`details.runs` lists the runs waiting for an entry. A short decision, issue or
+check citing the run is enough.
 
 **The audit** (`GET …/ledger/audit[?reportId=]`, MCP `get_ledger_audit`) is
 computed from the entries on every read.

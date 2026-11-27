@@ -19,7 +19,7 @@ function verifiedRun(id, release, createdAt, extra = {}) {
   };
 }
 
-function service({ verified = [], sandboxRuns = [], notes = [], hiddenRuns = 0 } = {}) {
+function service({ verified = [], sandboxRuns = [], notes = [], ledger = [], hiddenRuns = 0 } = {}) {
   const queries = [];
   const db = {
     requireProjectRole: async () => ({ role: 'viewer' }),
@@ -27,6 +27,7 @@ function service({ verified = [], sandboxRuns = [], notes = [], hiddenRuns = 0 }
       queries.push([sql, params]);
       if (sql.includes('FROM study_envelopes')) return { rows: [{ id: 'study_1', objective: 'Remove doublets first.' }] };
       if (sql.includes('FROM agent_notebook_notes')) return { rows: notes };
+      if (sql.includes('FROM agent_ledger_entries')) return { rows: ledger };
       throw new Error(`unexpected query: ${sql}`);
     },
   };
@@ -93,6 +94,26 @@ describe('agent notebook read model', () => {
     expect(deg.cells.map((c) => c.id)).toEqual(['run_2']);
     expect(deg.tabs.find((t) => t.id === 'qc').cellCount).toBe(2);
     await expect(notebook.readForHuman(human, 'proj_1', { tab: 'bogus' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('shows analysis ledger entries as cells under their tab, as they are written', async () => {
+    const { notebook, queries } = service({
+      notes: [{ id: 'nbn_1', analysis_tab: 'qc', body_markdown: 'Start.', agent_principal_id: 'ap_1',
+        agent_display_name: 'Analyst agent', created_at: new Date('2026-11-20T10:00:00Z') }],
+      ledger: [{
+        id: 'led_1', analysis_tab: 'cluster', agent_principal_id: 'ap_1', agent_display_name: 'Analyst agent',
+        created_at: new Date('2026-11-20T10:05:00Z'),
+        entry_json: { kind: 'issue', tab: 'cluster', title: 'IGKC in myeloid', observation: 'IGKC is high in cluster 11.', status: 'open',
+          evidence: [{ sandboxRunId: 'sbr_1', file: 'markers.csv', locator: 'row cluster=11, gene=IGKC, column avg_log2FC', value: '2.1' }] },
+      }],
+    });
+    const book = await notebook.readForHuman(human, 'proj_1');
+    expect(book.cells.map((c) => [c.id, c.kind, c.tab])).toEqual([['nbn_1', 'note', 'qc'], ['led_1', 'ledger', 'cluster']]);
+    expect(book.cells[1]).toMatchObject({ entryKind: 'issue', title: 'IGKC in myeloid', summary: 'IGKC is high in cluster 11.',
+      status: 'open', evidence: [{ sandboxRunId: 'sbr_1', value: '2.1' }] });
+    // A viewer sees only the ledgers of agents they sponsor.
+    const ledgerQuery = queries.find(([sql]) => sql.includes('FROM agent_ledger_entries'));
+    expect(ledgerQuery[1]).toEqual(['proj_1', false, 7]);
   });
 
   it('is for people; agents read their own cells through the automation API', async () => {

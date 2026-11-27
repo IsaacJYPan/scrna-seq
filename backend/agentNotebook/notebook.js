@@ -4,19 +4,23 @@
 // order it happened, each filed under the analysis tab it serves
 // (shared/agentNotebookTabs.mjs).
 //
-// Three kinds of cell:
+// Four kinds of cell:
 //   verified    a run of a reviewed workflow or library method through a study.
 //               Its code is the reviewed release; the cell shows the release,
 //               the study's objective and the agent's parameter choices.
 //   agent_code  an agent's own R script from a sandbox, flagged as AI-written
 //               code until a person promotes or discards it.
 //   note        a short Markdown note the agent placed between its cells.
+//   ledger      an analysis ledger entry (shared/analysisLedger.mjs): a
+//               decision, cluster label, finding, issue or checklist answer
+//               with the outputs it cites. They appear as the agent records
+//               them, so the notebook shows its reasoning while it works.
 //
 // Cells are read-only records. Agents only ever append: a run or note, once
 // written, is not edited or reordered (the tables are append-only).
 
 const crypto = require('crypto');
-const { READ_ROLES, codedError } = require('../policy/agentCapabilities');
+const { READ_ROLES, MANAGE_ROLES, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('../automation/automationAudit');
 const {
   AGENT_NOTEBOOK_TABS, AGENT_NOTEBOOK_TAB_IDS, isAgentNotebookTab, agentNotebookTabLabel, tabForRelease,
@@ -131,6 +135,42 @@ function noteCell(row) {
   };
 }
 
+function ledgerSummary(entry) {
+  switch (entry.kind) {
+    case 'decision': return entry.choice;
+    case 'annotation': return `${entry.grouping} ${entry.group}: ${entry.label}`;
+    case 'finding': return entry.statement;
+    case 'issue': return entry.status === 'open' ? entry.observation : (entry.resolution || entry.observation);
+    case 'check': return entry.note || '';
+    default: return '';
+  }
+}
+
+function ledgerCell(row) {
+  const entry = row.entry_json || {};
+  const tab = isAgentNotebookTab(row.analysis_tab) ? row.analysis_tab : 'explore';
+  return {
+    kind: 'ledger',
+    id: row.id,
+    tab,
+    tabLabel: agentNotebookTabLabel(tab),
+    createdAt: iso(row.created_at),
+    agent: { principalId: row.agent_principal_id, displayName: row.agent_display_name },
+    authorship: 'ai_written',
+    entryKind: entry.kind,
+    title: entry.title,
+    summary: ledgerSummary(entry),
+    confidence: entry.confidence || null,
+    sampleSupport: entry.sampleSupport || null,
+    status: entry.status || null,
+    item: entry.item || null,
+    markers: entry.markers || [],
+    alternatives: entry.alternatives || [],
+    refersTo: entry.refersTo || null,
+    evidence: entry.evidence || [],
+  };
+}
+
 // Oldest first, so the notebook reads top to bottom; ties broken by id so
 // the order is stable between reads.
 function ordered(cells) {
@@ -156,6 +196,11 @@ function notebook(cells, { tab, hiddenSandboxRuns = 0 } = {}) {
   };
 }
 
+const LEDGER_SELECT = `
+  SELECT e.*, ap.display_name AS agent_display_name
+    FROM agent_ledger_entries e
+    JOIN agent_principals ap ON ap.id = e.agent_principal_id`;
+
 const NOTE_SELECT = `
   SELECT n.*, ap.display_name AS agent_display_name
     FROM agent_notebook_notes n
@@ -174,16 +219,23 @@ function createAgentNotebookService({ db, withTransaction, admission, sandboxes 
 
   async function readForHuman(actor, projectId, { tab } = {}) {
     requireHuman(actor);
-    await db.requireProjectRole(actor.userId, projectId, READ_ROLES);
+    const membership = await db.requireProjectRole(actor.userId, projectId, READ_ROLES);
     const verified = admission ? (await admission.listRunsForHuman(actor, projectId)).runs : [];
     const sandbox = sandboxes ? await sandboxes.notebookRunsForHuman(actor, projectId) : { runs: [], hiddenRuns: 0 };
     const { rows: notes } = await db.query(
       `${NOTE_SELECT} WHERE n.project_id = $1 ORDER BY n.created_at DESC, n.id DESC LIMIT 1000`, [String(projectId)]);
+    // Ledger entries cite the sponsor's private sandbox outputs, so they are
+    // shown to the same people as those runs: the sponsor, owners and admins.
+    const { rows: ledger } = await db.query(
+      `${LEDGER_SELECT} WHERE e.project_id = $1 AND ($2::boolean OR e.sponsor_user_id = $3)
+        ORDER BY e.created_at DESC, e.id DESC LIMIT 2000`,
+      [String(projectId), MANAGE_ROLES.includes(membership?.role), actor.userId]);
     const objectives = await objectivesFor(projectId, verified);
     return notebook([
       ...verified.map((run) => verifiedCell(run, objectives)),
       ...sandbox.runs.map(agentCodeCell),
       ...notes.map(noteCell),
+      ...ledger.map(ledgerCell),
     ], { tab, hiddenSandboxRuns: sandbox.hiddenRuns });
   }
 
@@ -195,11 +247,15 @@ function createAgentNotebookService({ db, withTransaction, admission, sandboxes 
     const { rows: notes } = await db.query(
       `${NOTE_SELECT} WHERE n.project_id = $1 AND n.delegation_id = $2 ORDER BY n.created_at DESC, n.id DESC LIMIT 1000`,
       [projectId, actor.delegation.id]);
+    const { rows: ledger } = await db.query(
+      `${LEDGER_SELECT} WHERE e.project_id = $1 AND e.delegation_id = $2 ORDER BY e.created_at DESC, e.id DESC LIMIT 2000`,
+      [projectId, actor.delegation.id]);
     const objectives = await objectivesFor(projectId, verified);
     return notebook([
       ...verified.map((run) => verifiedCell(run, objectives)),
       ...sandbox.runs.map(agentCodeCell),
       ...notes.map(noteCell),
+      ...ledger.map(ledgerCell),
     ], { tab });
   }
 
