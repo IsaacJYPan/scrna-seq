@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Local analysis ledger for offline evaluation runs (scripts/eval-agent-replication).
+// Local analysis ledger for offline evaluation runs (scripts/eval-agent-replication/README.md).
 // It applies the same validation and audit as the server
 // (shared/analysisLedger.mjs) to a ledger.jsonl file in the current folder.
 // Evidence files must exist under the current folder, as the server requires
