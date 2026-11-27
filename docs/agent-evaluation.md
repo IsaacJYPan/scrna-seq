@@ -184,8 +184,8 @@ refused a run while more than one finished run lacked an interpretation.
 ### What the interpretation step changed
 
 - **The reasoning arrives during the run.** Runs F and G wrote 9 and 15
-  interpretations between their 14 and 17 runs. In each, the next step named
-  in the interpretation is the run that followed. Run F wrote a prediction
+  interpretations between their 14 and 17 runs. In run F, each next step
+  named in an interpretation was carried out in the runs that followed. Run F wrote a prediction
   before characterize-groups, then recorded it as partly confirmed: WNT,
   NF-κB, cycling and interferon yes, keratinization no.
 - **Unbiased enrichment found the programs; agents did not have to guess gene
