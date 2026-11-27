@@ -1928,7 +1928,8 @@
         "Genes are ranked by signed -log10(p) from Seurat FindAllMarkers / FindMarkers (Wilcoxon) on at most max-cells-per-group cells per group, rather than by a precomputed statistic.",
         "Condition contrasts are cell-level and descriptive: they rank genes within a group and do not replace replicate-aware (pseudobulk) testing.",
         "Collections are taken from the msigdbr version installed in the image, offline.",
-        "Pathways whose contrast NES has the same sign in every group (median |NES| at least consistent-nes) are reported as one \"all groups\" signal, even when no single group reaches FDR < 0.05."
+        "Pathways whose contrast NES has the same sign in every group are reported as one \"all groups\" signal when the per-group p-values, combined (Stouffer) and corrected across pathways, reach FDR < 0.05 and the median |NES| is at least consistent-nes, even when no single group reaches FDR < 0.05.",
+        "The \"all groups\" combination treats groups as independent; when every group comes from the same libraries (one library per condition), read it as a ranking, not a replicate-level test."
       ],
       "parameters": [
         {

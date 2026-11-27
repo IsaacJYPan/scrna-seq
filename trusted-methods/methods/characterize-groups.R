@@ -56,7 +56,7 @@ run_gsea <- function(ranks, group, contrast) {
   result <- suppressWarnings(fgsea(pathways, ranks, minSize = params[["min-set-size"]], maxSize = 500, eps = 0))
   if (!nrow(result)) return(NULL)
   data.frame(group = group, contrast = contrast, collection = sub(":.*$", "", result$pathway),
-             pathway = sub("^[^:]*:", "", result$pathway), NES = round(result$NES, 4), padj = signif(result$padj, 4),
+             pathway = sub("^[^:]*:", "", result$pathway), NES = round(result$NES, 4), pval = signif(result$pval, 4), padj = signif(result$padj, 4),
              size = result$size, leading_edge = vapply(result$leadingEdge, function(g) paste(head(g, 12), collapse = ","), ""))
 }
 
@@ -111,21 +111,28 @@ for (key in unique(paste(markers$group, markers$contrast, sep = "\r"))) {
     name = e$pathway, score = e$NES, padj = e$padj)
 }
 # A contrast effect that points the same way in every group can be real even
-# when no single group reaches significance (few cells per group): report
-# pathways whose NES has the same sign in all groups as one "all groups" signal.
-# The strongest are kept per collection, so a large collection (immunologic
-# has thousands of sets) cannot crowd out a hallmark or GO pathway.
+# when no single group reaches significance (few cells per group). For each
+# pathway with the same NES sign in every group, the per-group p-values are
+# combined (Stouffer, one-sided in the shared direction) and corrected across
+# pathways; those with combined FDR < 0.05 and median |NES| >= consistent-nes
+# are reported as one "all groups" signal, the strongest first within each
+# collection so a large collection cannot crowd out a small one.
 for (contrast in setdiff(unique(enrichment$contrast), "group_vs_rest")) {
   e <- enrichment[enrichment$contrast == contrast, ]
   n_groups <- length(unique(e$group))
   if (n_groups < 2) next
   by_path <- split(e, paste(e$collection, e$pathway, sep = "\r"))
   consistent <- do.call(rbind, lapply(by_path, function(d) {
-    if (nrow(d) < n_groups || length(unique(sign(d$NES))) != 1 || median(abs(d$NES)) < params[["consistent-nes"]]) return(NULL)
-    data.frame(collection = d$collection[[1]], pathway = d$pathway[[1]], score = round(median(d$NES), 4), padj = min(d$padj))
+    if (nrow(d) < n_groups || length(unique(sign(d$NES))) != 1) return(NULL)
+    z <- sum(qnorm(pmin(pmax(d$pval / 2, 1e-300), 0.5), lower.tail = FALSE)) / sqrt(nrow(d))
+    data.frame(collection = d$collection[[1]], pathway = d$pathway[[1]], score = round(median(d$NES), 4),
+               p = pnorm(z, lower.tail = FALSE))
   }))
-  if (!is.null(consistent) && nrow(consistent)) {
-    consistent <- do.call(rbind, lapply(split(consistent, consistent$collection), function(d) head(d[order(-abs(d$score)), ], top_n)))
+  if (is.null(consistent) || !nrow(consistent)) next
+  consistent$padj <- signif(p.adjust(consistent$p, "BH"), 4)
+  consistent <- consistent[consistent$padj < 0.05 & abs(consistent$score) >= params[["consistent-nes"]], ]
+  if (nrow(consistent)) {
+    consistent <- do.call(rbind, lapply(split(consistent, consistent$collection), function(d) head(d[order(d$padj, -abs(d$score)), ], top_n * 2)))
     signal_rows[[length(signal_rows) + 1]] <- data.frame(
       source = "characterize-groups", group = "all groups", contrast = contrast, kind = "pathway",
       name = consistent$pathway, score = consistent$score, padj = consistent$padj)
