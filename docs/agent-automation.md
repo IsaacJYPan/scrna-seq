@@ -565,6 +565,29 @@ Definitions and validation live in `shared/analysisLedger.mjs`.
 | `finding` | One claim the report will make | `statement`, `confidence`, `sampleSupport` (`all`, `most`, `one`, `not_checked`, `not_applicable`); evidence with a locator or value |
 | `issue` | Something unexpected | `observation`; closed by a later issue entry with `refersTo`, `status` `resolved` (with evidence) or `accepted` (with a reason) |
 | `check` | One item of the standard checklist | `item`, `status` (`done` with evidence, `not_applicable` or `blocked` with a note) |
+| `interpretation` | What one or more runs showed, as biology, and what to do next | `observation`, `meaning`, at least one `alternatives` explanation, the `test` that would tell them apart, `nextStep`, `confidence`, evidence; `outcome` (`confirmed`, `refuted`, `partly`, `inconclusive`) with `refersTo` when it settles a prediction |
+| `prediction` | What the agent expects a run to show, written before the run | `expectation`, `rationale` |
+
+**Interpretation between steps.** The blind runs kept the biology for the end:
+they clustered, labelled and compared, and only the report said what the
+results meant. Signals that should have changed the next step went unread (a
+coagulation factor marking the expanded monocyte subset, MHC-II genes on a glial
+subcluster). An `interpretation` entry makes the agent say, after each run, what
+it saw, what it means biologically, what else could explain it, what would tell
+the explanations apart, and what it will do next. A `prediction` written before
+a run and settled by a later interpretation's `outcome` makes expectations
+explicit, so a refuted expectation is visible instead of being explained away.
+
+The trusted method **`characterize-groups`** gives the interpretation an
+unbiased starting point. It ranks every group's markers (and, with
+`condition-column` and `reference`, every group's condition contrast) and runs
+preranked GSEA (fgsea) against MSigDB collections (hallmark, GO BP, Reactome,
+KEGG, immunologic; msigdbr 7.5.1). Its `signals` output lists the strongest
+genes and pathways per group and contrast in a fixed shape (`source, group,
+contrast, kind, name, score, padj`), plus pathways that move the same way in
+every group (`group` = `all groups`), which catches contrast effects too weak
+to reach significance in any single small group. An agent's own sandbox script
+can write the same shape to a file ending in `signals.csv`.
 
 The **standard checklist** (`ANALYSIS_CHECKLIST`) covers the steps the blind
 runs skipped or did only superficially:
@@ -607,10 +630,11 @@ written. The notebook re-reads every 15 seconds while it is open, so a person
 watching sees the reasoning arrive. Ledger cells are shown to the sponsor and to
 project owners and admins, the same people who can review the runs they cite.
 To keep the ledger current, an agent that holds `report.write` cannot start a
-sandbox run while more than one of its finished runs is not cited by any
-ledger entry. That submission is refused with `409 LEDGER_BEHIND`, and
-`details.runs` lists the runs waiting for an entry. A short decision, issue or
-check citing the run is enough.
+sandbox run while more than one of its finished runs is not cited by an
+interpretation entry. That submission is refused with `409 LEDGER_BEHIND`, and
+`details.runs` lists the runs waiting for an interpretation. Other entry kinds
+citing the run do not count: the point is that the agent says what each run
+showed before deciding what to run next.
 
 **The audit** (`GET …/ledger/audit[?reportId=]`, MCP `get_ledger_audit`) is
 computed from the entries on every read.
@@ -623,11 +647,19 @@ computed from the entries on every read.
   and finished sandbox runs that no entry cites (`RUN_NOT_IN_LEDGER`; listed in
   `uncitedRuns`). Uncited runs are work the reviewer has not been told about,
   for example variants that were tried and dropped.
-- **Tables:** findings, labels, decisions and issues, each with its evidence,
-  and the checklist.
+  Also: runs no interpretation cites (`RUN_NOT_INTERPRETED`), predictions no
+  interpretation settled (`PREDICTION_UNTESTED`) or that were refuted
+  (`PREDICTION_REFUTED`), and strong signals no entry mentions
+  (`SIGNAL_NOT_INTERPRETED`, one per group and contrast with at least one
+  pathway or three genes). Signals are read from `characterize-groups` outputs
+  and sandbox files ending in `signals.csv`; a gene matches as a whole word and
+  a pathway by its name without the collection prefix, with underscores read
+  as spaces. `signalCoverage` counts how many were interpreted.
+- **Tables:** findings, labels, decisions, interpretations and issues, each
+  with its evidence, and the checklist.
 
 With `reportId`, the report's sections are checked against the ledger. Reports
-cite findings as `[F:<entry id>]` and labels as `[A:<entry id>]`.
+cite findings as `[F:<entry id>]`, labels as `[A:<entry id>]` and interpretations as `[N:<entry id>]`.
 
 **People** see each agent's ledger and audit at `GET
 /api/projects/:projectId/agent-ledgers`. Under *Agent access → Reports*, the

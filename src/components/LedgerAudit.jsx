@@ -13,7 +13,7 @@ export function ledgerAnchor(id) {
 
 // Turns [F:led_…] style citations into in-page links to the audit rows.
 export function linkLedgerCitations(markdown) {
-  return String(markdown || '').replace(/\[(F|A|D|I|C):([A-Za-z0-9_-]{1,80})\](?!\()/g, (_, kind, id) => `[${kind}:${id}](#${ledgerAnchor(id)})`);
+  return String(markdown || '').replace(/\[(F|A|D|I|C|N|P):([A-Za-z0-9_-]{1,80})\](?!\()/g, (_, kind, id) => `[${kind}:${id}](#${ledgerAnchor(id)})`);
 }
 
 function Evidence({ refs, fileUrl }) {

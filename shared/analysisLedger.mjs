@@ -459,7 +459,7 @@ export function auditLedger(entries, { reportText, runs, signals } = {}) {
   // Report cross-check: findings are cited as [F:<id>] and labels as [A:<id>].
   let citations = null;
   if (typeof reportText === 'string') {
-    const cited = new Set([...reportText.matchAll(/\[(?:F|A|D|I|C):([A-Za-z0-9_-]{1,80})\]/g)].map((match) => match[1]));
+    const cited = new Set([...reportText.matchAll(/\[(?:F|A|D|I|C|N|P):([A-Za-z0-9_-]{1,80})\]/g)].map((match) => match[1]));
     const unknown = [...cited].filter((id) => !byId.has(id));
     const uncited = findings.filter((finding) => !cited.has(finding.id));
     citations = { cited: cited.size, unknown, uncitedFindings: uncited.map((finding) => finding.id) };
@@ -644,5 +644,5 @@ export const LEDGER_PROTOCOL = Object.freeze([
   'After the first global clustering, re-cluster each major compartment the tissue has on its own (for example immune, lymphoid, myeloid, stromal, endothelial, neural, epithelial or tumor) and annotate the subtypes; global clusters hide them.',
   'Check each finding in every sample and record whether it holds in all, most, or one.',
   `Cite numbers from tables with a locator of the form "${LOCATOR_GRAMMAR}" and the value as written in the file; the ledger checks the value against the file and refuses a mismatch.`,
-  'Before writing the report, read get_ledger_audit and close every blocking gap. In the report, cite findings as [F:<id>] and labels as [A:<id>] so each claim links to its evidence.',
+  'Before writing the report, read get_ledger_audit and close every blocking gap. In the report, cite findings as [F:<id>], labels as [A:<id>] and interpretations as [N:<id>] so each claim links to its evidence.',
 ]);

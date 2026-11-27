@@ -23,8 +23,12 @@ are in [docs/agent-evaluation.md](../../docs/agent-evaluation.md).
   question and the data format.
 - The local ledger tool's `run` command stands in for a sandbox run. It runs a
   script, records which outputs it wrote in `runs.jsonl`, and refuses the next
-  script while more than one finished run is uncited (`LEDGER_BEHIND`), as the
-  server does.
+  script while more than one finished run has no interpretation entry citing it
+  (`LEDGER_BEHIND`), as the server does. Its `method` command runs a trusted
+  library method (for example `characterize-groups`) through
+  `run-trusted-method.R` as a recorded run, with outputs under
+  `outputs/methods/`. The local `audit` reads every `*signals.csv` output and
+  lists strong signals no entry interprets.
 
 To run one:
 

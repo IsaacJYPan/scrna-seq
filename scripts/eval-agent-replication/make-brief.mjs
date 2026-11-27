@@ -18,8 +18,8 @@ const COMMON = `## Environment and rules
 
 - Run R with \`Rscript\`. R 4.3, Seurat 5.0.1, SeuratObject, SingleR (no celldex
   reference downloads available), scran, scuttle, bluster, glmGamPoi, edgeR,
-  limma, DESeq2, GSVA, fgsea (no msigdbr; write gene sets yourself if needed),
-  org.Hs.eg.db (human only), ComplexHeatmap, pheatmap, ggplot2, patchwork, cowplot.
+  limma, DESeq2, GSVA, fgsea, msigdbr 7.5.1 (MSigDB gene sets, human and mouse,
+  available offline), org.Hs.eg.db (human only), ComplexHeatmap, pheatmap, ggplot2, patchwork, cowplot.
   Not available: harmony, scDblFinder, CellChat, infercnv, monocle, SCENIC, internet.
   If you want a method that isn't installed, implement a simple, standard version
   yourself or state the limitation.
@@ -50,7 +50,10 @@ QC/normalize/cluster, multi-sample Seurat, cluster markers, doublet detection,
 subset cells, re-cluster with batch integration, manual cluster labeling,
 cell-cycle scoring, AddModuleScore signatures, expression figures, differential
 abundance (propeller), trajectory (slingshot), ambient RNA (decontX), pseudobulk
-DE (edgeR), SingleR annotation, GSEA (fgsea), CellChat.
+DE (edgeR), SingleR annotation, GSEA (fgsea), CellChat, and characterize-groups
+(unbiased GSEA of every group, and of a condition contrast within every group,
+against MSigDB collections). characterize-groups is available here as a
+reviewed method; see the ledger tool's \`method\` command below.
 
 Mirror that structure on disk:
 
@@ -82,14 +85,20 @@ entry:
 \`\`\`
 L="${LEDGER_TOOL}"
 $L run scripts/NN_tab_name.R [args]   # runs the script, saves logs/, records which outputs it wrote
-$L add '<json entry>'                 # validates and appends; prints the new id (D1, A3, F2, I1, C5 ...)
+$L method characterize-groups <analysis.rds> group-column=<metadata column> species=human|mouse \\
+   [collections=hallmark,go-bp,reactome,kegg,immunologic] [condition-column=<col> reference=<level>] [min-cells=20]
+                                      # reviewed method: writes outputs/methods/<run>_characterize-groups/
+                                      # (signals.csv, enrichment.csv, markers.csv, pathway-heatmap.png)
+$L add '<json entry>'                 # validates and appends; prints the new id (D1, A3, F2, I1, C5, N4, P1 ...)
 $L list [kind]
 $L audit --report report/report.md --out report/audit.md
 \`\`\`
 
-Run the tool from this directory. \`$L run\` refuses to start a script while more
-than one finished run has no ledger entry citing one of its outputs
-(LEDGER_BEHIND): record what each run showed as you go. Evidence \`file\` paths
+Run the tool from this directory. \`$L run\` and \`$L method\` refuse to start
+while more than one finished run has no **interpretation** entry citing one of
+its outputs (LEDGER_BEHIND): say what each run showed, and what it means,
+before deciding what to run next. The audit lists strong signals in any
+\`signals.csv\` output (genes and pathways) that no entry mentions by name. Evidence \`file\` paths
 are relative to this directory and must exist.
 
 Entry kinds (all need \`kind\`, \`tab\`, \`title\`; \`evidence\` is a list of
@@ -102,6 +111,8 @@ checked against the file):
 - \`finding\`: \`statement\`, \`confidence\`, \`sampleSupport\` (all/most/one/not_checked/not_applicable), optional \`limitations\`; evidence with at least one locator/value.
 - \`issue\`: \`observation\` (status defaults to open). Close it with a new issue entry \`{status: resolved|accepted, refersTo: <issue id>, resolution, evidence}\`.
 - \`check\`: \`item\` (one of the checklist keys below), \`status\` (done/not_applicable/blocked), \`note\` (required unless done), evidence when done.
+- \`interpretation\`: \`observation\` (what the run showed), \`meaning\` (what it means biologically), \`alternatives\` (list: other explanations, technical or biological), \`test\` (what result would tell them apart), \`nextStep\`, \`confidence\`, evidence (cite the run's outputs). To settle a prediction add \`refersTo\` (the prediction id) and \`outcome\` (confirmed/refuted/partly/inconclusive).
+- \`prediction\`: \`expectation\` (what you expect the next run to show), \`rationale\`.
 
 Protocol:
 

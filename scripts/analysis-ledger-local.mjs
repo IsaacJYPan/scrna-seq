@@ -9,18 +9,22 @@
 //   node analysis-ledger-local.mjs list [kind]
 //   node analysis-ledger-local.mjs audit [--report report/report.md] [--out audit.md]
 //   node analysis-ledger-local.mjs run scripts/NN_tab_name.R [args...]
+//   node analysis-ledger-local.mjs method <method-key> <analysis.rds> [key=value...]
 //
 // `run` mirrors a sandbox run: it runs the script with Rscript, saves the
 // console to logs/, records which files under outputs/ the run wrote, and,
 // like the server (LEDGER_BEHIND), refuses to start while more than one
-// finished run has no ledger entry citing one of its outputs.
+// finished run has no interpretation entry citing one of its outputs.
+// `method` runs one trusted library method (trusted-methods/) the same way,
+// through eval-agent-replication/run-trusted-method.R, writing its outputs to
+// outputs/methods/<run>_<method-key>/, as the app records a workflow run.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { auditLedger, normalizeLedgerEntry, renderAuditMarkdown, LedgerValidationError, checkCitedValue, parseSignals } from '../shared/analysisLedger.mjs';
 
-const PREFIX = { decision: 'D', annotation: 'A', finding: 'F', issue: 'I', check: 'C' };
+const PREFIX = { decision: 'D', annotation: 'A', finding: 'F', issue: 'I', check: 'C', interpretation: 'N', prediction: 'P' };
 
 export function readLedger(file) {
   if (!fs.existsSync(file)) return [];
@@ -70,24 +74,27 @@ export function unrecordedRuns(root) {
   return readRuns(root).filter((run) => run.status === 0 && run.outputs.length && !run.outputs.some((file) => cited.has(file)));
 }
 
-function runScript(root, script, args) {
+const TRUSTED_RUNNER = path.join(path.dirname(new URL(import.meta.url).pathname), 'eval-agent-replication', 'run-trusted-method.R');
+
+function runScript(root, script, args, { external = false } = {}) {
   const waiting = unrecordedRuns(root);
   if (waiting.length > MAX_UNRECORDED_RUNS) {
     throw new LedgerValidationError(`LEDGER_BEHIND: interpret your finished runs before starting another. `
       + `${waiting.length} finished run(s) have no interpretation entry citing their outputs: ${waiting.map((run) => `${run.id} (${run.script})`).join(', ')}.`, 'run');
   }
-  if (!fs.existsSync(path.join(root, script))) throw new LedgerValidationError(`Script not found: ${script}.`, 'run');
+  if (!external && !fs.existsSync(path.join(root, script))) throw new LedgerValidationError(`Script not found: ${script}.`, 'run');
   const before = new Map(listFiles(path.join(root, 'outputs')));
   const startedAt = new Date().toISOString();
   const result = spawnSync('Rscript', [script, ...args], { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   const log = `${result.stdout || ''}${result.stderr || ''}`;
   fs.mkdirSync(path.join(root, 'logs'), { recursive: true });
-  const logFile = path.join('logs', `${path.basename(script, '.R')}${args.length ? `_${args.join('_').replace(/[^A-Za-z0-9._-]/g, '')}` : ''}.log`);
+  const logName = external ? `method_R${readRuns(root).length + 1}_${args[0]}` : path.basename(script, '.R');
+  const logFile = path.join('logs', `${logName}${args.length && !external ? `_${args.join('_').replace(/[^A-Za-z0-9._-]/g, '')}` : ''}.log`);
   fs.writeFileSync(path.join(root, logFile), log);
   const outputs = listFiles(path.join(root, 'outputs'))
     .filter(([file, mtime]) => before.get(file) !== mtime).map(([file]) => path.join('outputs', file));
   const runs = readRuns(root);
-  const run = { id: `R${runs.length + 1}`, script, args, startedAt, finishedAt: new Date().toISOString(), status: result.status, log: logFile, outputs };
+  const run = { id: `R${runs.length + 1}`, script: external ? `trusted method ${args[0]}` : script, args, startedAt, finishedAt: new Date().toISOString(), status: result.status, log: logFile, outputs };
   fs.appendFileSync(path.join(root, 'runs.jsonl'), `${JSON.stringify(run)}\n`);
   return { run, log };
 }
@@ -107,6 +114,17 @@ function main(argv) {
     const { run, log } = runScript(root, rest[0], rest.slice(1));
     process.stdout.write(`${log.split('\n').slice(-80).join('\n')}\n`);
     process.stdout.write(`run ${run.id} exited ${run.status}; wrote ${run.outputs.length} output(s): ${run.outputs.join(', ')}; full log ${run.log}\n`);
+    if (run.status === 0 && run.outputs.length) process.stdout.write(`Write an interpretation of ${run.id} (cite one of its outputs) before running more than one further script.\n`);
+    return;
+  }
+  if (command === 'method') {
+    const [key, analysis, ...params] = rest;
+    if (!key || !analysis) throw new LedgerValidationError('usage: method <method-key> <analysis.rds> [key=value...]', 'run');
+    if (!fs.existsSync(path.join(root, analysis))) throw new LedgerValidationError(`Analysis object not found: ${analysis}.`, 'run');
+    const outDir = path.join('outputs', 'methods', `R${readRuns(root).length + 1}_${key.replace(/[^A-Za-z0-9-]/g, '')}`);
+    const { run, log } = runScript(root, TRUSTED_RUNNER, [key, analysis, outDir, ...params], { external: true });
+    process.stdout.write(`${log.split('\n').slice(-40).join('\n')}\n`);
+    process.stdout.write(`run ${run.id} (trusted method ${key}) exited ${run.status}; wrote ${run.outputs.length} output(s): ${run.outputs.join(', ')}; full log ${run.log}\n`);
     if (run.status === 0 && run.outputs.length) process.stdout.write(`Write an interpretation of ${run.id} (cite one of its outputs) before running more than one further script.\n`);
     return;
   }
@@ -137,7 +155,7 @@ function main(argv) {
     for (const gap of gaps) process.stdout.write(`[${gap.severity}] ${gap.code}: ${gap.message}\n`);
     return;
   }
-  process.stdout.write('usage: add <json>|add - ; list [kind] ; audit [--report file] [--out file] ; run <script.R> [args]\n');
+  process.stdout.write('usage: add <json>|add - ; list [kind] ; audit [--report file] [--out file] ; run <script.R> [args] ; method <key> <analysis.rds> [key=value...]\n');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

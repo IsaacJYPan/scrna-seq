@@ -601,6 +601,8 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
     expect(agentAudit.data.citations).toEqual({ cited: 1, unknown: [], uncitedFindings: [] });
     expect(agentAudit.data.uncitedRuns).toEqual([]);
     expect(agentAudit.data.gaps.filter((gap) => gap.code === 'CHECK_MISSING')).toHaveLength(CHECKLIST_KEYS.length);
+    // The run is cited by a finding but no interpretation says what it showed.
+    expect(agentAudit.data.gaps.filter((gap) => gap.severity === 'review').map((gap) => gap.code)).toContain('RUN_NOT_INTERPRETED');
 
     const shown = await api(server, `${ctx.base}/agent-reports/${reportId}`, { token: ctx.sponsor.token });
     expect(shown.data.ledgerAudit.counts.blocker).toBe(CHECKLIST_KEYS.length);
@@ -617,7 +619,7 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
     expect(rows.map((row) => row.action)).toEqual(['report.finalized-with-ledger-gaps']);
 
     const exported = (await api(server, `${ctx.base}/agent-reports/${reportId}/export`, { token: ctx.sponsor.token })).data;
-    expect(exported).toContain(`_Analysis ledger: ${CHECKLIST_KEYS.length} blocking gap(s) and 1 item(s) to review; see the Audit section._`);
+    expect(exported).toContain(`_Analysis ledger: ${CHECKLIST_KEYS.length} blocking gap(s) and 2 item(s) to review; see the Audit section._`);
     expect(exported).toContain('## Audit');
     expect(exported).toContain(`| ${finding.data.entry.id} | Two clusters of 10 and 12 cells. | high | one | \`${run.id}:clusters.csv\` @ column n = 10, 12 |`);
   });

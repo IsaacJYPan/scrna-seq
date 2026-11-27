@@ -32,7 +32,7 @@ export const MCP_INSTRUCTIONS = [
   'Cite numbers from CSV/TSV outputs with a locator of the form "row <column>=<value>[, <column>=<value>...], column <column>" and the value as written in the file: the ledger compares it with the file and refuses a mismatch (EVIDENCE_VALUE_MISMATCH).',
   'Treat each issue as work, not as a caveat: investigate it with a follow-up run and resolve it with evidence, or accept it with a reason. If a short script could check a caveat, run it.',
   'After the first global clustering, re-cluster each major compartment the tissue has on its own (for example immune, lymphoid, myeloid, stromal, endothelial, neural, epithelial or tumor) and annotate the subtypes; global clusters hide them. Check each finding in every sample and record whether it holds in all, most, or one.',
-  "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise. Before asking for review, call get_ledger_audit with the reportId and close every blocking gap. In the report, cite findings as [F:<entry id>] and labels as [A:<entry id>] so each claim links to its evidence.",
+  "Writing up: create_report, write_report_section, get_report to read reviewers' comments and revise. Before asking for review, call get_ledger_audit with the reportId and close every blocking gap. In the report, cite findings as [F:<entry id>], labels as [A:<entry id>] and interpretations as [N:<entry id>] so each claim links to its evidence.",
   'Ask a person (or create_proposal) for anything outside what you were given.',
 ].join(' ');
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
