@@ -484,6 +484,7 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
   it('records entries citing verified run outputs, rejects evidence it cannot find, and replays by requestId', async () => {
     const ctx = await setup();
     const run = await withRun(ctx);
+    expect((await ctx.agent('/ledger/audit')).data.uncitedRuns).toEqual([{ id: run.id, title: 'Cluster and plot' }]);
     const finding = {
       kind: 'finding', tab: 'cluster', title: 'Two clusters', statement: 'The sample has two clusters of 10 and 12 cells.',
       confidence: 'high', sampleSupport: 'all',
@@ -556,6 +557,7 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
 
     const agentAudit = await ctx.agent(`/ledger/audit?reportId=${reportId}`);
     expect(agentAudit.data.citations).toEqual({ cited: 1, unknown: [], uncitedFindings: [] });
+    expect(agentAudit.data.uncitedRuns).toEqual([]);
     expect(agentAudit.data.gaps.filter((gap) => gap.code === 'CHECK_MISSING')).toHaveLength(CHECKLIST_KEYS.length);
 
     const shown = await api(server, `${ctx.base}/agent-reports/${reportId}`, { token: ctx.sponsor.token });

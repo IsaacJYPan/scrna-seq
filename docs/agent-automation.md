@@ -602,7 +602,10 @@ computed from the entries on every read.
   citations of entries that do not exist, and a report that cites nothing.
 - **Review first:** blocked checklist items, issues accepted without a fix,
   findings seen in one sample or not checked across samples, low-confidence
-  findings and labels, and high-impact decisions whose alternative was not tried.
+  findings and labels, high-impact decisions whose alternative was not tried,
+  and finished sandbox runs that no entry cites (`RUN_NOT_IN_LEDGER`; listed in
+  `uncitedRuns`). Uncited runs are work the reviewer has not been told about,
+  for example variants that were tried and dropped.
 - **Tables:** findings, labels, decisions and issues, each with its evidence,
   and the checklist.
 

@@ -322,7 +322,10 @@ function latestBy(entries, keyOf) {
 // first. Entries are in append order and carry `id`.
 // `reportText` (optional) is the concatenated report, to flag findings that
 // the report states but never cites, and citations of unknown entries.
-export function auditLedger(entries, { reportText } = {}) {
+// `runs` (optional) are the agent's finished runs ({ id, title }), to flag
+// work no entry explains: variants tried and dropped are exactly what a
+// reviewer needs to see.
+export function auditLedger(entries, { reportText, runs } = {}) {
   const list = Array.isArray(entries) ? entries : [];
   const byId = new Map(list.map((entry) => [entry.id, entry]));
   const gaps = [];
@@ -389,6 +392,16 @@ export function auditLedger(entries, { reportText } = {}) {
     for (const finding of uncited) add('info', 'FINDING_NOT_IN_REPORT', `Finding not cited in the report: ${finding.title}`, [finding.id]);
   }
 
+  let uncitedRuns = null;
+  if (Array.isArray(runs)) {
+    const citedRuns = new Set(list.flatMap((entry) => (entry.evidence || []).map((ref) => ref.sandboxRunId || ref.runId)).filter(Boolean));
+    uncitedRuns = runs.filter((run) => !citedRuns.has(run.id)).map((run) => ({ id: run.id, title: run.title || null }));
+    if (uncitedRuns.length) {
+      const names = uncitedRuns.slice(0, 10).map((run) => run.title || run.id).join('; ');
+      add('review', 'RUN_NOT_IN_LEDGER', `${uncitedRuns.length} of ${runs.length} finished run(s) are not cited by any ledger entry: ${names}${uncitedRuns.length > 10 ? '; …' : ''}`, uncitedRuns.map((run) => run.id));
+    }
+  }
+
   const order = { blocker: 0, review: 1, info: 2 };
   gaps.sort((a, b) => order[a.severity] - order[b.severity]);
   const counts = { blocker: 0, review: 0, info: 0 };
@@ -419,6 +432,7 @@ export function auditLedger(entries, { reportText } = {}) {
       };
     }),
     citations,
+    uncitedRuns,
   };
 }
 

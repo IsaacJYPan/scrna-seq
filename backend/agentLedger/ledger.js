@@ -157,8 +157,13 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
 
   // The agent's own audit, optionally checked against a report's text, so it
   // can close the gaps before asking for review.
+  async function runsOf(projectId, delegationId) {
+    return sandboxes?.finishedRunsOfDelegation ? sandboxes.finishedRunsOfDelegation(projectId, delegationId) : undefined;
+  }
+
   async function auditForAgent(actor, { reportText } = {}) {
-    return auditLedger(await entriesForAgent(db, actor), { reportText });
+    const runs = await runsOf(actor.delegation.projectId, actor.delegation.id);
+    return auditLedger(await entriesForAgent(db, actor), { reportText, runs });
   }
 
   // People: the sponsor sees their agents' ledgers; owners and admins see
@@ -188,7 +193,9 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
     }
     return {
       schema: `${LEDGER_SCHEMA}.project`,
-      ledgers: [...byDelegation.values()].map((ledger) => ({ ...ledger, audit: auditLedger(ledger.entries) })),
+      ledgers: await Promise.all([...byDelegation.values()].map(async (ledger) => ({
+        ...ledger, audit: auditLedger(ledger.entries, { runs: await runsOf(projectId, ledger.delegationId) }),
+      }))),
     };
   }
 
@@ -199,7 +206,7 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
       `${ENTRY_SELECT} WHERE e.project_id = $1 AND e.delegation_id = $2 ORDER BY e.created_at, e.id`,
       [String(projectId), delegationId]);
     if (!rows.length) return null;
-    const audit = auditLedger(rows.map(publicEntry), { reportText });
+    const audit = auditLedger(rows.map(publicEntry), { reportText, runs: await runsOf(projectId, delegationId) });
     return { audit, markdown: renderAuditMarkdown(audit) };
   }
 

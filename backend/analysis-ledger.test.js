@@ -107,6 +107,15 @@ describe('ledger audit', () => {
     expect(cited.gaps.filter((gap) => gap.code === 'CITATION_UNKNOWN')).toHaveLength(1);
   });
 
+  it('flags finished runs that no entry cites', () => {
+    const entries = ids([finding({ evidence: [ref({ sandboxRunId: `sbr_${'a'.repeat(24)}` })] })]);
+    const runs = [{ id: `sbr_${'a'.repeat(24)}`, title: 'Markers' }, { id: `sbr_${'b'.repeat(24)}`, title: 'Resolution 1.2 try' }];
+    const audit = auditLedger(entries, { runs });
+    expect(audit.uncitedRuns).toEqual([{ id: `sbr_${'b'.repeat(24)}`, title: 'Resolution 1.2 try' }]);
+    expect(audit.gaps.find((gap) => gap.code === 'RUN_NOT_IN_LEDGER')).toMatchObject({ severity: 'review', message: expect.stringContaining('1 of 2 finished run(s)') });
+    expect(auditLedger(entries).uncitedRuns).toBeNull();
+  });
+
   it('renders the audit as a review packet with each claim next to its evidence', () => {
     const markdown = renderAuditMarkdown(auditLedger(ids([finding({ evidence: [ref({ sandboxRunId: `sbr_${'a'.repeat(24)}` })] })])));
     expect(markdown).toContain('## Audit');

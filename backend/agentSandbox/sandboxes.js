@@ -386,6 +386,15 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     return { runs: rows.map((row) => publicRun(row)), hiddenRuns: 0 };
   }
 
+  // Finished runs of one delegation, for the ledger audit's check that every
+  // run with outputs is cited by some ledger entry.
+  async function finishedRunsOfDelegation(projectId, delegationId) {
+    const { rows } = await db.query(
+      `${RUN_SELECT} WHERE sr.project_id = $1 AND sr.delegation_id = $2 ORDER BY sr.created_at, sr.id LIMIT 2000`,
+      [String(projectId), delegationId]);
+    return rows.filter((row) => runState(row) === 'draft_ready').map((row) => ({ id: row.id, title: row.title }));
+  }
+
   async function reviewRun(actor, projectId, runId, body = {}) {
     rejectUnknown(body, ['decision', 'note']);
     if (!['promoted', 'discarded'].includes(body.decision)) {
@@ -730,7 +739,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
   return {
     create, listForHuman, getForHuman, close, reviewRun, fileForHuman,
     listForAgent, getForAgent, submitRun, getRunForAgent, fileForAgent, tableForLedger, cancelForAgent,
-    runForHuman, notebookRunsForHuman, notebookRunsForAgent,
+    runForHuman, notebookRunsForHuman, notebookRunsForAgent, finishedRunsOfDelegation,
     listRemoteForAgent, readRemoteForAgent,
   };
 }
