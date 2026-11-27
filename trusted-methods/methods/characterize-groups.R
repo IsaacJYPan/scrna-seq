@@ -113,17 +113,19 @@ for (key in unique(paste(markers$group, markers$contrast, sep = "\r"))) {
 # A contrast effect that points the same way in every group can be real even
 # when no single group reaches significance (few cells per group): report
 # pathways whose NES has the same sign in all groups as one "all groups" signal.
+# The strongest are kept per collection, so a large collection (immunologic
+# has thousands of sets) cannot crowd out a hallmark or GO pathway.
 for (contrast in setdiff(unique(enrichment$contrast), "group_vs_rest")) {
   e <- enrichment[enrichment$contrast == contrast, ]
   n_groups <- length(unique(e$group))
   if (n_groups < 2) next
-  by_path <- split(e, e$pathway)
+  by_path <- split(e, paste(e$collection, e$pathway, sep = "\r"))
   consistent <- do.call(rbind, lapply(by_path, function(d) {
     if (nrow(d) < n_groups || length(unique(sign(d$NES))) != 1 || median(abs(d$NES)) < params[["consistent-nes"]]) return(NULL)
-    data.frame(pathway = d$pathway[[1]], score = round(median(d$NES), 4), padj = min(d$padj))
+    data.frame(collection = d$collection[[1]], pathway = d$pathway[[1]], score = round(median(d$NES), 4), padj = min(d$padj))
   }))
   if (!is.null(consistent) && nrow(consistent)) {
-    consistent <- head(consistent[order(-abs(consistent$score)), ], top_n * 2)
+    consistent <- do.call(rbind, lapply(split(consistent, consistent$collection), function(d) head(d[order(-abs(d$score)), ], top_n)))
     signal_rows[[length(signal_rows) + 1]] <- data.frame(
       source = "characterize-groups", group = "all groups", contrast = contrast, kind = "pathway",
       name = consistent$pathway, score = consistent$score, padj = consistent$padj)

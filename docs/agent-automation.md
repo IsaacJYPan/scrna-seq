@@ -614,8 +614,10 @@ file. The file's and the script's SHA-256 are recorded with the entry. A value
 cited from a CSV or TSV output with a locator of the form `row <column>=<value>[,
 <column>=<value>...], column <column>` is compared with that cell of the file
 (at the precision cited, and as a percentage when it ends in `%`). A different
-value is refused with `409 EVIDENCE_VALUE_MISMATCH` and the value found. Other
-locators are kept as text, and each reference records `valueCheck` (`matched`
+value is refused with `409 EVIDENCE_VALUE_MISMATCH` and the value found, and so
+is a table locator that cannot be checked: one that starts with `row` but does
+not parse, names a key column the table lacks, or matches more than one row (a
+pathway cited without its group). Other locators are kept as text, and each reference records `valueCheck` (`matched`
 or `unchecked`); the audit shows checked values with ✓. A
 workflow run must belong to the agent and have produced its result. Missing
 evidence is `EVIDENCE_NOT_FOUND` or `EVIDENCE_RUN_REQUIRED`, and a malformed

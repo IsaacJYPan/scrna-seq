@@ -208,11 +208,19 @@ describe('cited value check', () => {
     expect(check(fractions, 'f.csv', 'row compartment=Tumor, column sample2', '0.50')).toMatchObject({ status: 'mismatched', found: '0.4005' });
     expect(check(markers, 'm.csv', 'row cluster=9, gene=LEF1, column avg_log2FC', '3.04').status).toBe('mismatched');
     expect(check(markers, 'm.csv', 'row cluster=7, gene=LEF1, column logFC', '3.04').status).toBe('mismatched');
+    expect(check(markers, 'm.csv', 'row cell_type=T, column avg_log2FC', '3.04').status).toBe('mismatched');
+  });
+
+  it('refuses a locator that starts like a table row but does not parse', () => {
+    // Seen in a blind run: placeholder evidence that would otherwise pass unchecked.
+    expect(check(markers, 'm.csv', 'row ,column g12', 'x')).toMatchObject({ status: 'mismatched' });
+    expect(check(markers, 'm.csv', 'row cluster 7, column avg_log2FC', '3.04').status).toBe('mismatched');
+    // Also seen: a pathway cited without its group matched rows of several groups.
+    expect(check(markers, 'm.csv', 'row gene=LEF1, column avg_log2FC', '3.04')).toMatchObject({ status: 'mismatched', reason: expect.stringContaining('add a key column') });
   });
 
   it('leaves what it cannot locate unchecked rather than guessing', () => {
     expect(check(markers, 'm.csv', 'cluster 7 LEF1', '3.04').status).toBe('unchecked');
-    expect(check(markers, 'm.csv', 'row gene=LEF1, column avg_log2FC', '3.04').status).toBe('unchecked');
     expect(check(markers, 'umap.png', 'row gene=LEF1, column avg_log2FC', '3.04').status).toBe('unchecked');
   });
 });

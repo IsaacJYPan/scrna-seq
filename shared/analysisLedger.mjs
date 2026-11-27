@@ -200,6 +200,9 @@ function sameNumber(found, cited) {
 export function checkCitedValue(text, { file, locator, value }) {
   if (!value || !/\.(csv|tsv)$/i.test(String(file || ''))) return { status: 'unchecked', reason: 'not a table' };
   const parsed = parseTableLocator(locator);
+  // A locator that starts like a table row but does not parse is a mistake,
+  // not a free-text locator: refuse it rather than keep it unchecked.
+  if (!parsed && /^\s*row\b/i.test(String(locator || ''))) return { status: 'mismatched', reason: `the locator is not "${LOCATOR_GRAMMAR}"` };
   if (!parsed) return { status: 'unchecked', reason: `locator is not "${LOCATOR_GRAMMAR}"` };
   const rows = parseDelimited(String(text), /\.tsv$/i.test(file) ? '\t' : ',');
   if (rows.length < 2) return { status: 'unchecked', reason: 'empty table' };
@@ -211,12 +214,12 @@ export function checkCitedValue(text, { file, locator, value }) {
     return header[0] === '' && !header.includes(name) ? 0 : -1;
   };
   const keys = parsed.conditions.map(([name, wanted]) => [columnIndex(name), wanted]);
-  if (keys.some(([index]) => index < 0)) return { status: 'unchecked', reason: 'a row key is not a column of the table' };
+  if (keys.some(([index]) => index < 0)) return { status: 'mismatched', reason: 'a row key is not a column of the table' };
   const target = header.indexOf(parsed.column);
   if (target < 0) return { status: 'mismatched', reason: `the table has no column ${parsed.column}` };
   const hits = rows.slice(1).filter((row) => keys.every(([index, wanted]) => String(row[index] ?? '').trim() === wanted));
   if (!hits.length) return { status: 'mismatched', reason: 'no row matches the locator' };
-  if (hits.length > 1) return { status: 'unchecked', reason: 'the locator matches more than one row' };
+  if (hits.length > 1) return { status: 'mismatched', reason: `the locator matches ${hits.length} rows; add a key column (for example group or contrast) so it names one` };
   const found = String(hits[0][target] ?? '').trim();
   const numeric = sameNumber(found, value);
   if (numeric === true || (numeric === null && found === String(value).trim())) return { status: 'matched', found };
