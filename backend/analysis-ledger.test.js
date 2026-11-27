@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 const {
-  normalizeLedgerEntry, auditLedger, renderAuditMarkdown, ANALYSIS_CHECKLIST, CHECKLIST_KEYS, LEDGER_PROTOCOL, checkCitedValue,
+  normalizeLedgerEntry, auditLedger, renderAuditMarkdown, ANALYSIS_CHECKLIST, CHECKLIST_KEYS, LEDGER_PROTOCOL, checkCitedValue, parseSignals,
 } = require('../shared/analysisLedger.mjs');
 const { LEDGER_CHECKLIST_KEYS, MCP_INSTRUCTIONS } = require('../cli/traceomics-mcp.mjs');
 
@@ -124,6 +124,72 @@ describe('ledger audit', () => {
   });
 });
 
+describe('interpretation', () => {
+  const interpretation = (extra = {}) => ({
+    kind: 'interpretation', tab: 'deg', title: 'IFN genes lower in db/db monocytes',
+    observation: 'Stat1 and Gbp2 are lower in db/db monocytes in both surgery pairs.',
+    meaning: 'Type I/II interferon signaling is blunted in diabetic monocytes, which would weaken antigen presentation.',
+    alternatives: ['Fewer ISG-high monocytes rather than lower expression per cell', 'Library-level technical shift'],
+    test: 'Compare ISG scores within each monocyte subset, and the same genes in lymphocytes.',
+    nextStep: 'Run characterize-groups per monocyte subset with genotype as the contrast.',
+    confidence: 'medium', evidence: [ref()], ...extra,
+  });
+
+  it('needs the observation, its meaning, alternatives, a test and a next step, with evidence', () => {
+    expect(normalizeLedgerEntry(interpretation())).toMatchObject({ kind: 'interpretation', confidence: 'medium' });
+    expect(codeOf(() => normalizeLedgerEntry(interpretation({ alternatives: [] })))?.[1]).toBe('alternatives');
+    expect(codeOf(() => normalizeLedgerEntry(interpretation({ nextStep: '' })))?.[1]).toBe('nextStep');
+    expect(codeOf(() => normalizeLedgerEntry(interpretation({ evidence: [] })))?.[1]).toBe('evidence');
+    // Evaluating a prediction names it and the outcome.
+    expect(codeOf(() => normalizeLedgerEntry(interpretation({ outcome: 'confirmed' })))?.[1]).toBe('refersTo');
+    expect(normalizeLedgerEntry(interpretation({ refersTo: 'e1', outcome: 'refuted' }), { known: new Set(['e1']) }).outcome).toBe('refuted');
+  });
+
+  it('flags runs without an interpretation, predictions never evaluated, and refuted predictions', () => {
+    const sbr = (c) => `sbr_${c.repeat(24)}`;
+    const entries = ids([
+      { kind: 'prediction', tab: 'deg', title: 'IFN lower in db/db', expectation: 'ISGs lower', rationale: 'Hyperglycemia blunts IFN.', evidence: [] },
+      { kind: 'prediction', tab: 'deg', title: 'Coagulation up', expectation: 'F13a1 up', rationale: 'Thromboinflammation.', evidence: [] },
+      normalizeLedgerEntry(interpretation({ refersTo: 'e1', outcome: 'refuted', evidence: [ref({ sandboxRunId: sbr('a') })] }), { known: new Set(['e1']) }),
+    ]);
+    const audit = auditLedger(entries, { runs: [{ id: sbr('a'), title: 'DE' }, { id: sbr('b'), title: 'Markers' }] });
+    const codes = audit.gaps.map((gap) => gap.code);
+    expect(codes).toEqual(expect.arrayContaining(['PREDICTION_UNTESTED', 'PREDICTION_REFUTED', 'RUN_NOT_INTERPRETED']));
+    expect(audit.gaps.find((gap) => gap.code === 'PREDICTION_UNTESTED').entryIds).toEqual(['e2']);
+    expect(audit.gaps.find((gap) => gap.code === 'RUN_NOT_INTERPRETED').message).toContain('1 of 2');
+    expect(audit.predictions.map((p) => [p.id, p.outcome])).toEqual([['e1', 'refuted'], ['e2', null]]);
+    expect(renderAuditMarkdown(audit)).toContain('### Interpretations');
+  });
+
+  it('lists strong signals that no entry interprets, grouped by group and contrast', () => {
+    const table = [
+      'source,group,contrast,kind,name,score,padj',
+      'characterize-groups,3,db_db_vs_db_pos,pathway,HALLMARK_INTERFERON_GAMMA_RESPONSE,-2.55,2e-13',
+      'characterize-groups,3,db_db_vs_db_pos,pathway,HALLMARK_COAGULATION,1.38,0.02',
+      'characterize-groups,all groups,db_db_vs_db_pos,pathway,HALLMARK_COAGULATION,1.38,0.06',
+      'characterize-groups,7,group_vs_rest,gene,Cd74,3.6,1e-30',
+      'characterize-groups,7,group_vs_rest,gene,H2-Aa,3.4,1e-30',
+      'characterize-groups,7,group_vs_rest,gene,H2-Ab1,3.2,1e-30',
+    ].join('\n');
+    const signals = parseSignals(table, { source: 'signals.csv' });
+    expect(signals).toHaveLength(6);
+    expect(parseSignals('a,b\n1,2')).toEqual([]);
+    const entries = ids([normalizeLedgerEntry(interpretation({ observation: 'Interferon gamma response is lower in db/db.' }))]);
+    const audit = auditLedger(entries, { signals });
+    expect(audit.signalCoverage).toEqual({ total: 6, interpreted: 1 });
+    const messages = audit.gaps.filter((gap) => gap.code === 'SIGNAL_NOT_INTERPRETED').map((gap) => gap.message);
+    expect(messages).toEqual([
+      'Strong signals in 3 (db_db_vs_db_pos) that no entry interprets: HALLMARK_COAGULATION (+1.38)',
+      'Strong signals in all groups (db_db_vs_db_pos) that no entry interprets: HALLMARK_COAGULATION (+1.38)',
+      'Strong signals in 7 that no entry interprets: Cd74, H2-Aa, H2-Ab1',
+    ]);
+    // Naming the genes as markers counts as interpreting them.
+    const labeled = auditLedger([...entries, { id: 'e9', kind: 'annotation', tab: 'cluster', title: 'c7', grouping: 'g', group: '7',
+      label: 'MHC-II-high oligodendrocytes', markers: ['Cd74', 'H2-Aa', 'H2-Ab1'], confidence: 'high', alternatives: [], evidence: [ref()] }], { signals });
+    expect(labeled.gaps.some((gap) => gap.message.includes('in 7 that'))).toBe(false);
+  });
+});
+
 describe('cited value check', () => {
   const markers = '"p_val","avg_log2FC","cluster","gene"\n1e-10,3.0412,"7","LEF1"\n1e-5,1.2,"7","WNT5A"\n2e-3,0.9,"2","LEF1"\n';
   const fractions = '"","sample1","sample2"\n"Tumor",0.9614,0.4005\n"Immune",0.0300,0.4300\n';
@@ -158,6 +224,8 @@ describe('MCP server', () => {
     expect(MCP_INSTRUCTIONS).toContain('get_ledger_audit');
     expect(MCP_INSTRUCTIONS).toContain('re-cluster each major compartment');
     expect(MCP_INSTRUCTIONS).toContain('EVIDENCE_VALUE_MISMATCH');
+    expect(MCP_INSTRUCTIONS).toContain('characterize-groups');
+    expect(MCP_INSTRUCTIONS).toContain('interpretation');
     expect(LEDGER_PROTOCOL.length).toBeGreaterThan(0);
   });
 });

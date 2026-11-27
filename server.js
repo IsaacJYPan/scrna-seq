@@ -1729,6 +1729,7 @@ const agentServices = {
 };
 agentServices.ledger = require('./backend/agentLedger/ledger').createAgentLedgerService({
   db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes, admission: agentAdmission,
+  provider: durableStorage,
 });
 agentServices.reports = require('./backend/agentReports/reports').createReportService({
   db, withTransaction: agentDelegations.withTransaction, sandboxes: agentServices.sandboxes, ledger: agentServices.ledger,

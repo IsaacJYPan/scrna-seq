@@ -30,6 +30,7 @@ from the caller.
 | `label-clusters` | Seurat pbmc3k tutorial (`RenameIdents`) | all | Manual annotation from marker genes |
 | `module-score` | Seurat `AddModuleScore` (Tirosh 2016) | all | Signature scores (e.g. exhaustion, IFN response) |
 | `gene-figures` | Seurat visualization vignette | all | Dot, violin, feature and UMAP panels |
+| `characterize-groups` | fgsea vignette + MSigDB (msigdbr) | all | Unbiased pathway characterization of every cluster and within-cluster contrast; the signals table feeds the ledger audit |
 | `pseudobulk-de` | OSCA multi-sample DE / edgeR QL | all | Disease vs control DE within each cell type |
 | `abundance-propeller` | speckle vignette | all | Cell-type composition changes between conditions |
 | `trajectory-slingshot` | slingshot vignette | sc/snRNA | Lineages and pseudotime |

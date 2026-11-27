@@ -547,10 +547,36 @@ describe.skipIf(!CONFIGURED)('analysis ledger', () => {
     expect(behind.status).toBe(409);
     expect(behind.data).toMatchObject({ code: 'LEDGER_BEHIND' });
     expect(behind.data.details.runs.map((run) => run.id)).toEqual([first.id, second.id]);
+    // Any entry is not enough: the run needs an interpretation.
     await record(ctx, 'ledger-0000030', { kind: 'decision', tab: 'cluster', title: 'Resolution', choice: '0.5',
       alternatives: ['1.0'], rationale: 'Two stable clusters.', impact: 'low',
       evidence: [{ sandboxRunId: first.id, file: 'clusters.csv' }] });
+    expect((await submit(ctx, 'req-sandbox-0003')).data.code).toBe('LEDGER_BEHIND');
+    const interpreted = await record(ctx, 'ledger-0000031', { kind: 'interpretation', tab: 'cluster', title: 'Two populations',
+      observation: 'Two clusters of 10 and 12 cells.', meaning: 'Two cell states in the input.',
+      alternatives: ['A technical split by library size'], test: 'Compare nCount between the clusters.',
+      nextStep: 'Find markers of each cluster.', confidence: 'medium', evidence: [{ sandboxRunId: first.id, file: 'clusters.csv' }] });
+    expect(interpreted.status, JSON.stringify(interpreted.data)).toBe(201);
     expect((await submit(ctx, 'req-sandbox-0003')).status).toBe(201);
+  });
+
+  it('reads signals tables from run outputs and lists strong signals no entry interprets', async () => {
+    const ctx = await setup();
+    const run = (await submit(ctx)).data.run;
+    await completeSandboxJob(ctx, await jobIdOf(run.id), {
+      'clusters.csv': 'cluster,n\n1,10\n',
+      'characterize_signals.csv': 'source,group,contrast,kind,name,score,padj\nx,1,group_vs_rest,pathway,HALLMARK_COAGULATION,1.9,0.001\n',
+    });
+    const before = (await ctx.agent('/ledger/audit')).data;
+    expect(before.signalCoverage).toEqual({ total: 1, interpreted: 0 });
+    expect(before.gaps.find((gap) => gap.code === 'SIGNAL_NOT_INTERPRETED').message).toContain('HALLMARK_COAGULATION (+1.9)');
+    await record(ctx, 'ledger-0000040', { kind: 'interpretation', tab: 'explore', title: 'Clotting program in cluster 1',
+      observation: 'Coagulation genes are enriched in cluster 1.', meaning: 'A pro-thrombotic monocyte state.',
+      alternatives: ['Platelet doublets'], test: 'Check Ppbp/Pf4 co-expression.', nextStep: 'Score platelet genes per cell.',
+      confidence: 'low', evidence: [{ sandboxRunId: run.id, file: 'characterize_signals.csv' }] });
+    const after = (await ctx.agent('/ledger/audit')).data;
+    expect(after.signalCoverage).toEqual({ total: 1, interpreted: 1 });
+    expect(after.gaps.some((gap) => gap.code === 'RUN_NOT_INTERPRETED')).toBe(false);
   });
 
   it('needs report.write to record, and metadata.read to read', async () => {

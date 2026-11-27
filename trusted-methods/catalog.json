@@ -1896,6 +1896,201 @@
         "trusted:label-clusters",
         "trusted:spatial-svg"
       ]
+    },
+    {
+      "key": "characterize-groups",
+      "version": "1.0.0",
+      "title": "Characterize groups against gene-set collections (fgsea + MSigDB)",
+      "summary": "For every group, and optionally for a condition contrast within every group, ranks genes and runs preranked GSEA against full MSigDB collections (Hallmark, GO biological process, Reactome, KEGG, immunologic). Writes a signals table of the strongest genes and pathways that the analysis ledger audit checks for interpretation.",
+      "category": "scoring",
+      "modalities": [
+        "scrna",
+        "snrna",
+        "visium",
+        "imaging"
+      ],
+      "entry": "methods/characterize-groups.R",
+      "packages": [
+        "Seurat",
+        "fgsea",
+        "msigdbr"
+      ],
+      "provenance": {
+        "kind": "vignette",
+        "title": "fgsea vignette: preranked gene set enrichment",
+        "url": "https://bioconductor.org/packages/release/bioc/vignettes/fgsea/inst/doc/fgsea-tutorial.html",
+        "upstream": "ctlab/fgsea vignettes/fgsea-tutorial.Rmd; igordot/msigdbr",
+        "citation": "Korotkevich G et al. bioRxiv 2021 (fgsea); Liberzon A et al. Cell Syst 2015 (MSigDB Hallmark); Dolgalev I, msigdbr.",
+        "doi": "10.1101/060012",
+        "reviewedAgainst": "fgsea 1.28, msigdbr 7.5.1"
+      },
+      "deviations": [
+        "Genes are ranked by signed -log10(p) from Seurat FindAllMarkers / FindMarkers (Wilcoxon) on at most max-cells-per-group cells per group, rather than by a precomputed statistic.",
+        "Condition contrasts are cell-level and descriptive: they rank genes within a group and do not replace replicate-aware (pseudobulk) testing.",
+        "Collections are taken from the msigdbr version installed in the image, offline.",
+        "Pathways whose contrast NES has the same sign in every group (median |NES| at least consistent-nes) are reported as one \"all groups\" signal, even when no single group reaches FDR < 0.05."
+      ],
+      "parameters": [
+        {
+          "key": "group-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "seurat_clusters",
+          "role": "design",
+          "label": "Group column (clusters or labels)"
+        },
+        {
+          "key": "species",
+          "type": "choice",
+          "options": [
+            "human",
+            "mouse"
+          ],
+          "default": "human",
+          "role": "design",
+          "label": "Species"
+        },
+        {
+          "key": "collections",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 120,
+          "default": "hallmark,go-bp,reactome",
+          "role": "design",
+          "label": "Collections (hallmark, go-bp, reactome, kegg, immunologic)"
+        },
+        {
+          "key": "condition-column",
+          "type": "text",
+          "pattern": "column",
+          "maxLength": 64,
+          "default": "",
+          "role": "design",
+          "label": "Condition column for within-group contrasts (optional)"
+        },
+        {
+          "key": "reference",
+          "type": "text",
+          "pattern": "labels",
+          "maxLength": 60,
+          "default": "control",
+          "role": "design",
+          "label": "Reference condition"
+        },
+        {
+          "key": "min-cells",
+          "type": "integer",
+          "min": 5,
+          "max": 1000,
+          "default": 20,
+          "role": "design",
+          "label": "Minimum cells per group or condition"
+        },
+        {
+          "key": "max-cells-per-group",
+          "type": "integer",
+          "min": 100,
+          "max": 5000,
+          "default": 500,
+          "role": "tuning",
+          "label": "Cells per group used for ranking"
+        },
+        {
+          "key": "min-set-size",
+          "type": "integer",
+          "min": 5,
+          "max": 100,
+          "default": 15,
+          "role": "tuning",
+          "label": "Smallest gene set tested"
+        },
+        {
+          "key": "top-signals",
+          "type": "integer",
+          "min": 3,
+          "max": 50,
+          "default": 10,
+          "role": "display",
+          "label": "Signals per group and direction"
+        },
+        {
+          "key": "consistent-nes",
+          "type": "number",
+          "min": 0.5,
+          "max": 3,
+          "default": 1.3,
+          "role": "tuning",
+          "label": "Median |NES| for an effect consistent across all groups"
+        },
+        {
+          "key": "seed",
+          "type": "integer",
+          "min": 0,
+          "max": 2147483647,
+          "default": 1,
+          "role": "tuning",
+          "label": "Random seed"
+        }
+      ],
+      "outputs": {
+        "summary": {
+          "type": "metrics",
+          "label": "Characterization summary"
+        },
+        "signals": {
+          "type": "table",
+          "label": "Strongest genes and pathways per group (for the ledger audit)"
+        },
+        "enrichment": {
+          "type": "table",
+          "label": "Pathway enrichment per group and contrast"
+        },
+        "markers": {
+          "type": "table",
+          "label": "Ranked genes per group and contrast"
+        },
+        "pathway-heatmap": {
+          "type": "figure",
+          "label": "Top pathways per group"
+        }
+      },
+      "summaryOutput": "summary",
+      "metrics": [
+        {
+          "key": "n_groups",
+          "label": "groups",
+          "kind": "descriptive"
+        },
+        {
+          "key": "n_pathways_tested",
+          "label": "gene sets tested",
+          "kind": "descriptive"
+        },
+        {
+          "key": "n_significant_pathways",
+          "label": "pathways at FDR < 0.05",
+          "kind": "inferential"
+        }
+      ],
+      "resources": {
+        "cpus": 1,
+        "memoryMiB": 16384,
+        "maxWallSeconds": 3600
+      },
+      "accepts": [
+        "seurat-qc-cluster",
+        "seurat-multisample",
+        "spatial-seurat",
+        "trusted:subset-cells",
+        "trusted:recluster-integrate",
+        "trusted:label-clusters",
+        "trusted:cell-cycle",
+        "trusted:spatial-svg",
+        "trusted:spatial-niches",
+        "trusted:annotate-singler",
+        "trusted:spatial-banksy"
+      ]
     }
   ]
 }

@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { auditLedger, normalizeLedgerEntry, renderAuditMarkdown, LedgerValidationError, checkCitedValue } from '../shared/analysisLedger.mjs';
+import { auditLedger, normalizeLedgerEntry, renderAuditMarkdown, LedgerValidationError, checkCitedValue, parseSignals } from '../shared/analysisLedger.mjs';
 
 const PREFIX = { decision: 'D', annotation: 'A', finding: 'F', issue: 'I', check: 'C' };
 
@@ -65,15 +65,16 @@ export function readRuns(root) {
 }
 
 export function unrecordedRuns(root) {
-  const cited = new Set(readLedger(path.join(root, 'ledger.jsonl')).flatMap((entry) => entry.evidence.map((ref) => ref.file)));
+  const cited = new Set(readLedger(path.join(root, 'ledger.jsonl')).filter((entry) => entry.kind === 'interpretation')
+    .flatMap((entry) => entry.evidence.map((ref) => ref.file)));
   return readRuns(root).filter((run) => run.status === 0 && run.outputs.length && !run.outputs.some((file) => cited.has(file)));
 }
 
 function runScript(root, script, args) {
   const waiting = unrecordedRuns(root);
   if (waiting.length > MAX_UNRECORDED_RUNS) {
-    throw new LedgerValidationError(`LEDGER_BEHIND: record what your finished runs showed before starting another. `
-      + `${waiting.length} finished run(s) have no ledger entry citing their outputs: ${waiting.map((run) => `${run.id} (${run.script})`).join(', ')}.`, 'run');
+    throw new LedgerValidationError(`LEDGER_BEHIND: interpret your finished runs before starting another. `
+      + `${waiting.length} finished run(s) have no interpretation entry citing their outputs: ${waiting.map((run) => `${run.id} (${run.script})`).join(', ')}.`, 'run');
   }
   if (!fs.existsSync(path.join(root, script))) throw new LedgerValidationError(`Script not found: ${script}.`, 'run');
   const before = new Map(listFiles(path.join(root, 'outputs')));
@@ -106,7 +107,7 @@ function main(argv) {
     const { run, log } = runScript(root, rest[0], rest.slice(1));
     process.stdout.write(`${log.split('\n').slice(-80).join('\n')}\n`);
     process.stdout.write(`run ${run.id} exited ${run.status}; wrote ${run.outputs.length} output(s): ${run.outputs.join(', ')}; full log ${run.log}\n`);
-    if (run.status === 0 && run.outputs.length) process.stdout.write(`Record what ${run.id} showed in the ledger (cite one of its outputs) before running more than one further script.\n`);
+    if (run.status === 0 && run.outputs.length) process.stdout.write(`Write an interpretation of ${run.id} (cite one of its outputs) before running more than one further script.\n`);
     return;
   }
   if (command === 'list') {
@@ -126,7 +127,9 @@ function main(argv) {
       const owner = runs.find((run) => run.outputs.includes(ref.file));
       return owner ? { ...ref, sandboxRunId: owner.id } : ref;
     }) }));
-    const audit = auditLedger(local, { reportText, runs: runs.map((run) => ({ id: run.id, title: run.script })) });
+    const signals = listFiles(path.join(root, 'outputs')).map(([file]) => file).filter((file) => /signals\.csv$/.test(file))
+      .flatMap((file) => parseSignals(fs.readFileSync(path.join(root, 'outputs', file), 'utf8'), { source: file }));
+    const audit = auditLedger(local, { reportText, runs: runs.map((run) => ({ id: run.id, title: run.script })), signals });
     const markdown = renderAuditMarkdown(audit);
     if (opt('--out')) fs.writeFileSync(path.join(root, opt('--out')), markdown);
     const gaps = audit.gaps.filter((gap) => gap.severity !== 'info');

@@ -17,11 +17,12 @@ const crypto = require('crypto');
 const { READ_ROLES, MANAGE_ROLES, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('../automation/automationAudit');
 const {
-  LEDGER_SCHEMA, normalizeLedgerEntry, auditLedger, renderAuditMarkdown, LedgerValidationError, checkCitedValue,
+  LEDGER_SCHEMA, normalizeLedgerEntry, auditLedger, renderAuditMarkdown, LedgerValidationError, checkCitedValue, parseSignals,
 } = require('../../shared/analysisLedger.mjs');
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
 const MAX_ENTRIES_PER_DELEGATION = 2000;
+const MAX_SIGNAL_TABLE_BYTES = 20 * 1024 * 1024;
 const ENTRY_KINDS = ['decision', 'annotation', 'finding', 'issue', 'check'];
 
 function requireHuman(actor) {
@@ -46,7 +47,7 @@ const ENTRY_SELECT = `
     FROM agent_ledger_entries e
     JOIN agent_principals ap ON ap.id = e.agent_principal_id`;
 
-function createAgentLedgerService({ db, withTransaction, sandboxes, admission }) {
+function createAgentLedgerService({ db, withTransaction, sandboxes, admission, provider }) {
   // Resolves every reference to a run the agent owns and records what was
   // cited (file checksum, script checksum), so the reviewer sees exactly the
   // bytes the agent read.
@@ -161,9 +162,37 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
     return sandboxes?.finishedRunsOfDelegation ? sandboxes.finishedRunsOfDelegation(projectId, delegationId) : undefined;
   }
 
+  // Signals tables of the delegation's runs: sandbox outputs named
+  // *signals.csv, and the `signals` output of trusted methods it ran.
+  async function signalsOf(projectId, delegationId) {
+    const signals = [];
+    if (sandboxes?.signalTablesOfDelegation) {
+      for (const table of await sandboxes.signalTablesOfDelegation(projectId, delegationId)) {
+        signals.push(...parseSignals(table.text, { source: `${table.runId}:${table.file}` }));
+      }
+    }
+    if (provider) {
+      const { rows } = await db.query(
+        `SELECT ar.id AS run_id, ja.storage_uri, ja.checksum_sha256, ja.size_bytes
+           FROM agent_runs ar JOIN job_artifacts ja ON ja.job_id = ar.job_id
+          WHERE ar.project_id = $1 AND ar.delegation_id = $2 AND ja.artifact_type = 'trusted_method_output'
+            AND ja.status = 'available' AND (ja.metadata_json::jsonb ->> 'port') = 'signals'
+            AND ja.size_bytes <= $3
+          ORDER BY ar.created_at DESC LIMIT 50`, [String(projectId), delegationId, MAX_SIGNAL_TABLE_BYTES]);
+      for (const row of rows) {
+        try {
+          const file = await provider.openVerifiedRead(row.storage_uri, { checksumSha256: row.checksum_sha256, sizeBytes: Number(row.size_bytes) });
+          try { signals.push(...parseSignals(await file.handle.readFile({ encoding: 'utf8' }), { source: row.run_id })); } finally { await file.handle.close(); }
+        } catch { /* an unreadable table is skipped; the audit still runs */ }
+      }
+    }
+    return signals.length ? signals : undefined;
+  }
+
   async function auditForAgent(actor, { reportText } = {}) {
     const runs = await runsOf(actor.delegation.projectId, actor.delegation.id);
-    return auditLedger(await entriesForAgent(db, actor), { reportText, runs });
+    const signals = await signalsOf(actor.delegation.projectId, actor.delegation.id);
+    return auditLedger(await entriesForAgent(db, actor), { reportText, runs, signals });
   }
 
   // People: the sponsor sees their agents' ledgers; owners and admins see
@@ -194,7 +223,9 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
     return {
       schema: `${LEDGER_SCHEMA}.project`,
       ledgers: await Promise.all([...byDelegation.values()].map(async (ledger) => ({
-        ...ledger, audit: auditLedger(ledger.entries, { runs: await runsOf(projectId, ledger.delegationId) }),
+        ...ledger, audit: auditLedger(ledger.entries, {
+          runs: await runsOf(projectId, ledger.delegationId), signals: await signalsOf(projectId, ledger.delegationId),
+        }),
       }))),
     };
   }
@@ -206,7 +237,9 @@ function createAgentLedgerService({ db, withTransaction, sandboxes, admission })
       `${ENTRY_SELECT} WHERE e.project_id = $1 AND e.delegation_id = $2 ORDER BY e.created_at, e.id`,
       [String(projectId), delegationId]);
     if (!rows.length) return null;
-    const audit = auditLedger(rows.map(publicEntry), { reportText, runs: await runsOf(projectId, delegationId) });
+    const audit = auditLedger(rows.map(publicEntry), {
+      reportText, runs: await runsOf(projectId, delegationId), signals: await signalsOf(projectId, delegationId),
+    });
     return { audit, markdown: renderAuditMarkdown(audit) };
   }
 

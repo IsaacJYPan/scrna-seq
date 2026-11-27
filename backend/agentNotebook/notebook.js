@@ -142,6 +142,8 @@ function ledgerSummary(entry) {
     case 'finding': return entry.statement;
     case 'issue': return entry.status === 'open' ? entry.observation : (entry.resolution || entry.observation);
     case 'check': return entry.note || '';
+    case 'interpretation': return [entry.observation, `Meaning: ${entry.meaning}`, `Next: ${entry.nextStep}`].join('\n');
+    case 'prediction': return entry.expectation;
     default: return '';
   }
 }
@@ -166,6 +168,10 @@ function ledgerCell(row) {
     item: entry.item || null,
     markers: entry.markers || [],
     alternatives: entry.alternatives || [],
+    meaning: entry.meaning || null,
+    test: entry.test || null,
+    nextStep: entry.nextStep || null,
+    outcome: entry.outcome || null,
     refersTo: entry.refersTo || null,
     evidence: entry.evidence || [],
   };

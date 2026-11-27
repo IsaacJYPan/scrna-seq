@@ -84,6 +84,7 @@ export default function LedgerAudit({ audit, fileUrl }) {
         <p className="mt-1 text-xs text-textMuted">
           Computed from the agent&apos;s analysis ledger. {counts.blocker} blocking gap{counts.blocker === 1 ? '' : 's'}, {counts.review} item{counts.review === 1 ? '' : 's'} to review, {answered} of {audit.checklist.length} checklist items answered.
           {audit.citations ? ` The report cites ${audit.citations.cited} ledger entr${audit.citations.cited === 1 ? 'y' : 'ies'}.` : ''}
+          {audit.signalCoverage ? ` ${audit.signalCoverage.interpreted} of ${audit.signalCoverage.total} strong signals are interpreted.` : ''}
         </p>
       </div>
       <GapList gaps={audit.gaps} severity="blocker" title="Blocking" />
@@ -116,6 +117,16 @@ export default function LedgerAudit({ audit, fileUrl }) {
           <td className={td}>{decision.alternatives.join(', ')}</td>
           <td className={td}>{decision.impact}</td>
           <td className={td}>{decision.sensitivity ? `${decision.sensitivity.checked ? 'Yes' : 'No'}: ${decision.sensitivity.summary}` : 'No'}</td>
+        </tr>
+      ))} />
+      <Table caption="Interpretations" columns={['ID', 'Observed', 'Meaning', 'Alternatives', 'Next step', 'Evidence']} rows={(audit.interpretations || []).map((entry) => (
+        <tr key={entry.id} id={ledgerAnchor(entry.id)}>
+          <td className={`${td} font-mono text-[10px]`}>{entry.id}</td>
+          <td className={td}>{entry.observation}{entry.outcome ? <span className="block text-textMuted">Prediction {entry.refersTo}: {entry.outcome}</span> : null}</td>
+          <td className={td}>{entry.meaning}</td>
+          <td className={td}>{entry.alternatives.join('; ')}{entry.test ? <span className="block text-textMuted">Test: {entry.test}</span> : null}</td>
+          <td className={td}>{entry.nextStep}</td>
+          <td className={td}><Evidence refs={entry.evidence} fileUrl={fileUrl} /></td>
         </tr>
       ))} />
       <Table caption="Issues" columns={['ID', 'Observation', 'Status', 'Resolution', 'Evidence']} rows={audit.issues.map((issue) => (

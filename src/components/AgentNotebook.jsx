@@ -179,18 +179,20 @@ function NoteCell({ cell, index }) {
 
 const LEDGER_KIND_LABEL = {
   decision: 'Decision', annotation: 'Cluster label', finding: 'Finding', issue: 'Issue', check: 'Checklist',
+  interpretation: 'Interpretation', prediction: 'Prediction',
 };
 
 function ledgerBadge(cell) {
   if (cell.entryKind === 'issue') return cell.status === 'open' ? 'open' : cell.status;
   if (cell.entryKind === 'check') return cell.status ? cell.status.replace('_', ' ') : null;
+  if (cell.entryKind === 'interpretation' && cell.outcome) return `prediction ${cell.outcome}`;
   return cell.confidence ? `${cell.confidence} confidence` : null;
 }
 
 function LedgerCell({ cell, index, projectId, api }) {
   const label = LEDGER_KIND_LABEL[cell.entryKind] || 'Ledger entry';
   const badge = ledgerBadge(cell);
-  const warn = (cell.entryKind === 'issue' && cell.status === 'open') || cell.confidence === 'low';
+  const warn = (cell.entryKind === 'issue' && cell.status === 'open') || cell.confidence === 'low' || cell.outcome === 'refuted';
   return (
     <CellFrame index={index} kind="ledger" label={`Cell ${index}: ${label.toLowerCase()} from ${cell.agent?.displayName || 'an agent'}`}>
       <p className="mb-1 flex flex-wrap items-center gap-1 text-xs text-textMuted">
@@ -199,9 +201,17 @@ function LedgerCell({ cell, index, projectId, api }) {
         {cell.sampleSupport && <span className="ml-1 text-[10px]">samples: {cell.sampleSupport.replace('_', ' ')}</span>}
       </p>
       <p className="text-sm font-bold text-text">{cell.title}</p>
-      {cell.summary && <p className="mt-1 text-sm text-text">{cell.summary}</p>}
+      {cell.entryKind === 'interpretation' ? (
+        <dl className="mt-1 space-y-1 text-sm text-text">
+          <div><dt className="inline font-bold">Observed: </dt><dd className="inline">{cell.summary?.split('\n')[0]}</dd></div>
+          <div><dt className="inline font-bold">Means: </dt><dd className="inline">{cell.meaning}</dd></div>
+          {cell.alternatives.length > 0 && <div><dt className="inline font-bold">Or: </dt><dd className="inline">{cell.alternatives.join('; ')}</dd></div>}
+          {cell.test && <div><dt className="inline font-bold">Would tell apart: </dt><dd className="inline">{cell.test}</dd></div>}
+          <div><dt className="inline font-bold">Next: </dt><dd className="inline">{cell.nextStep}</dd></div>
+        </dl>
+      ) : cell.summary && <p className="mt-1 text-sm text-text">{cell.summary}</p>}
       {cell.markers.length > 0 && <p className="mt-1 text-xs text-textMuted">Markers: {cell.markers.join(', ')}</p>}
-      {cell.alternatives.length > 0 && <p className="text-xs text-textMuted">Alternatives: {cell.alternatives.join(', ')}</p>}
+      {cell.entryKind !== 'interpretation' && cell.alternatives.length > 0 && <p className="text-xs text-textMuted">Alternatives: {cell.alternatives.join(', ')}</p>}
       {cell.evidence.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-xs">
           {cell.evidence.map((ref) => {

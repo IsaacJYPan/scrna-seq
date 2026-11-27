@@ -16,7 +16,8 @@
 
 export const LEDGER_SCHEMA = 'traceomics.analysis-ledger.v1';
 
-export const LEDGER_KINDS = Object.freeze(['decision', 'annotation', 'finding', 'issue', 'check']);
+export const LEDGER_KINDS = Object.freeze(['decision', 'annotation', 'finding', 'issue', 'check', 'interpretation', 'prediction']);
+export const PREDICTION_OUTCOME = Object.freeze(['confirmed', 'refuted', 'partly', 'inconclusive']);
 export const CONFIDENCE = Object.freeze(['high', 'medium', 'low']);
 export const IMPACT = Object.freeze(['high', 'medium', 'low']);
 export const SAMPLE_SUPPORT = Object.freeze(['all', 'most', 'one', 'not_checked', 'not_applicable']);
@@ -230,6 +231,8 @@ const KIND_FIELDS = Object.freeze({
   finding: ['statement', 'confidence', 'sampleSupport', 'limitations'],
   issue: ['observation', 'status', 'resolution'],
   check: ['item', 'status', 'note'],
+  interpretation: ['observation', 'meaning', 'alternatives', 'test', 'nextStep', 'confidence', 'outcome'],
+  prediction: ['expectation', 'rationale'],
 });
 
 // Validates one entry as an agent submits it and returns the normalized
@@ -309,7 +312,78 @@ export function normalizeLedgerEntry(input, { known = new Set() } = {}) {
     entry.note = str(input.note, 'note', LIMITS.text, { optional: entry.status === 'done' });
     if (entry.status === 'done' && !entry.evidence.length) fail('A done check needs evidence.', 'evidence');
   }
+
+  // What a result means, what else could explain it, how to tell them apart,
+  // and what to do next. Written after every run, it is what steers the
+  // analysis; the next run should follow from its nextStep.
+  if (kind === 'interpretation') {
+    entry.observation = str(input.observation, 'observation', LIMITS.text);
+    entry.meaning = str(input.meaning, 'meaning', LIMITS.text);
+    entry.alternatives = strList(input.alternatives, 'alternatives', { min: 1, itemMax: 1000 });
+    entry.test = str(input.test, 'test', LIMITS.text);
+    entry.nextStep = str(input.nextStep, 'nextStep', LIMITS.text);
+    entry.confidence = oneOf(input.confidence, CONFIDENCE, 'confidence');
+    // Evaluating a prediction: refer to it and say how it came out.
+    if (input.outcome !== undefined || entry.refersTo) {
+      entry.outcome = oneOf(input.outcome, PREDICTION_OUTCOME, 'outcome');
+      if (!entry.refersTo) fail('An interpretation with an outcome must refer to the prediction it evaluates.', 'refersTo');
+    }
+    if (!entry.evidence.length) fail('An interpretation needs evidence: the output it interprets.', 'evidence');
+  }
+
+  // What the agent (or the researcher) expects before a step, and why.
+  if (kind === 'prediction') {
+    entry.expectation = str(input.expectation, 'expectation', LIMITS.text);
+    entry.rationale = str(input.rationale, 'rationale', LIMITS.text);
+  }
   return entry;
+}
+
+// ── Signals ────────────────────────────────────────────────────────────────
+// A signals table lists the strongest genes and pathways of each group or
+// contrast (the `signals` output of the characterize-groups method, or any
+// run output named *signals.csv with the columns group, contrast, kind,
+// name, score). The audit asks that each be interpreted somewhere in the
+// ledger, so strong results are not silently passed over.
+
+export const SIGNAL_COLUMNS = Object.freeze(['group', 'contrast', 'kind', 'name', 'score']);
+
+export function parseSignals(text, { source } = {}) {
+  const rows = parseDelimited(String(text || ''));
+  if (rows.length < 2) return [];
+  const header = rows[0].map((cell) => cell.trim());
+  if (!SIGNAL_COLUMNS.every((column) => header.includes(column))) return [];
+  const index = Object.fromEntries(header.map((name, i) => [name, i]));
+  return rows.slice(1).map((row) => ({
+    source: source || null,
+    group: String(row[index.group] ?? '').trim(),
+    contrast: String(row[index.contrast] ?? '').trim(),
+    kind: String(row[index.kind] ?? '').trim(),
+    name: String(row[index.name] ?? '').trim(),
+    score: Number(row[index.score]),
+    padj: index.padj === undefined ? null : Number(row[index.padj]),
+  })).filter((signal) => signal.name);
+}
+
+function normalizeTerm(text) {
+  return String(text || '').toLowerCase().replace(/^(hallmark|gobp|go|reactome|kegg|biocarta|wp)_/, '').replace(/[_\s-]+/g, ' ').trim();
+}
+
+// Words an entry uses, for matching a signal's name: gene symbols match as
+// whole words; pathways match by their name without the collection prefix,
+// with underscores read as spaces.
+function ledgerText(entry) {
+  const fields = ['title', 'statement', 'observation', 'meaning', 'test', 'nextStep', 'label', 'choice', 'rationale',
+    'resolution', 'note', 'limitations', 'expectation'];
+  const parts = fields.map((field) => entry[field]).filter(Boolean);
+  for (const list of [entry.markers, entry.alternatives]) if (Array.isArray(list)) parts.push(list.join(' '));
+  return parts.join(' \n ');
+}
+
+function signalMentioned(signal, haystack, words) {
+  if (signal.kind === 'gene') return words.has(signal.name.toLowerCase());
+  const term = normalizeTerm(signal.name);
+  return term.length > 2 && haystack.includes(term);
 }
 
 function latestBy(entries, keyOf) {
@@ -325,7 +399,9 @@ function latestBy(entries, keyOf) {
 // `runs` (optional) are the agent's finished runs ({ id, title }), to flag
 // work no entry explains: variants tried and dropped are exactly what a
 // reviewer needs to see.
-export function auditLedger(entries, { reportText, runs } = {}) {
+// `signals` (optional) are rows of signals tables (parseSignals), to flag
+// strong genes and pathways that no entry interprets.
+export function auditLedger(entries, { reportText, runs, signals } = {}) {
   const list = Array.isArray(entries) ? entries : [];
   const byId = new Map(list.map((entry) => [entry.id, entry]));
   const gaps = [];
@@ -402,6 +478,47 @@ export function auditLedger(entries, { reportText, runs } = {}) {
     }
   }
 
+  // Interpretation: every finished run should be interpreted, predictions
+  // should be evaluated, and strong signals should be talked about.
+  const interpretations = list.filter((entry) => entry.kind === 'interpretation');
+  const evaluated = new Set(interpretations.filter((entry) => entry.refersTo).map((entry) => entry.refersTo));
+  for (const prediction of list.filter((entry) => entry.kind === 'prediction')) {
+    if (!evaluated.has(prediction.id)) add('review', 'PREDICTION_UNTESTED', `Prediction never evaluated: ${prediction.title}`, [prediction.id]);
+  }
+  for (const entry of interpretations.filter((item) => item.outcome === 'refuted')) {
+    add('review', 'PREDICTION_REFUTED', `A prediction was refuted; check that the surprise was followed up: ${entry.title}`, [entry.id, entry.refersTo]);
+  }
+  if (Array.isArray(runs) && runs.length) {
+    const interpretedRuns = new Set(interpretations.flatMap((entry) => entry.evidence.map((ref) => ref.sandboxRunId || ref.runId)).filter(Boolean));
+    const uninterpreted = runs.filter((run) => !interpretedRuns.has(run.id));
+    if (uninterpreted.length) {
+      add('review', 'RUN_NOT_INTERPRETED', `${uninterpreted.length} of ${runs.length} finished run(s) have no interpretation entry: ${uninterpreted.slice(0, 10).map((run) => run.title || run.id).join('; ')}${uninterpreted.length > 10 ? '; …' : ''}`, uninterpreted.map((run) => run.id));
+    }
+  }
+  let signalCoverage = null;
+  if (Array.isArray(signals) && signals.length) {
+    const haystack = normalizeTerm(list.map(ledgerText).join(' \n '));
+    const words = new Set(list.map(ledgerText).join(' ').toLowerCase().split(/[^a-z0-9.-]+/).filter(Boolean));
+    const unique = new Map();
+    for (const signal of signals) unique.set(`${signal.group}\u0000${signal.contrast}\u0000${signal.kind}\u0000${signal.name}`, signal);
+    const all = [...unique.values()];
+    const missing = all.filter((signal) => !signalMentioned(signal, haystack, words));
+    signalCoverage = { total: all.length, interpreted: all.length - missing.length };
+    const byGroup = new Map();
+    for (const signal of missing) {
+      const key = `${signal.group}${signal.contrast && signal.contrast !== 'group_vs_rest' ? ` (${signal.contrast})` : ''}`;
+      byGroup.set(key, [...(byGroup.get(key) || []), signal]);
+    }
+    for (const [group, items] of byGroup) {
+      const pathways = items.filter((item) => item.kind !== 'gene').sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+      const genes = items.filter((item) => item.kind === 'gene').sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+      if (!pathways.length && genes.length < 3) continue;
+      const names = [...pathways.slice(0, 5).map((item) => `${item.name} (${item.score > 0 ? '+' : ''}${item.score})`),
+        ...genes.slice(0, 5).map((item) => item.name)].join(', ');
+      add('review', 'SIGNAL_NOT_INTERPRETED', `Strong signals in ${group} that no entry interprets: ${names}`, []);
+    }
+  }
+
   const order = { blocker: 0, review: 1, info: 2 };
   gaps.sort((a, b) => order[a.severity] - order[b.severity]);
   const counts = { blocker: 0, review: 0, info: 0 };
@@ -431,8 +548,18 @@ export function auditLedger(entries, { reportText, runs } = {}) {
         evidence: close ? close.evidence : issue.evidence,
       };
     }),
+    interpretations: interpretations.map((entry) => ({
+      id: entry.id, title: entry.title, observation: entry.observation, meaning: entry.meaning,
+      alternatives: entry.alternatives, test: entry.test, nextStep: entry.nextStep, confidence: entry.confidence,
+      refersTo: entry.refersTo || null, outcome: entry.outcome || null, evidence: entry.evidence,
+    })),
+    predictions: list.filter((entry) => entry.kind === 'prediction').map((entry) => ({
+      id: entry.id, title: entry.title, expectation: entry.expectation, rationale: entry.rationale,
+      outcome: interpretations.find((item) => item.refersTo === entry.id)?.outcome || null,
+    })),
     citations,
     uncitedRuns,
+    signalCoverage,
   };
 }
 
@@ -490,6 +617,16 @@ export function renderAuditMarkdown(audit) {
     for (const issue of audit.issues) lines.push(`| ${issue.id} | ${cell(issue.observation)} | ${issue.status} | ${cell(issue.resolution || '—')} |`);
     lines.push('');
   }
+  if (audit.interpretations?.length) {
+    lines.push('### Interpretations', '', '| ID | Observation | Meaning | Alternatives | Test | Next step |', '| --- | --- | --- | --- | --- | --- |');
+    for (const entry of audit.interpretations) {
+      lines.push(`| ${entry.id} | ${cell(entry.observation)} | ${cell(entry.meaning)} | ${cell(entry.alternatives.join('; '))} | ${cell(entry.test)} | ${cell(entry.nextStep)} |`);
+    }
+    lines.push('');
+  }
+  if (audit.signalCoverage) {
+    lines.push(`Signals interpreted: ${audit.signalCoverage.interpreted} of ${audit.signalCoverage.total}.`, '');
+  }
   lines.push('### Checklist', '', '| Item | Status | Note |', '| --- | --- | --- |');
   for (const item of audit.checklist) lines.push(`| ${cell(item.title)} | ${item.status} | ${cell(item.note || '')} |`);
   lines.push('');
@@ -499,6 +636,9 @@ export function renderAuditMarkdown(audit) {
 // The protocol agents follow; used in the MCP server instructions and the
 // ledger tool descriptions so the wording stays the same everywhere.
 export const LEDGER_PROTOCOL = Object.freeze([
+  'After every run, write an interpretation entry before the next run: what you observed, what it means biologically (mechanism, function, cell state), the competing explanations (technical and biological), the result that would tell them apart, and the next step it implies. Make the next run follow from that next step; the analysis should read as observation, meaning, next step.',
+  'Characterize groups and contrasts with unbiased enrichment against full gene-set collections (the characterize-groups method), not only gene sets you wrote, and interpret its strongest signals; the audit lists strong signals no entry mentions.',
+  'Before a step whose outcome matters, record a prediction entry (what you expect and why), then evaluate it with an interpretation that refers to it and gives the outcome. Treat a refuted prediction as a surprise to investigate.',
   'Record your reasoning in the analysis ledger as you go, not at the end: a decision entry for every choice that could change results (thresholds, integration, resolution, gene sets), an annotation entry for every cluster you label (markers with values, confidence, alternatives), a finding entry for every claim you will make (with evidence that names the file and the exact row/value), an issue entry the moment something looks unexpected, and a check entry for each item of the standard checklist.',
   'Treat each issue as work, not as a caveat: investigate it with a follow-up run and resolve it with evidence, or accept it with a reason. If a short script could check a caveat, run it.',
   'After the first global clustering, re-cluster each major compartment the tissue has on its own (for example immune, lymphoid, myeloid, stromal, endothelial, neural, epithelial or tumor) and annotate the subtypes; global clusters hide them.',

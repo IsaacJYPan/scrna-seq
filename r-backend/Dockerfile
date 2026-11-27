@@ -93,12 +93,12 @@ RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r'
 # --build-arg INSTALL_TRUSTED_METHOD_PACKAGES=true to include them.
 ARG INSTALL_TRUSTED_METHOD_PACKAGES=false
 RUN if [ "$INSTALL_TRUSTED_METHOD_PACKAGES" = "true" ]; then \
-      install-r-packages trusted-method-cran -e "install.packages(c('harmony'), repos='https://cloud.r-project.org/')" \
+      install-r-packages trusted-method-cran -e "install.packages(c('harmony', 'babelgene'), repos='https://cloud.r-project.org/'); install.packages('https://cloud.r-project.org/src/contrib/Archive/msigdbr/msigdbr_7.5.1.tar.gz', repos=NULL, type='source'); stopifnot(as.character(packageVersion('msigdbr')) == '7.5.1')" \
       && install-r-packages trusted-method-bioconductor -e "BiocManager::install(c('SingleCellExperiment', 'scDblFinder', 'celda', 'speckle', 'slingshot', 'SingleR', 'celldex', 'Banksy'), ask=FALSE, update=FALSE)" \
       && install-r-packages trusted-method-seurat-wrappers -e "remotes::install_github('satijalab/seurat-wrappers', upgrade='never')" \
       && install-r-packages trusted-method-references -e "dir.create('/opt/traceomics/references', recursive=TRUE); for (name in c('HumanPrimaryCellAtlasData', 'BlueprintEncodeData', 'MonacoImmuneData', 'DatabaseImmuneCellExpressionData', 'MouseRNAseqData', 'ImmGenData')) saveRDS(getExportedValue('celldex', name)(), file.path('/opt/traceomics/references', paste0(name, '.rds')))" \
       && chmod -R a+rX /opt/traceomics/references \
-      && Rscript -e "required <- c('harmony', 'SingleCellExperiment', 'scDblFinder', 'celda', 'speckle', 'slingshot', 'SingleR', 'celldex', 'Banksy', 'SeuratWrappers'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing trusted-method packages: ', paste(missing, collapse=', '))"; \
+      && Rscript -e "required <- c('harmony', 'msigdbr', 'SingleCellExperiment', 'scDblFinder', 'celda', 'speckle', 'slingshot', 'SingleR', 'celldex', 'Banksy', 'SeuratWrappers'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing trusted-method packages: ', paste(missing, collapse=', '))"; \
     else \
       echo "Skipping trusted-method packages. Set INSTALL_TRUSTED_METHOD_PACKAGES=true to include them."; \
     fi

@@ -23,7 +23,7 @@ used to choose a trial.
 | `condition-pseudobulk` | Replicate-aware condition DE | `condition.pseudobulk_de.v1` | Accepted result of `seurat-qc-cluster`, `seurat-multisample` (cluster stage or later) | `contrastId` | selectable: `sampleCount`, `testedCellTypeCount`, `testedGeneCount`; inferential (not selectable): `significantResultCount` |
 | `study-workbench` | Multi-condition biological investigation and figures | `explore.summarize.v1` | Accepted result of `seurat-qc-cluster`, `seurat-multisample` (cluster stage or later) | `groupMap`, `conditionName`, `contrastId`, `targetGroup`, `species` | selectable: `nCells` |
 
-## Trusted method library (15)
+## Trusted method library (16)
 
 Each method is one R file and one entry in
 [`trusted-methods/catalog.json`](../trusted-methods/README.md), run in the isolated
@@ -46,3 +46,4 @@ sandbox under job type `trusted.method.v1`.
 | `pseudobulk-de` | Pseudobulk differential expression per cell type (edgeR) | `trusted.method.v1` | Accepted result of `seurat-multisample`, `subset-cells`, `recluster-integrate`, `label-clusters`, `cell-cycle`, `module-score`, `trajectory-slingshot`, `spatial-svg`, `spatial-niches`, `annotate-singler`, `spatial-banksy` | `cell-type-column`, `sample-column`, `condition-column`, `reference`, `test`, `donor-column`, `min-cells`, `min-samples`, `fdr` | selectable: `cell_types_tested`; inferential (not selectable): `total_significant` |
 | `annotate-singler` | Reference cell-type annotation (SingleR) | `trusted.method.v1` | Accepted result of `seurat-qc-cluster`, `seurat-multisample`, `spatial-seurat`, `recluster-integrate`, `subset-cells`, `cell-cycle` | `reference`, `label-level`, `cluster-column`, `label-column` | selectable: `n_labels`, `fraction_unassigned` |
 | `spatial-banksy` | Spatial domains (BANKSY) | `trusted.method.v1` | Accepted result of `spatial-seurat`, `subset-cells`, `recluster-integrate`, `label-clusters`, `spatial-svg` | — | selectable: `n_domains`, `smallest_domain` |
+| `characterize-groups` | Characterize groups against gene-set collections (fgsea + MSigDB) | `trusted.method.v1` | Accepted result of `seurat-qc-cluster`, `seurat-multisample`, `spatial-seurat`, `subset-cells`, `recluster-integrate`, `label-clusters`, `cell-cycle`, `spatial-svg`, `spatial-niches`, `annotate-singler`, `spatial-banksy` | `group-column`, `species`, `collections`, `condition-column`, `reference`, `min-cells` | selectable: `n_groups`, `n_pathways_tested`; inferential (not selectable): `n_significant_pathways` |

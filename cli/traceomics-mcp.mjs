@@ -27,7 +27,8 @@ export const MCP_INSTRUCTIONS = [
   'Write your own R only when nothing verified covers the step: list_sandboxes, run_r_script (with its reason), get_sandbox_run, read_sandbox_file. That code is flagged as AI-written; inputs are read-only and outputs stay drafts until a person reviews and promotes them. Keep scripts short and close to standard Seurat and Bioconductor calls so they are quick to review.',
   'Everything you do is laid out for people as a notebook, filed under the analysis tab it serves (qc, normalize, pca, integrate, cluster, umap, deg, enrichment, cellchat, explore). Verified runs are placed automatically; give run_r_script the `tab` of the step it serves. Use add_notebook_note for a short Markdown note before or after a step (what you are about to do, what a result means); get_notebook reads back your cells. Notes and runs are append-only.',
   'Remote data: list_remote_files and read_remote_file use only folders granted to the sandbox. Use remoteInputs to stage files read-only. Figures: list_figures, view_figure, get_figure_history.',
-  'Analysis ledger: record your reasoning as you go with record_ledger_entry, not at the end; people watch it arrive in the notebook, and a new sandbox run is refused (LEDGER_BEHIND) while more than one finished run is not cited by any entry. A decision entry for every choice that could change results (thresholds, integration, resolution, gene sets). An annotation entry for every cluster you label (markers with values, confidence, alternatives). A finding entry for every claim you will make, with evidence naming the run, file and exact row/value. An issue entry the moment something looks unexpected. A check entry for each item of the standard checklist.',
+  'After every run, record an interpretation with record_ledger_entry before the next run: what you observed, what it means biologically, the competing explanations, the result that would tell them apart, and the next step it implies; make the next run follow from that next step. A new sandbox run is refused (LEDGER_BEHIND) while more than one finished run has no interpretation. Characterize groups and contrasts with the characterize-groups trusted method (unbiased enrichment against full MSigDB collections) and interpret its strongest signals: the audit lists strong signals no entry mentions. Before a step whose outcome matters, record a prediction and later evaluate it.',
+  'Analysis ledger: record your reasoning as you go with record_ledger_entry, not at the end; people watch it arrive in the notebook. A decision entry for every choice that could change results (thresholds, integration, resolution, gene sets). An annotation entry for every cluster you label (markers with values, confidence, alternatives). A finding entry for every claim you will make, with evidence naming the run, file and exact row/value. An issue entry the moment something looks unexpected. A check entry for each item of the standard checklist.',
   'Cite numbers from CSV/TSV outputs with a locator of the form "row <column>=<value>[, <column>=<value>...], column <column>" and the value as written in the file: the ledger compares it with the file and refuses a mismatch (EVIDENCE_VALUE_MISMATCH).',
   'Treat each issue as work, not as a caveat: investigate it with a follow-up run and resolve it with evidence, or accept it with a reason. If a short script could check a caveat, run it.',
   'After the first global clustering, re-cluster each major compartment the tissue has on its own (for example immune, lymphoid, myeloid, stromal, endothelial, neural, epithelial or tumor) and annotate the subtypes; global clusters hide them. Check each finding in every sample and record whether it holds in all, most, or one.',
@@ -51,7 +52,7 @@ export const LEDGER_CHECKLIST_KEYS = [
   'cluster.every-label', 'cluster.canonical-markers', 'cluster.subcluster', 'explore.orthogonal-support', 'deg.replicate-aware',
   'explore.cross-sample', 'explore.anomalies', 'cellchat.limitations',
 ];
-const LEDGER_KINDS = ['decision', 'annotation', 'finding', 'issue', 'check'];
+const LEDGER_KINDS = ['decision', 'annotation', 'finding', 'issue', 'check', 'interpretation', 'prediction'];
 
 const ID = {
   project: /^[A-Za-z0-9_-]{1,80}$/,
@@ -494,6 +495,8 @@ export const TOOLS = [
       'finding: statement, confidence, sampleSupport (all|most|one|not_checked|not_applicable), optional limitations; needs evidence with a locator or value.',
       'issue: observation (opens it). Close it with a new issue entry {status: resolved|accepted, refersTo: <issue id>, resolution, evidence}.',
       `check: item (one of ${LEDGER_CHECKLIST_KEYS.join(', ')}), status (done|not_applicable|blocked), note (unless done), evidence when done.`,
+      'interpretation (after every run, before the next): observation, meaning (biological mechanism, function or state), alternatives (competing explanations, technical and biological), test (the result that would tell them apart), nextStep, confidence; needs evidence. To evaluate a prediction add refersTo and outcome (confirmed|refuted|partly|inconclusive).',
+      'prediction (before a step whose outcome matters): expectation, rationale.',
       'Append-only: a newer annotation for the same grouping and group, or a newer check for the same item, replaces the older one in the audit.',
     ].join(' '),
     {

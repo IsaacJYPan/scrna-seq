@@ -387,10 +387,10 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     return { runs: rows.map((row) => publicRun(row)), hiddenRuns: 0 };
   }
 
-  // An agent that can write the analysis ledger records what each finished
-  // run showed before it starts more work, so people watching the notebook
-  // see its reasoning as it goes rather than at the end. At most
-  // MAX_UNRECORDED_RUNS finished runs may wait for a ledger entry citing them.
+  // An agent that can write the analysis ledger interprets each finished run
+  // before it starts more work, so the analysis is steered by what each step
+  // meant and people watching the notebook see that reasoning as it goes. At
+  // most MAX_UNRECORDED_RUNS finished runs may wait for an interpretation.
   async function requireLedgerCurrent(client, actor) {
     if (!actor.delegation.capabilities?.includes('report.write')) return;
     const finished = await finishedRunsOfDelegation(actor.delegation.projectId, actor.delegation.id, client);
@@ -398,13 +398,13 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
     const { rows } = await client.query(
       `SELECT DISTINCT ref->>'sandboxRunId' AS run_id
          FROM agent_ledger_entries e, jsonb_array_elements(e.entry_json->'evidence') ref
-        WHERE e.delegation_id = $1 AND ref ? 'sandboxRunId'`, [actor.delegation.id]);
+        WHERE e.delegation_id = $1 AND e.entry_kind = 'interpretation' AND ref ? 'sandboxRunId'`, [actor.delegation.id]);
     const cited = new Set(rows.map((row) => row.run_id));
     const waiting = finished.filter((run) => !cited.has(run.id));
     if (waiting.length > MAX_UNRECORDED_RUNS) {
       const error = codedError('LEDGER_BEHIND',
-        `Record what your finished runs showed before starting another: ${waiting.length} finished run(s) are not cited by any `
-        + 'analysis ledger entry (a finding, decision, label, issue or check citing the run).', 409);
+        `Interpret your finished runs before starting another: ${waiting.length} finished run(s) have no interpretation `
+        + 'entry citing them (what it showed, what it means, alternatives, how to tell them apart, the next step).', 409);
       error.details = { runs: waiting.map((run) => ({ id: run.id, title: run.title })), allowed: MAX_UNRECORDED_RUNS };
       throw error;
     }
@@ -417,6 +417,25 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
       `${RUN_SELECT} WHERE sr.project_id = $1 AND sr.delegation_id = $2 ORDER BY sr.created_at, sr.id LIMIT 2000`,
       [String(projectId), delegationId]);
     return rows.filter((row) => runState(row) === 'draft_ready').map((row) => ({ id: row.id, title: row.title }));
+  }
+
+  // The signals tables (files ending in signals.csv) of one delegation's
+  // finished runs, for the ledger audit's check that strong signals are
+  // interpreted. Bounded to the most recent runs and the ledger table size.
+  async function signalTablesOfDelegation(projectId, delegationId, { maxRuns = 50 } = {}) {
+    const { rows } = await db.query(
+      `${RUN_SELECT} WHERE sr.project_id = $1 AND sr.delegation_id = $2 ORDER BY sr.created_at DESC, sr.id DESC LIMIT $3`,
+      [String(projectId), delegationId, maxRuns]);
+    const tables = [];
+    for (const row of rows) {
+      if (runState(row) !== 'draft_ready') continue;
+      for (const file of bundleOf(row)?.files || []) {
+        if (typeof file?.name !== 'string' || !/(^|[/_.-])signals\.csv$/.test(file.name)) continue;
+        const read = await readFile(row, file.name, { maxBytes: MAX_LEDGER_TABLE_BYTES }).catch(() => null);
+        if (read) tables.push({ runId: row.id, file: file.name, text: read.content.toString('utf8') });
+      }
+    }
+    return tables;
   }
 
   async function reviewRun(actor, projectId, runId, body = {}) {
@@ -764,7 +783,7 @@ function createSandboxService({ db, withTransaction, provider, getEnvironment, c
   return {
     create, listForHuman, getForHuman, close, reviewRun, fileForHuman,
     listForAgent, getForAgent, submitRun, getRunForAgent, fileForAgent, tableForLedger, cancelForAgent,
-    runForHuman, notebookRunsForHuman, notebookRunsForAgent, finishedRunsOfDelegation,
+    runForHuman, notebookRunsForHuman, notebookRunsForAgent, finishedRunsOfDelegation, signalTablesOfDelegation,
     listRemoteForAgent, readRemoteForAgent,
   };
 }
