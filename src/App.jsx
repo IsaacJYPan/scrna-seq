@@ -15,7 +15,6 @@ import {
   PIPELINE_PROBE_MAX_RETRIES,
   pipelineProbeAction,
   pipelineProbeRetryDelay,
-  reconcileRestoredSession,
   recordedQcThresholds,
   serverUnsavedLiveChanges,
 } from './liveRState';
@@ -30,6 +29,7 @@ import { FigureProjectProvider, FIGURE_WRITE_ROLES } from './figures/FigureProje
 import { carryTabParams } from './hooks/useTabParams';
 import { useDeploymentPolicy } from './hooks/useDeploymentPolicy';
 import { useTheme } from './hooks/useTheme';
+import { useSessionAuth } from './hooks/useSessionAuth';
 
 import {
   saveProvenance,
@@ -224,36 +224,12 @@ export default function App() {
   // and miss the saved result cache.
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
-  const [user, setUser] = useState(null);
-  const [authResolution, setAuthResolution] = useState(() => (
-    typeof window.electronAPI?.restoreSession === 'function' ? 'checking' : 'resolved'
-  ));
-  const [authRetry, setAuthRetry] = useState(0);
-  const [loggedOutNotice, setLoggedOutNotice] = useState('');
+  const {
+    user, setUser, authResolution, setAuthResolution, retryAuth, loggedOutNotice, setLoggedOutNotice,
+  } = useSessionAuth();
   const isLoggedIn = !!user;
 
   const deploymentPolicy = useDeploymentPolicy(user?.id);
-
-  // Restore auth state from the HttpOnly session cookie (source of truth) on
-  // mount, rather than trusting cached local user metadata. Keep the login form
-  // out of the initial render until the server resolves that session; an outage
-  // is retryable and does not mean the user has been signed out.
-  useEffect(() => {
-    let cancelled = false;
-    if (!window.electronAPI?.restoreSession) {
-      setAuthResolution('resolved');
-      return undefined;
-    }
-    setAuthResolution('checking');
-    window.electronAPI.restoreSession().then((restored) => {
-      if (cancelled) return;
-      setUser((currentUser) => reconcileRestoredSession(currentUser, restored));
-      setAuthResolution('resolved');
-    }).catch(() => {
-      if (!cancelled) setAuthResolution('error');
-    });
-    return () => { cancelled = true; };
-  }, [authRetry]);
 
   const [figuresCount, setFiguresCount] = useState(0);
   const [figureCollections, setFigureCollections] = useState([]);
@@ -1357,7 +1333,7 @@ export default function App() {
         ) : (
           <div className="mt-4">
             <p role="alert" className="text-sm text-textMuted">We couldn’t check your session. Check your connection and try again.</p>
-            <button type="button" className="btn btn-primary mt-5" onClick={() => setAuthRetry(value => value + 1)}>Retry</button>
+            <button type="button" className="btn btn-primary mt-5" onClick={retryAuth}>Retry</button>
           </div>
         )}
       </div>
