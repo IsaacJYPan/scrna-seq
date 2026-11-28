@@ -396,7 +396,6 @@ function validateRProxyPaths(req, res, next) {
 // client never controls the `user-{id}` prefix and cannot reach another user's
 // R state.
 const { isValidObjectIdFormat } = require('./backend/resourceIds');
-const { sendProjectResourceError } = require('./backend/projectResourceHttp');
 
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
 // reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
@@ -1161,36 +1160,8 @@ app.use('/api/projects/:projectId', projectDatasetRouter);
 // metadata does NOT gain access to another user's live R session. The opt-in
 // worker remains allowlisted and does not change this boundary.
 
-
-app.get('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
-  try {
-    res.json(await db.listProjectPipelineDefinitions(req.user.id, req.params.projectId));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectPipelines');
-  }
-});
-
-app.get('/api/projects/:projectId/pipeline-selection', async (req, res) => {
-  try {
-    res.json(await db.getProjectPipelineSelection(req.user.id, req.params.projectId));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectPipelines');
-  }
-});
-
-app.put('/api/projects/:projectId/pipeline-selection', async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-  if (body.projectId !== undefined || body.project_id !== undefined
-      || body.userId !== undefined || body.user_id !== undefined
-      || body.ownerUserId !== undefined || body.owner_user_id !== undefined) {
-    return res.status(400).json({ error: 'Pipeline selection scope is server-controlled.' });
-  }
-  try {
-    res.json(await db.setProjectPipelineSelection(req.user.id, req.params.projectId, body.pipelineId));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectPipelines');
-  }
-});
+// Project pipeline definitions and selection (backend/projectPipelineRoutes.js).
+app.use('/api/projects/:projectId', require('./backend/projectPipelineRoutes').projectPipelineRoutes({ db }));
 
 // Project-scoped analysis objects and lineage (backend/projectAnalysisObjectRoutes.js).
 app.use('/api/projects/:projectId', require('./backend/projectAnalysisObjectRoutes').projectAnalysisObjectRoutes({ db }));
