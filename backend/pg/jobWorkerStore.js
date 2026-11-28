@@ -236,7 +236,7 @@ function createJobWorkerStore({
     if (row.job_type === 'condition.pseudobulk_de.v1') {
       contrastId = validateConditionComparisonParams(parseJson(row.parameters_json, {})).params.contrastId;
     } else if (row.job_type === 'explore.summarize.v1') {
-      const { CONTRAST_RECIPES, validateExploratoryAnalysisParams } = require('./exploratoryAnalysis');
+      const { CONTRAST_RECIPES, validateExploratoryAnalysisParams } = require('../exploratoryAnalysis');
       const { params } = validateExploratoryAnalysisParams(parseJson(row.parameters_json, {}));
       if (!CONTRAST_RECIPES.includes(params.recipe)) {
         throw codedError('INVALID_JOB_TYPE', 'This exploratory recipe does not test a condition contrast.');
