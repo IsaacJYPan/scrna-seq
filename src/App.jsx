@@ -29,6 +29,8 @@ import { FigureProjectProvider, FIGURE_WRITE_ROLES } from './figures/FigureProje
 import { carryTabParams } from './hooks/useTabParams';
 import { useDeploymentPolicy } from './hooks/useDeploymentPolicy';
 import { useTheme } from './hooks/useTheme';
+import { useComputeStatus } from './hooks/useComputeStatus';
+import { useFigureGallerySummary } from './hooks/useFigureGallerySummary';
 import { useSessionAuth } from './hooks/useSessionAuth';
 
 import {
@@ -231,34 +233,17 @@ export default function App() {
 
   const deploymentPolicy = useDeploymentPolicy(user?.id);
 
-  const [figuresCount, setFiguresCount] = useState(0);
-  const [figureCollections, setFigureCollections] = useState([]);
   const [figureRefreshToken, setFigureRefreshToken] = useState(0);
   const [figureProjectId, setFigureProjectId] = useState(null);
 
   // Refresh the gallery badge on login, when entering/leaving the Figure
   // Gallery, and after a save, rather than on every unrelated tab navigation.
-  // Within a project the badge and collection suggestions come from the
-  // project's shared gallery; otherwise from the private gallery.
   const onPublicationTab = activeTab === 'publication';
-  useEffect(() => {
-    if (!user?.email) return undefined;
-    let cancelled = false;
-    const api = window.electronAPI;
-    const load = figureProjectId && api?.listProjectFigures
-      ? api.listProjectFigures(figureProjectId)
-      : api?.getFigures?.(user.email);
-    if (!load) return undefined;
-    load.then((figures) => {
-      if (cancelled) return;
-      const list = Array.isArray(figures) ? figures : [];
-      setFiguresCount(list.length);
-      setFigureCollections([...new Set(list.map((figure) => figure.collection).filter(Boolean))].sort());
-    }).catch(err => {
-      if (!cancelled && err.status !== 401) console.error('[App] Failed to load figures count:', err);
-    });
-    return () => { cancelled = true; };
-  }, [onPublicationTab, user?.email, figureProjectId, figureRefreshToken]);
+  const { figuresCount, figureCollections } = useFigureGallerySummary({
+    userEmail: user?.email,
+    projectId: figureProjectId,
+    refreshKey: `${onPublicationTab}:${figureRefreshToken}`,
+  });
 
   // Local workspace shell. Backend projects/analysis objects are loaded after
   // login; localStorage is no longer a durable project/object source.
@@ -305,7 +290,7 @@ export default function App() {
   });
 
   const [apiStatus, setApiStatus] = useState('Checking backend');
-  const [computeStatus, setComputeStatus] = useState({ status: 'unknown', updatedAt: null });
+  const computeStatus = useComputeStatus(user?.email);
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
   // Session provenance id -> project provenance id, so the project history
@@ -332,28 +317,6 @@ export default function App() {
     window.electronAPI.apiRequest('/health')
       .then(data => setApiStatus(data?.error ? 'Backend disconnected' : (data?.mode || 'R/Seurat runtime connected')))
       .catch(() => setApiStatus('Backend disconnected'));
-  }, [user?.email]);
-
-  useEffect(() => {
-    if (!user?.email || typeof window.electronAPI?.getComputeRuntimeStatus !== 'function') {
-      setComputeStatus({ status: 'unknown', updatedAt: null });
-      return undefined;
-    }
-    let active = true;
-    const refreshComputeStatus = async () => {
-      try {
-        const next = await window.electronAPI.getComputeRuntimeStatus();
-        if (active) setComputeStatus(next);
-      } catch {
-        if (active) setComputeStatus({ status: 'unknown', updatedAt: null });
-      }
-    };
-    void refreshComputeStatus();
-    const intervalId = window.setInterval(refreshComputeStatus, 5000);
-    return () => {
-      active = false;
-      window.clearInterval(intervalId);
-    };
   }, [user?.email]);
 
   const updateActiveWorkspace = useCallback((updates) => {
