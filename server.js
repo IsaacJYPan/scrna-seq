@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const { createProxyServer } = require('httpxy');
 const multer = require('multer');
-const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -26,7 +25,6 @@ const {
   deriveRObjectStateKey,
   deriveRStateKey,
 } = require('./backend/rStateKeys');
-const { parseJobWorkerConfig } = require('./backend/jobWorker');
 
 // Validate the executable web role before resolving R configuration, creating
 // directories, opening Postgres, or binding a socket. Importing the module in
@@ -51,6 +49,13 @@ const SUPPORTED_R_TARGET = 'R 4.5.x';
 
 // Plumber auth token
 const API_TOKEN = R_RUNTIME_CONFIG.token;
+const {
+  findRscript, probeRHealth, buildRuntimeDiagnostics, toPublicRuntimeDiagnostics,
+  startPlumber, startWebRBackend, waitForOwnedRHealth,
+} = require('./backend/rPlumberProcess').createRPlumberRuntime({
+  rRuntimeConfig: R_RUNTIME_CONFIG, apiToken: API_TOKEN, plumberPort: PLUMBER_PORT,
+  supportedTarget: SUPPORTED_R_TARGET, appRoot: __dirname,
+});
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 if (!process.env.SESSION_SECRET && process.env.NODE_ENV === 'production') {
   throw new Error('SESSION_SECRET must be set in production.');
@@ -1302,361 +1307,12 @@ if (fs.existsSync(distPath)) {
   });
 }
 
-// ── Launch R Plumber ────────────────────────────────────────────────────
-let activeRscriptDiagnostic = null;
-
-function findRscript(env = process.env) {
-  const configured = (env.RSCRIPT_PATH || env.RSCRIPT || '').trim();
-  if (configured) {
-    return {
-      path: configured,
-      source: env.RSCRIPT_PATH ? 'RSCRIPT_PATH' : 'RSCRIPT',
-      exists: path.isAbsolute(configured) ? fs.existsSync(configured) : null
-    };
-  }
-  return { path: 'Rscript', source: 'PATH', exists: null };
-}
-
-function normalizeRVersion(value) {
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
-  if (!text) return null;
-  const versionMatch = text.match(/(\d+\.\d+(?:\.\d+)?)/);
-  return versionMatch ? versionMatch[1] : text;
-}
-
-async function probeRHealth(timeoutMs = 750) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${R_RUNTIME_CONFIG.baseUrl}/health`, {
-      headers: { 'X-API-Token': API_TOKEN, Accept: 'application/json' },
-      signal: controller.signal
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = new Error(data.error || `R health returned ${res.status}`);
-      err.status = res.status;
-      throw err;
-    }
-    return data;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function buildRuntimeDiagnostics() {
-  const detectedRscript = activeRscriptDiagnostic || findRscript();
-  const diagnostics = {
-    supportedTarget: SUPPORTED_R_TARGET,
-    rscript: detectedRscript,
-    runtime: {
-      status: 'unavailable',
-      mode: null,
-      rVersion: null
-    },
-    packages: {}
-  };
-
-  try {
-    const health = await probeRHealth();
-    diagnostics.runtime = {
-      status: health.status || 'ok',
-      mode: health.mode || null,
-      rVersion: normalizeRVersion(health.r_version || health.rVersion || health.version)
-    };
-    diagnostics.packages = health.packages || {};
-  } catch (err) {
-    diagnostics.runtime.error = err.name === 'AbortError' ? 'R runtime health probe timed out.' : 'R runtime health probe unavailable.';
-  }
-
-  return diagnostics;
-}
-
-function toPublicRuntimeDiagnostics(diagnostics) {
-  const runtime = diagnostics && typeof diagnostics.runtime === 'object' ? diagnostics.runtime : {};
-  const status = ['ok', 'ready'].includes(runtime.status) ? runtime.status : 'unavailable';
-  return {
-    supportedTarget: typeof diagnostics?.supportedTarget === 'string'
-      ? diagnostics.supportedTarget : SUPPORTED_R_TARGET,
-    runtime: {
-      status,
-      rVersion: normalizeRVersion(runtime.rVersion),
-    },
-  };
-}
-
-function startPlumber(options = {}) {
-  const logger = options.logger || console;
-  const spawnFn = options.spawn || spawn;
-  activeRscriptDiagnostic = findRscript();
-  const rscript = activeRscriptDiagnostic.path;
-  const plumberScript = path.join(__dirname, 'r-backend', 'run.R');
-
-  let readySettled = false;
-  let resolveReady;
-  let rejectReady;
-  const ready = new Promise((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
-
-  const resolveReadyOnce = () => {
-    if (readySettled) return;
-    readySettled = true;
-    resolveReady();
-  };
-  const rejectReadyOnce = (message) => {
-    if (readySettled) return;
-    readySettled = true;
-    rejectReady(new Error(message));
-  };
-  
-  const rProcess = spawnFn(rscript, [plumberScript], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: rRuntime.buildRChildEnv(process.env, {
-      token: API_TOKEN,
-      port: PLUMBER_PORT,
-      storageRoot: config.storageRoot(),
-      analysisRoot: __dirname,
-    })
-  });
-
-  rProcess.ready = ready;
-  rProcess.stdout.on('data', d => {
-    const text = d.toString().trim();
-    if (typeof logger.log === 'function') logger.log(`[R] ${text}`);
-    else if (typeof logger.info === 'function') logger.info(`[R] ${text}`);
-    if (/Plumber API running/i.test(text)) resolveReadyOnce();
-  });
-  rProcess.stderr.on('data', d => {
-    const text = d.toString().trim();
-    if (typeof logger.log === 'function') logger.log(`[R:err] ${text}`);
-    else if (typeof logger.warn === 'function') logger.warn(`[R:err] ${text}`);
-    if (/address already in use|Failed to create server/i.test(text)) {
-      rejectReadyOnce('R backend failed to bind its configured port.');
-    }
-  });
-  rProcess.on('close', code => {
-    if (typeof logger.log === 'function') logger.log(`R process exited with code ${code}`);
-    else if (typeof logger.info === 'function') logger.info(`R process exited with code ${code}`);
-    rejectReadyOnce('R backend exited before it became ready.');
-  });
-
-  // If Rscript cannot be spawned at all (e.g. not installed, or a bad
-  // RSCRIPT_PATH), the child emits an 'error' event. Without a listener that
-  // event is thrown as an uncaught exception and takes down the whole web
-  // server. The app is designed to run degraded when R is unavailable (runtime
-  // diagnostics report R as unavailable and R suites skip), so log a clear,
-  // actionable message and keep the Express server alive instead of crashing.
-  rProcess.on('error', (err) => {
-    logger.error(
-      `[R] Failed to launch R Plumber backend via ${activeRscriptDiagnostic.source} ` +
-      `("${rscript}"): ${err.message}`
-    );
-    logger.error(
-      '[R] The web server will keep running, but R-backed analysis and /api/r/* ' +
-      'will be unavailable until R is reachable. Install R 4.5.x + Seurat, or set ' +
-      'RSCRIPT_PATH to a valid Rscript. Runtime diagnostics will report R as unavailable.'
-    );
-    rejectReadyOnce('R backend process could not be launched.');
-  });
-
-  process.on('exit', () => rProcess.kill());
-  // Avoid an unhandled rejection when startPlumber is used in degraded mode without
-  // awaiting readiness. Callers that gate worker startup still await rProcess.ready.
-  ready.catch(() => {});
-  return rProcess;
-}
-
-function startWebRBackend(options = {}) {
-  const logger = options.logger || console;
-  if (R_RUNTIME_CONFIG.mode === 'external') {
-    if (typeof logger.info === 'function') {
-      logger.info('[R] Using configured private external R runtime; the web process will not spawn R.');
-    }
-    return null;
-  }
-  return (options.startPlumber || startPlumber)({ logger });
-}
-
-async function startRBackendAndJobWorkerIfEnabled(env = process.env, deps = {}) {
-  const logger = deps.logger || console;
-  const rProcess = (deps.startPlumber || startPlumber)({ logger });
-  const config = parseJobWorkerConfig(env, { logger });
-  if (!config.enabled) {
-    if (typeof logger.info === 'function') {
-      logger.info('[worker] Job worker disabled. Set ENABLE_JOB_WORKER=true to drain durable jobs.');
-    }
-    return { rProcess, worker: null };
-  }
-
-  try {
-    if (!rProcess || !rProcess.ready || typeof rProcess.ready.then !== 'function') {
-      throw new Error('R backend readiness signal is unavailable.');
-    }
-    await rProcess.ready;
-    await waitForOwnedRHealth(deps.probeRHealth || probeRHealth, {
-      logger,
-      timeoutMs: deps.rHealthTimeoutMs,
-      intervalMs: deps.rHealthIntervalMs,
-    });
-  } catch {
-    if (typeof logger.error === 'function') {
-      logger.error('[worker] Job worker not started because the owned R backend is not ready. Check PLUMBER_PORT conflicts and R startup logs.');
-    }
-    return { rProcess, worker: null };
-  }
-
-  return { rProcess, worker: startJobWorkerIfEnabled(env, deps) };
-}
-
-async function waitForOwnedRHealth(probe = probeRHealth, opts = {}) {
-  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 30000;
-  const intervalMs = Number(opts.intervalMs) > 0 ? Number(opts.intervalMs) : 500;
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  do {
-    try {
-      const health = await probe();
-      if (health && health.status === 'ok') return health;
-      lastError = new Error('R backend health check did not return ok.');
-    } catch (err) {
-      lastError = err;
-    }
-    if (Date.now() >= deadline) break;
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
-  } while (Date.now() < deadline);
-  throw lastError || new Error('R backend health check failed.');
-}
-
-// ── Job worker (conservative, opt-in) ────────────────────────────────────────
-// Disabled by default. The minimal drain loop only runs when ENABLE_JOB_WORKER is
-// explicitly the string "true", so local/dev and tests stay worker-free unless they
-// ask for it. It processes only registered handlers; arbitrary job types fail
-// terminally instead of becoming dynamic R execution. See backend/jobWorker.js.
-//
-// Config parsing (parseJobWorkerConfig) is deterministic: invalid poll/lease values
-// fall back to documented defaults with a sanitized warning, and any ENABLE_JOB_WORKER
-// value other than exact "true" means disabled.
-
-// How long shutdown waits for an in-flight worker tick to settle before giving up.
-// Small + bounded so process shutdown never hangs forever on a stuck worker.
-const WORKER_SHUTDOWN_TIMEOUT_MS = 10000;
-
-let jobWorker = null;
-
-/**
- * Start the opt-in worker if (and only if) the environment enables it. Idempotent:
- * at most one worker loop exists at a time — a second call while a worker is live
- * returns the existing worker instead of spawning a duplicate loop. Returns the
- * worker, or null when disabled.
- *
- * @param {object} env   environment-like object (defaults to process.env)
- * @param {object} deps  test seams: { createJobWorker, db, logger }
- */
-function startJobWorkerIfEnabled(env = process.env, deps = {}) {
-  if (jobWorker) return jobWorker; // never create a duplicate loop
-  const logger = deps.logger || console;
-  const config = parseJobWorkerConfig(env, { logger });
-  if (!config.enabled) return null;
-  const { createLanedJobWorker, createJobWorker } = require('./backend/jobWorker');
-  const baseCreate = deps.createJobWorker || createJobWorker;
-  // Slurm jobs run on their own worker loops so a cluster wait never blocks local work.
-  const create = (options) => createLanedJobWorker(options, { env, create: baseCreate });
-  // Wire the in-process worker to the local R backend so the r.runtime.check bridge
-  // handler can reach it. We build the narrow R caller HERE and pass it as a function
-  // (a closure over the secret), so the API token is NEVER placed as a plain field on
-  // the worker options object — a function value carries no serializable secret. The
-  // worker still runs ONLY the allowlisted, metadata-only R operation through it.
-  const callR = require('./backend/rWorkerBridge').createDefaultRCaller({ port: PLUMBER_PORT, token: API_TOKEN });
-  const worker = create({
-    db: deps.db || db,
-    pollIntervalMs: config.pollIntervalMs,
-    leaseSeconds: config.leaseSeconds,
-    callR,
-    // Inject the canonical, server-only R state-key deriver so the read-only
-    // r.object.inspect handler derives the SAME X-Object-ID the /api/r/* proxy would.
-    // The client never controls this key (the user-prefix is server-derived).
-    deriveRObjectStateKey,
-    logger,
-  });
-  worker.start();
-  jobWorker = worker;
-  if (typeof logger.info === 'function') {
-    logger.info(`[worker] Job worker started (id=${worker.workerId}).`);
-  }
-  return worker;
-}
-
-/** Stop the active worker (if any) and clear the singleton. Safe to call with no
- *  worker present and safe to call twice. Returns the worker's stop() promise, or
- *  undefined when there was nothing to stop. */
-function stopJobWorker() {
-  if (jobWorker) {
-    const stopping = jobWorker.stop();
-    jobWorker = null;
-    return stopping;
-  }
-  return undefined;
-}
-
-/**
- * Graceful shutdown: await the worker's stop()/cleanup (bounded by a timeout so we
- * never hang forever), then stop accepting new connections, then exit. Used by the
- * SIGINT/SIGTERM handlers. Extracted + dependency-injected so the shutdown ordering
- * is directly testable without real signals.
- *
- * @param {object}   args
- * @param {object}   [args.server]    http.Server to close (best-effort; preserves the
- *                                    prior exit-driven teardown — exit still tears it
- *                                    down even if close() is slow).
- * @param {object}   [args.worker]    worker with an async stop(); if omitted, no wait.
- * @param {object}   [args.logger]    { warn, error, … } (default console).
- * @param {number}   [args.timeoutMs] max ms to wait for worker stop (default above).
- * @param {function} [args.exit]      process.exit seam (default process.exit).
- * @returns {Promise<number>} the exit code used (0 ok, 1 if worker stop failed/timed out).
- */
-async function shutdownJobWorkerAndServer(args = {}) {
-  const { server, worker } = args;
-  const logger = args.logger || console;
-  const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : WORKER_SHUTDOWN_TIMEOUT_MS;
-  const exit = typeof args.exit === 'function' ? args.exit : (code) => process.exit(code);
-  let exitCode = 0;
-
-  // 1. Wait for the worker to stop, bounded by a timeout so a stuck tick cannot wedge
-  //    shutdown. The timer is always cleared (finally) so no timer is leaked.
-  if (worker && typeof worker.stop === 'function') {
-    let timer = null;
-    try {
-      const stopped = Promise.resolve().then(() => worker.stop());
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(Object.assign(new Error('Worker stop timed out.'), { code: 'WORKER_STOP_TIMEOUT' })),
-          timeoutMs
-        );
-      });
-      await Promise.race([stopped, timeout]);
-    } catch (err) {
-      // Sanitized: code only, never a stack/message that could carry internals.
-      const code = err && err.code ? err.code : 'error';
-      if (typeof logger.error === 'function') {
-        logger.error(`[worker] shutdown: worker stop failed (${code}); exiting non-zero.`);
-      }
-      exitCode = 1;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  // 2. Stop accepting new connections (best-effort; exit finishes teardown).
-  if (server && typeof server.close === 'function') {
-    try { server.close(); } catch { /* best-effort; exit tears it down */ }
-  }
-
-  exit(exitCode);
-  return exitCode;
-}
+const {
+  startJobWorkerIfEnabled, stopJobWorker, shutdownJobWorkerAndServer, startRBackendAndJobWorkerIfEnabled,
+} = require('./backend/embeddedJobWorker').createEmbeddedJobWorker({
+  db, plumberPort: PLUMBER_PORT, apiToken: API_TOKEN, deriveRObjectStateKey,
+  startPlumber, probeRHealth, waitForOwnedRHealth,
+});
 
 // Start Server
 if (require.main === module) {
