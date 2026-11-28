@@ -437,7 +437,7 @@ function validateRProxyPaths(req, res, next) {
 // client never controls the `user-{id}` prefix and cannot reach another user's
 // R state.
 const { isValidObjectIdFormat, isValidDatasetIdFormat } = require('./backend/resourceIds');
-const { REJECTED_OWNER_FIELDS, sendProjectResourceError } = require('./backend/projectResourceHttp');
+const { sendProjectResourceError } = require('./backend/projectResourceHttp');
 
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
 // reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
@@ -1024,54 +1024,9 @@ app.use('/api/auth', require('./backend/authRoutes').authRoutes({
 // backend detects; it does not let browser clients choose an executable path.
 app.use('/api/runtime', express.json());
 app.use('/api/runtime', requireAuth);
-app.get('/api/runtime/readiness', async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  const projectId = req.query.projectId;
-  if (projectId !== undefined && (typeof projectId !== 'string' || !/^proj_[A-Za-z0-9_-]{3,128}$/.test(projectId))) {
-    return res.status(400).json({ error: 'A valid project id is required.' });
-  }
-  try {
-    // Entitlement and membership are deliberately outside the shared probe
-    // cache. A fresh request must reflect revocation or a changed project role.
-    if (projectId && !(await db.getProjectForUser(projectId, req.user.id))) {
-      return res.status(404).json({ error: 'Project not found.' });
-    }
-    return res.json(await runtimeReadiness.inspect({ resolveAccess: async () => {
-      const access = await db.getExpertRCapabilities(req.user.id, projectId || null);
-      if (projectId && !(await db.getProjectForUser(projectId, req.user.id))) {
-        throw Object.assign(new Error('Project not found.'), { code: 'READINESS_PROJECT_NOT_FOUND' });
-      }
-      return { canExecuteExpertR: access.canExecuteExpertR,
-        revoked: access.expertRAccessRevoked, demoMode: config.demoMode() };
-    } }));
-  } catch (error) {
-    if (error?.code === 'READINESS_PROJECT_NOT_FOUND') return res.status(404).json({ error: 'Project not found.' });
-    console.error('[Runtime] Readiness observation unavailable.');
-    return res.status(503).json({ error: 'Server readiness could not be checked.' });
-  }
-});
-app.get('/api/runtime/diagnostics', async (req, res) => {
-  try {
-    const diagnostics = await buildRuntimeDiagnostics();
-    res.json(toPublicRuntimeDiagnostics(diagnostics));
-  } catch (err) {
-    console.error('[Diagnostics] Runtime diagnostics failed:', err);
-    res.status(500).json({ error: 'Runtime diagnostics failed' });
-  }
-});
-
-// Compute availability is projected from a short-lived DB heartbeat written by
-// the standalone worker. Do not proxy the private worker health port or expose
-// worker ids, paths, topology, R URLs, or raw errors to browser clients.
-app.get('/api/runtime/compute-status', async (req, res) => {
-  try {
-    const status = await db.getStandaloneWorkerRuntimeStatus();
-    res.json(status);
-  } catch {
-    console.error('[Runtime] Compute status unavailable.');
-    res.status(503).json({ status: 'unknown', updatedAt: null });
-  }
-});
+app.use('/api/runtime', require('./backend/runtimeRoutes').runtimeRoutes({
+  db, config, runtimeReadiness, buildRuntimeDiagnostics, toPublicRuntimeDiagnostics,
+}));
 
 app.use('/api/db', provenanceRoutes({ db, requireAuth }));
 
@@ -1081,83 +1036,7 @@ app.use('/api/db', provenanceRoutes({ db, requireAuth }));
 app.use('/api/analysis-objects', express.json());
 app.use('/api/analysis-objects', requireAuth);
 
-const { rejectAnalysisObjectStorageFields } = require('./backend/analysisObjectFields');
-
-app.post('/api/analysis-objects', async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-
-  // Compatibility surface for genuinely private, projectless objects only.
-  // Project data must use /api/projects/:projectId/analysis-objects so creator
-  // identity can never bypass current project membership.
-
-  // Object ids are server-issued. Reject any client attempt to choose one.
-  if (body.id !== undefined) {
-    return res.status(400).json({ error: 'Object id is server-assigned and must not be provided.' });
-  }
-  // Ownership is derived from the session only — never from the request body.
-  for (const field of REJECTED_OWNER_FIELDS) {
-    if (body[field] !== undefined) {
-      return res.status(400).json({ error: `Field '${field}' is not allowed; ownership is derived from the session.` });
-    }
-  }
-  if (rejectAnalysisObjectStorageFields(body, res)) return;
-
-  // Validate linked-resource ownership before creating anything. 404 (not 403)
-  // so we never reveal that another user's resource exists.
-  if (body.parentObjectId !== undefined && body.parentObjectId !== null) {
-    if (typeof body.parentObjectId !== 'string' || !(await db.getPrivateAnalysisObjectForUser(body.parentObjectId, req.user.id))) {
-      return res.status(404).json({ error: 'Parent analysis object not found.' });
-    }
-  }
-  if (body.createdByProvenanceId !== undefined && body.createdByProvenanceId !== null) {
-    if (typeof body.createdByProvenanceId !== 'string' || !(await db.getProvenance(body.createdByProvenanceId, req.user.email))) {
-      return res.status(404).json({ error: 'Provenance record not found.' });
-    }
-  }
-  // Durable datasets are project-scoped and therefore unavailable here. Keep a
-  // distinct 400 for malformed ids; any well-formed id is resolved as 404 by the
-  // private-scope DB helper.
-  if (body.datasetId !== undefined && body.datasetId !== null) {
-    if (!isValidDatasetIdFormat(body.datasetId)) {
-      return res.status(400).json({ error: 'Malformed dataset ID.' });
-    }
-  }
-  try {
-    const created = await db.createPrivateAnalysisObjectForUser(req.user.id, {
-      datasetId: body.datasetId,
-      parentObjectId: body.parentObjectId,
-      objectType: body.objectType,
-      displayName: body.displayName,
-      metadata: body.metadata,
-      createdByProvenanceId: body.createdByProvenanceId
-    });
-    res.status(201).json(db.toPublicAnalysisObject(created));
-  } catch (e) {
-    if (e.code === 'PARENT_NOT_FOUND' || e.code === 'DATASET_NOT_FOUND') return res.status(404).json({ error: e.message });
-    if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message });
-    if (['INVALID_OBJECT_TYPE', 'INVALID_METADATA', 'INVALID_OWNER'].includes(e.code)) {
-      return res.status(400).json({ error: e.message });
-    }
-    console.error('[AnalysisObjects] Create failed:', e);
-    res.status(500).json({ error: 'Failed to create analysis object.' });
-  }
-});
-
-app.get('/api/analysis-objects', async (req, res) => {
-  const filters = {
-    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
-    parentObjectId: typeof req.query.parentObjectId === 'string' ? req.query.parentObjectId : undefined,
-    lineageRootId: typeof req.query.lineageRootId === 'string' ? req.query.lineageRootId : undefined,
-    objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
-  };
-  res.json((await db.listPrivateAnalysisObjectsForUser(req.user.id, filters)).map(db.toPublicAnalysisObject));
-});
-
-app.get('/api/analysis-objects/:id', async (req, res) => {
-  const obj = await db.getPrivateAnalysisObjectForUser(req.params.id, req.user.id);
-  if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
-  res.json(db.toPublicAnalysisObject(obj));
-});
+app.use('/api/analysis-objects', require('./backend/privateResourceRoutes').privateAnalysisObjectRoutes({ db }));
 
 // ── Jobs API ────────────────────────────────────────────────────────────
 // Legacy compatibility API for private, projectless jobs. Project jobs use the
@@ -1166,96 +1045,7 @@ app.get('/api/analysis-objects/:id', async (req, res) => {
 app.use('/api/jobs', express.json());
 app.use('/api/jobs', requireAuth);
 
-app.post('/api/jobs', async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-
-  // Receipt-backed scientific jobs require project-scoped durable storage and
-  // recovery authorization. Do not accept them through this legacy projectless
-  // compatibility route only to fail later in the worker.
-  if (db.RETRYABLE_DURABLE_JOB_TYPES.has(body.jobType)) {
-    return res.status(400).json({
-      error: 'This durable scientific job type requires the project-scoped jobs API.',
-    });
-  }
-
-  // Job ids are server-issued. Reject any client attempt to choose one.
-  if (body.id !== undefined) {
-    return res.status(400).json({ error: 'Job id is server-assigned and must not be provided.' });
-  }
-  // Ownership is derived from the session only — never from the request body.
-  for (const field of REJECTED_OWNER_FIELDS) {
-    if (body[field] !== undefined) {
-      return res.status(400).json({ error: `Field '${field}' is not allowed; ownership is derived from the session.` });
-    }
-  }
-  // Status is server-managed; a client cannot pick the initial status.
-  if (body.status !== undefined) {
-    return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
-  }
-  if (body.retryOfJobId !== undefined || body.retry_of_job_id !== undefined) {
-    return res.status(400).json({ error: 'Job retry linkage is server-managed and must not be provided.' });
-  }
-  // Durable datasets are project-scoped and therefore unavailable here. Keep a
-  // distinct 400 for malformed ids; well-formed ids resolve as 404 below.
-  if (body.datasetId !== undefined && body.datasetId !== null) {
-    if (!isValidDatasetIdFormat(body.datasetId)) {
-      return res.status(400).json({ error: 'Malformed dataset ID.' });
-    }
-  }
-
-  try {
-    const created = await db.createPrivateJobForUser(req.user.id, {
-      analysisObjectId: body.analysisObjectId,
-      datasetId: body.datasetId,
-      jobType: body.jobType,
-      parameters: body.parameters
-    });
-    res.status(201).json(db.toPublicJob(created));
-  } catch (e) {
-    if (e.code === 'ANALYSIS_OBJECT_NOT_FOUND' || e.code === 'DATASET_NOT_FOUND') return res.status(404).json({ error: e.message });
-    if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message });
-    if (['INVALID_JOB_TYPE', 'INVALID_PARAMETERS', 'INVALID_OWNER'].includes(e.code)) {
-      return res.status(400).json({ error: e.message });
-    }
-    console.error('[Jobs] Create failed:', e);
-    res.status(500).json({ error: 'Failed to create job.' });
-  }
-});
-
-app.get('/api/jobs', async (req, res) => {
-  const filters = {
-    status: typeof req.query.status === 'string' ? req.query.status : undefined,
-    jobType: typeof req.query.jobType === 'string' ? req.query.jobType : undefined,
-    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
-    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
-  };
-  res.json((await db.listPrivateJobsForUser(req.user.id, filters)).map(db.toPublicJob));
-});
-
-app.get('/api/jobs/:id', async (req, res) => {
-  const job = await db.getPrivateJobForUser(req.params.id, req.user.id);
-  if (!job) return res.status(404).json({ error: 'Job not found.' });
-  res.json(db.toPublicJob(job));
-});
-
-app.get('/api/jobs/:id/logs', async (req, res) => {
-  const job = await db.getPrivateJobForUser(req.params.id, req.user.id);
-  if (!job) return res.status(404).json({ error: 'Job not found.' });
-  const publicJob = db.toPublicJob(job);
-  res.json({ id: publicJob.id, status: publicJob.status, logs: publicJob.logs, error: publicJob.error });
-});
-
-app.post('/api/jobs/:id/cancel', async (req, res) => {
-  try {
-    const job = await db.cancelPrivateJobForUser(req.user.id, req.params.id);
-    res.json(db.toPublicJob(job));
-  } catch (e) {
-    if (e.code === 'JOB_NOT_FOUND') return res.status(404).json({ error: e.message });
-    if (e.code === 'JOB_NOT_CANCELABLE') return res.status(409).json({ error: e.message });
-    console.error('[Jobs] Cancel failed:', e);
-    res.status(500).json({ error: 'Failed to cancel job.' });
-  }
-});
+app.use('/api/jobs', require('./backend/privateResourceRoutes').privateJobRoutes({ db }));
 
 // ── Organizations & Projects API ────────────────────────────────────────
 // The first durable org/project authorization layer. Ids, owner, and role are
